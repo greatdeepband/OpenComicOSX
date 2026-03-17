@@ -1,85 +1,93 @@
 import SwiftUI
 import AppKit
 
-/// A circular magnifier loupe that renders a 1.3× crop of the source image
-/// centred on the cursor position. Activated by right-click hold.
+/// Circular magnifier loupe — renders a 1.3× crop of `image` centred on `cursorInImageView`.
+///
+/// Coordinate contract:
+/// - `cursorInImageView`: point in the fitted-image's own coordinate space
+///   (origin = top-left of the image as rendered on screen, in screen points).
+/// - `imageViewSize`: the rendered size of the image on screen in screen points.
 struct MagnifierView: View {
     let image: NSImage
-    /// Cursor position in the coordinate space of the image view (0…viewSize).
-    let cursorPosition: CGPoint
-    /// The rendered size of the image on screen (after scale/fit).
+    /// Cursor position in image-view space (screen points, top-left origin).
+    let cursorInImageView: CGPoint
+    /// Rendered size of the image on screen (screen points).
     let imageViewSize: CGSize
-    /// Current reader zoom scale — used to map screen coords back to image coords.
-    let readerScale: CGFloat
 
-    // Loupe appearance
     private let loupeRadius: CGFloat = 90
     private let magnification: CGFloat = 1.3
     private let borderWidth: CGFloat = 2.5
-    private let shadowRadius: CGFloat = 8
 
     var body: some View {
+        loupeContent
+            .frame(width: loupeRadius * 2, height: loupeRadius * 2)
+            .clipShape(Circle())
+            .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: borderWidth))
+            .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 3)
+    }
+
+    // Use NSImage drawing — avoids CGImage Retina scaling issues entirely.
+    private var loupeContent: some View {
         Canvas { ctx, size in
-            // 1. Clip to circle
-            let circle = Path(ellipseIn: CGRect(origin: .zero, size: size))
-            ctx.clip(to: circle)
+            guard imageViewSize.width > 0, imageViewSize.height > 0 else { return }
 
-            // 2. Compute the source rect in image pixels
-            let imgSize = image.size
-            guard imgSize.width > 0, imgSize.height > 0,
-                  imageViewSize.width > 0, imageViewSize.height > 0 else { return }
+            // How many screen-point pixels of the image fit in the loupe at this magnification.
+            // loupeRadius*2 screen points show (loupeRadius*2 / magnification) image-view points.
+            let srcW = (size.width  / magnification)
+            let srcH = (size.height / magnification)
 
-            // Scale factors: screen pixels → image pixels
-            let scaleX = imgSize.width  / imageViewSize.width
-            let scaleY = imgSize.height / imageViewSize.height
-
-            // Centre of the loupe in image-pixel space
-            let imgCX = cursorPosition.x * scaleX
-            let imgCY = cursorPosition.y * scaleY
-
-            // How many image pixels fit inside the loupe at magnification
-            let srcW = (loupeRadius * 2) / magnification * scaleX
-            let srcH = (loupeRadius * 2) / magnification * scaleY
-
+            // Source rect in image-view space (screen points, top-left origin).
             let srcRect = CGRect(
-                x: imgCX - srcW / 2,
-                y: imgCY - srcH / 2,
+                x: cursorInImageView.x - srcW / 2,
+                y: cursorInImageView.y - srcH / 2,
                 width: srcW,
                 height: srcH
             )
 
-            // 3. Draw the cropped region stretched to fill the loupe
-            if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                // Flip coordinate system (NSImage is flipped vs CGImage)
-                ctx.withCGContext { cgCtx in
-                    cgCtx.saveGState()
-                    cgCtx.translateBy(x: 0, y: size.height)
-                    cgCtx.scaleBy(x: 1, y: -1)
+            // Clamp to image-view bounds so we don't sample outside the image.
+            let ivBounds = CGRect(origin: .zero, size: imageViewSize)
+            let clamped = srcRect.intersection(ivBounds)
+            guard !clamped.isNull, clamped.width > 0, clamped.height > 0 else { return }
 
-                    let destRect = CGRect(origin: .zero, size: size)
+            // Convert image-view-space rect → normalised (0…1) → NSImage source rect.
+            // NSImage draws with bottom-left origin, so flip Y.
+            let imgSize = image.size
+            let normX = clamped.minX / imageViewSize.width
+            let normY = clamped.minY / imageViewSize.height
+            let normW = clamped.width  / imageViewSize.width
+            let normH = clamped.height / imageViewSize.height
 
-                    // Clamp srcRect to image bounds
-                    let imgBounds = CGRect(origin: .zero, size: imgSize)
-                    let clampedSrc = srcRect.intersection(imgBounds)
-                    guard !clampedSrc.isNull else {
-                        cgCtx.restoreGState()
-                        return
-                    }
+            // NSImage source rect (bottom-left origin)
+            let imgSrcRect = CGRect(
+                x: normX * imgSize.width,
+                y: (1 - normY - normH) * imgSize.height,   // flip Y
+                width:  normW * imgSize.width,
+                height: normH * imgSize.height
+            )
 
-                    if let cropped = cgImage.cropping(to: clampedSrc) {
-                        cgCtx.interpolationQuality = .high
-                        cgCtx.draw(cropped, in: destRect)
-                    }
-                    cgCtx.restoreGState()
-                }
+            // Destination fills the whole loupe canvas.
+            let destRect = CGRect(origin: .zero, size: size)
+
+            ctx.withCGContext { cgCtx in
+                cgCtx.interpolationQuality = .high
+                // Clip to circle again inside CGContext for crisp edges.
+                cgCtx.addEllipse(in: destRect)
+                cgCtx.clip()
+
+                // Draw NSImage into CGContext using drawInRect — handles Retina correctly.
+                NSGraphicsContext.saveGraphicsState()
+                let nsCtx = NSGraphicsContext(cgContext: cgCtx, flipped: false)
+                NSGraphicsContext.current = nsCtx
+                image.draw(
+                    in: destRect,
+                    from: imgSrcRect,
+                    operation: .copy,
+                    fraction: 1.0,
+                    respectFlipped: false,
+                    hints: [.interpolation: NSNumber(value: NSImageInterpolation.high.rawValue)]
+                )
+                NSGraphicsContext.restoreGraphicsState()
             }
         }
-        .frame(width: loupeRadius * 2, height: loupeRadius * 2)
-        .clipShape(Circle())
-        .overlay(
-            Circle()
-                .stroke(Color.white.opacity(0.85), lineWidth: borderWidth)
-        )
-        .shadow(color: .black.opacity(0.45), radius: shadowRadius, x: 0, y: 3)
     }
 }

@@ -2,11 +2,9 @@ import SwiftUI
 import AppKit
 
 /// A high-quality zoomable and pannable image view.
-/// Supports:
-///   - Scroll wheel / trackpad pinch to zoom
-///   - Drag to pan when zoomed in
-///   - Right-click hold → circular magnifier loupe (1.3×)
-///   - Programmatic scale + offset bindings
+/// - Trackpad pinch / scroll-wheel to zoom
+/// - Drag to pan when zoomed in
+/// - Right-click hold → circular magnifier loupe (1.3×)
 struct ZoomableImageView: View {
     let image: NSImage
     @Binding var scale: CGFloat
@@ -14,14 +12,11 @@ struct ZoomableImageView: View {
     let minScale: CGFloat
     let maxScale: CGFloat
 
-    // Gesture state
     @GestureState private var gestureScale: CGFloat = 1.0
     @GestureState private var gestureDrag: CGSize = .zero
 
-    // Loupe state
     @State private var showLoupe: Bool = false
-    @State private var loupePosition: CGPoint = .zero   // in view coordinates
-    @State private var imageViewSize: CGSize = .zero    // rendered image frame size
+    @State private var loupePosition: CGPoint = .zero   // container coords
 
     var body: some View {
         GeometryReader { geo in
@@ -39,59 +34,52 @@ struct ZoomableImageView: View {
                     )
                     .frame(width: geo.size.width, height: geo.size.height)
                     .contentShape(Rectangle())
-                    // Pinch to zoom
                     .gesture(
                         MagnifyGesture()
-                            .updating($gestureScale) { value, state, _ in
-                                state = value.magnification
-                            }
-                            .onEnded { value in
-                                scale = (scale * value.magnification)
-                                    .clamped(to: minScale...maxScale)
+                            .updating($gestureScale) { v, s, _ in s = v.magnification }
+                            .onEnded { v in
+                                scale = (scale * v.magnification).clamped(to: minScale...maxScale)
                             }
                     )
-                    // Drag to pan
                     .gesture(
                         DragGesture()
-                            .updating($gestureDrag) { value, state, _ in
+                            .updating($gestureDrag) { v, s, _ in
                                 guard scale > 1.05 else { return }
-                                state = value.translation
+                                s = v.translation
                             }
-                            .onEnded { value in
+                            .onEnded { v in
                                 guard scale > 1.05 else { return }
                                 offset = CGSize(
-                                    width: offset.width + value.translation.width,
-                                    height: offset.height + value.translation.height
+                                    width: offset.width + v.translation.width,
+                                    height: offset.height + v.translation.height
                                 )
                             }
                     )
-                    // Scroll-wheel zoom
                     .onScrollWheel { event in
-                        let delta = event.deltaY
-                        let factor: CGFloat = delta > 0 ? 0.95 : 1.05
+                        let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
                         scale = (scale * factor).clamped(to: minScale...maxScale)
                     }
-                    // Right-click loupe via NSView overlay
-                    .background(
-                        RightClickTracker(
-                            onRightClickBegan: { pos in
-                                loupePosition = pos
-                                imageViewSize = computeImageViewSize(containerSize: geo.size)
-                                showLoupe = true
-                            },
-                            onRightClickMoved: { pos in
-                                loupePosition = pos
-                            },
-                            onRightClickEnded: {
-                                showLoupe = false
-                            }
-                        )
-                    )
 
                 // ── Loupe overlay ────────────────────────────────────────────
                 if showLoupe {
                     loupeOverlay(containerSize: geo.size)
                 }
+
+                // ── Right-click event catcher (on top, full frame) ───────────
+                RightClickCatcher(
+                    containerSize: geo.size,
+                    onBegan: { pos in
+                        loupePosition = pos
+                        showLoupe = true
+                    },
+                    onMoved: { pos in
+                        loupePosition = pos
+                    },
+                    onEnded: {
+                        showLoupe = false
+                    }
+                )
+                .allowsHitTesting(true)
             }
         }
     }
@@ -101,25 +89,20 @@ struct ZoomableImageView: View {
     @ViewBuilder
     private func loupeOverlay(containerSize: CGSize) -> some View {
         let loupeRadius: CGFloat = 90
-        let offsetX: CGFloat = 20  // nudge right of cursor
-        let offsetY: CGFloat = -loupeRadius - 20  // above cursor
+        let nudgeX: CGFloat = 20
+        let nudgeY: CGFloat = -(loupeRadius + 20)
 
-        // Map loupePosition (in container coords) to image coords
-        let imgPos = containerToImageCoords(
-            point: loupePosition,
-            containerSize: containerSize
-        )
+        let imgCoords = containerToImageCoords(loupePosition, containerSize: containerSize)
 
         MagnifierView(
             image: image,
-            cursorPosition: imgPos,
-            imageViewSize: imageViewSize,
-            readerScale: scale
+            cursorInImageView: imgCoords,
+            imageViewSize: computeImageViewSize(containerSize: containerSize)
         )
         .position(
-            x: (loupePosition.x + offsetX + loupeRadius)
-                .clamped(to: loupeRadius...(containerSize.width - loupeRadius)),
-            y: (loupePosition.y + offsetY)
+            x: (loupePosition.x + nudgeX + loupeRadius)
+                .clamped(to: loupeRadius...(containerSize.width  - loupeRadius)),
+            y: (loupePosition.y + nudgeY)
                 .clamped(to: loupeRadius...(containerSize.height - loupeRadius))
         )
         .allowsHitTesting(false)
@@ -127,89 +110,73 @@ struct ZoomableImageView: View {
 
     // MARK: - Coordinate helpers
 
-    /// Returns the size the image actually occupies on screen (scaledToFit + scale).
+    /// Size the image actually occupies on screen after scaledToFit + reader scale.
     private func computeImageViewSize(containerSize: CGSize) -> CGSize {
-        let imgSize = image.size
-        guard imgSize.width > 0, imgSize.height > 0 else { return containerSize }
-        let aspectRatio = imgSize.width / imgSize.height
-        let containerAspect = containerSize.width / containerSize.height
-        var fitSize: CGSize
-        if aspectRatio > containerAspect {
-            fitSize = CGSize(width: containerSize.width, height: containerSize.width / aspectRatio)
-        } else {
-            fitSize = CGSize(width: containerSize.height * aspectRatio, height: containerSize.height)
-        }
-        return CGSize(width: fitSize.width * scale, height: fitSize.height * scale)
+        let img = image.size
+        guard img.width > 0, img.height > 0 else { return containerSize }
+        let imgAR = img.width / img.height
+        let conAR = containerSize.width / containerSize.height
+        let fit: CGSize = imgAR > conAR
+            ? CGSize(width: containerSize.width, height: containerSize.width / imgAR)
+            : CGSize(width: containerSize.height * imgAR, height: containerSize.height)
+        return CGSize(width: fit.width * scale, height: fit.height * scale)
     }
 
-    /// Maps a point in container coordinates to image-view coordinates (accounting for centering).
-    private func containerToImageCoords(point: CGPoint, containerSize: CGSize) -> CGPoint {
+    /// Map a container-space point to image-view space (origin = top-left of the fitted image).
+    private func containerToImageCoords(_ point: CGPoint, containerSize: CGSize) -> CGPoint {
         let ivSize = computeImageViewSize(containerSize: containerSize)
-        let originX = (containerSize.width  - ivSize.width)  / 2 + offset.width
-        let originY = (containerSize.height - ivSize.height) / 2 + offset.height
-        return CGPoint(
-            x: point.x - originX,
-            y: point.y - originY
-        )
+        let ox = (containerSize.width  - ivSize.width)  / 2 + offset.width
+        let oy = (containerSize.height - ivSize.height) / 2 + offset.height
+        return CGPoint(x: point.x - ox, y: point.y - oy)
     }
 }
 
-// MARK: - Right-click tracker (NSView)
+// MARK: - Right-click catcher
 
-struct RightClickTracker: NSViewRepresentable {
-    var onRightClickBegan: (CGPoint) -> Void
-    var onRightClickMoved: (CGPoint) -> Void
-    var onRightClickEnded: () -> Void
+/// Transparent full-frame NSView that captures right-mouse events and
+/// converts them to SwiftUI (top-left origin) coordinates.
+struct RightClickCatcher: NSViewRepresentable {
+    let containerSize: CGSize
+    var onBegan: (CGPoint) -> Void
+    var onMoved: (CGPoint) -> Void
+    var onEnded: () -> Void
 
-    func makeNSView(context: Context) -> _RightClickNSView {
-        let v = _RightClickNSView()
-        v.onRightClickBegan = onRightClickBegan
-        v.onRightClickMoved = onRightClickMoved
-        v.onRightClickEnded = onRightClickEnded
+    func makeNSView(context: Context) -> _RCatcherView {
+        let v = _RCatcherView()
+        v.onBegan = onBegan
+        v.onMoved = onMoved
+        v.onEnded = onEnded
         return v
     }
 
-    func updateNSView(_ nsView: _RightClickNSView, context: Context) {
-        nsView.onRightClickBegan = onRightClickBegan
-        nsView.onRightClickMoved = onRightClickMoved
-        nsView.onRightClickEnded = onRightClickEnded
+    func updateNSView(_ v: _RCatcherView, context: Context) {
+        v.onBegan = onBegan
+        v.onMoved = onMoved
+        v.onEnded = onEnded
     }
 }
 
-final class _RightClickNSView: NSView {
-    var onRightClickBegan: ((CGPoint) -> Void)?
-    var onRightClickMoved: ((CGPoint) -> Void)?
-    var onRightClickEnded: (() -> Void)?
+final class _RCatcherView: NSView {
+    var onBegan: ((CGPoint) -> Void)?
+    var onMoved: ((CGPoint) -> Void)?
+    var onEnded: (() -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
+    // Transparent — don't intercept left-click gestures
+    override func hitTest(_ point: NSPoint) -> NSView? { self }
 
-    override func rightMouseDown(with event: NSEvent) {
-        let pos = swiftUIPoint(from: event)
-        onRightClickBegan?(pos)
-    }
+    override func rightMouseDown(with event: NSEvent)    { onBegan?(pt(event)) }
+    override func rightMouseDragged(with event: NSEvent) { onMoved?(pt(event)) }
+    override func rightMouseUp(with event: NSEvent)      { onEnded?() }
 
-    override func rightMouseDragged(with event: NSEvent) {
-        let pos = swiftUIPoint(from: event)
-        onRightClickMoved?(pos)
-    }
-
-    override func rightMouseUp(with event: NSEvent) {
-        onRightClickEnded?()
-    }
-
-    // Also intercept scroll-wheel for zoom (previously in ScrollWheelModifier)
-    override func scrollWheel(with event: NSEvent) {
-        super.scrollWheel(with: event)
-    }
-
-    /// Convert NSEvent location (bottom-left origin) to SwiftUI coords (top-left origin).
-    private func swiftUIPoint(from event: NSEvent) -> CGPoint {
+    /// NSEvent is bottom-left origin; SwiftUI is top-left origin.
+    private func pt(_ event: NSEvent) -> CGPoint {
         let loc = convert(event.locationInWindow, from: nil)
         return CGPoint(x: loc.x, y: bounds.height - loc.y)
     }
 }
 
-// MARK: - Scroll Wheel modifier (unchanged)
+// MARK: - Scroll-wheel zoom modifier
 
 struct ScrollWheelModifier: ViewModifier {
     let action: (NSEvent) -> Void
@@ -220,15 +187,13 @@ struct ScrollWheelModifier: ViewModifier {
 
 struct ScrollWheelView: NSViewRepresentable {
     let action: (NSEvent) -> Void
-    func makeNSView(context: Context) -> _ScrollWheelNSView { 
-        let v = _ScrollWheelNSView()
-        v.action = action
-        return v
+    func makeNSView(context: Context) -> _SWView {
+        let v = _SWView(); v.action = action; return v
     }
-    func updateNSView(_ nsView: _ScrollWheelNSView, context: Context) { nsView.action = action }
+    func updateNSView(_ v: _SWView, context: Context) { v.action = action }
 }
 
-final class _ScrollWheelNSView: NSView {
+final class _SWView: NSView {
     var action: ((NSEvent) -> Void)?
     override var acceptsFirstResponder: Bool { true }
     override func scrollWheel(with event: NSEvent) {
