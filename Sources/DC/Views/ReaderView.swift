@@ -13,16 +13,20 @@ struct ReaderView: View {
         GeometryReader { geo in
             ZStack {
                 Color.black.ignoresSafeArea()
-
                 pageContent(containerSize: geo.size)
             }
         }
         .toolbar { toolbarContent }
         .navigationTitle(vm.comic.title)
-        .onKeyPress(.leftArrow)  { vm.previousPage(); return .handled }
-        .onKeyPress(.rightArrow) { vm.nextPage();     return .handled }
-        .onKeyPress(.upArrow)    { vm.zoomIn();       return .handled }
-        .onKeyPress(.downArrow)  { vm.zoomOut();      return .handled }
+        // Install a local event monitor so arrow keys work regardless of focus.
+        .background(KeyEventHandler { key in
+            switch key {
+            case .leftArrow:  vm.previousPage()
+            case .rightArrow: vm.nextPage()
+            case .upArrow:    vm.zoomIn()
+            case .downArrow:  vm.zoomOut()
+            }
+        })
     }
 
     // MARK: - Page Content
@@ -56,14 +60,12 @@ struct ReaderView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // Left: close
         ToolbarItem(placement: .navigation) {
             Button(action: { library.closeComic() }) {
                 Label("Library", systemImage: "chevron.left")
             }
         }
 
-        // Center: page indicator + navigation
         ToolbarItemGroup(placement: .principal) {
             Button(action: { vm.previousPage() }) {
                 Image(systemName: "chevron.left")
@@ -80,7 +82,6 @@ struct ReaderView: View {
             .disabled(vm.currentPage >= vm.pageCount - 1)
         }
 
-        // Right: zoom controls
         ToolbarItemGroup(placement: .primaryAction) {
             Button(action: { vm.zoomOut() }) {
                 Image(systemName: "minus.magnifyingglass")
@@ -100,7 +101,6 @@ struct ReaderView: View {
 
             Menu {
                 Button("Fit to Width") {
-                    // width approximation — will be refined with GeometryReader
                     vm.fitToWidth(containerWidth: 900)
                 }
                 Button("Actual Size (100%)") { vm.zoomToActualSize() }
@@ -112,5 +112,53 @@ struct ReaderView: View {
                 Image(systemName: "ellipsis.circle")
             }
         }
+    }
+}
+
+// MARK: - Key event handler
+
+enum ArrowKey { case leftArrow, rightArrow, upArrow, downArrow }
+
+/// Installs an NSEvent local monitor for key-down events.
+/// Fires the callback for arrow keys and suppresses the event so it doesn't
+/// propagate to other responders (e.g. scroll views).
+struct KeyEventHandler: NSViewRepresentable {
+    let onArrowKey: (ArrowKey) -> Void
+
+    func makeNSView(context: Context) -> _KeyHandlerView {
+        let v = _KeyHandlerView()
+        v.onArrowKey = onArrowKey
+        return v
+    }
+
+    func updateNSView(_ v: _KeyHandlerView, context: Context) {
+        v.onArrowKey = onArrowKey
+    }
+}
+
+final class _KeyHandlerView: NSView {
+    var onArrowKey: ((ArrowKey) -> Void)?
+    private var monitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return event }
+                switch event.keyCode {
+                case 123: self.onArrowKey?(.leftArrow);  return nil   // suppress
+                case 124: self.onArrowKey?(.rightArrow); return nil
+                case 125: self.onArrowKey?(.downArrow);  return nil
+                case 126: self.onArrowKey?(.upArrow);    return nil
+                default:  return event
+                }
+            }
+        } else {
+            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+        }
+    }
+
+    deinit {
+        if let m = monitor { NSEvent.removeMonitor(m) }
     }
 }

@@ -11,7 +11,7 @@ struct MagnifierView: View {
     let cursorInImageView: CGPoint
     let imageViewSize: CGSize
 
-    private let loupeRadius: CGFloat = 180   // 2× the original 90
+    private let loupeRadius: CGFloat = 180
     private let magnification: CGFloat = 1.3
     private let borderWidth: CGFloat = 3.0
 
@@ -30,30 +30,30 @@ struct MagnifierView: View {
             // How many image-view points fit inside the loupe at this magnification.
             let srcW = size.width  / magnification
             let srcH = size.height / magnification
+            let halfW = srcW / 2
+            let halfH = srcH / 2
 
-            // Source rect in image-view space (top-left origin, screen points).
+            // Clamp the CENTRE so the full srcW×srcH window always stays inside the image.
+            // This prevents the source rect from going out of bounds, which would cause
+            // the clamped (smaller) region to be stretched across the full loupe circle.
+            let clampedCX = cursorInImageView.x.clamped(to: halfW...(imageViewSize.width  - halfW))
+            let clampedCY = cursorInImageView.y.clamped(to: halfH...(imageViewSize.height - halfH))
+
             let srcRect = CGRect(
-                x: cursorInImageView.x - srcW / 2,
-                y: cursorInImageView.y - srcH / 2,
+                x: clampedCX - halfW,
+                y: clampedCY - halfH,
                 width: srcW,
                 height: srcH
             )
 
-            // Clamp to image-view bounds.
-            let ivBounds = CGRect(origin: .zero, size: imageViewSize)
-            let clamped = srcRect.intersection(ivBounds)
-            guard !clamped.isNull, clamped.width > 0, clamped.height > 0 else { return }
-
             // Convert image-view-space rect → NSImage source rect.
-            // NSImage.size is in points with bottom-left origin.
-            // image-view top-left origin → NSImage bottom-left origin: flip Y.
+            // NSImage uses bottom-left origin, so flip Y.
             let imgSize = image.size
-            let normX = clamped.minX / imageViewSize.width
-            let normY = clamped.minY / imageViewSize.height   // top-left Y
-            let normW = clamped.width  / imageViewSize.width
-            let normH = clamped.height / imageViewSize.height
+            let normX = srcRect.minX / imageViewSize.width
+            let normY = srcRect.minY / imageViewSize.height
+            let normW = srcRect.width  / imageViewSize.width
+            let normH = srcRect.height / imageViewSize.height
 
-            // NSImage Y: 0 = bottom. Top-left normY → bottom-left = (1 - normY - normH).
             let imgSrcRect = CGRect(
                 x: normX * imgSize.width,
                 y: (1.0 - normY - normH) * imgSize.height,
@@ -68,9 +68,7 @@ struct MagnifierView: View {
                 cgCtx.addEllipse(in: destRect)
                 cgCtx.clip()
 
-                // NSImage.draw uses the CGContext's coordinate system.
-                // CGContext inside Canvas has top-left origin (SwiftUI flips it).
-                // We need to flip the CGContext to bottom-left so NSImage draws right-side up.
+                // Canvas CGContext has top-left origin; NSImage.draw needs bottom-left.
                 cgCtx.saveGState()
                 cgCtx.translateBy(x: 0, y: size.height)
                 cgCtx.scaleBy(x: 1, y: -1)
