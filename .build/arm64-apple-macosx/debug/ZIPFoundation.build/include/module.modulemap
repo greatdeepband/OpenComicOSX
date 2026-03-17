@@ -1,3 +1,0 @@
-module ZIPFoundation {
-    header "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/include/ZIPFoundation-Swift.h"
-}
