@@ -1,0 +1,68 @@
+{
+  "": {
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/master.swiftdeps"
+  },
+  "/Volumes/Media/__Manus/DC/Sources/DC/DCApp.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/DCApp.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/DCApp.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/DCApp~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/DCApp.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/DCApp.dia"
+  },
+  "/Volumes/Media/__Manus/DC/Sources/DC/Models/Comic.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/Comic.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/Comic.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/Comic~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/Comic.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/Comic.dia"
+  },
+  "/Volumes/Media/__Manus/DC/Sources/DC/Models/ComicLoader.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ComicLoader.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ComicLoader.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ComicLoader~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ComicLoader.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ComicLoader.dia"
+  },
+  "/Volumes/Media/__Manus/DC/Sources/DC/ViewModels/LibraryViewModel.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryViewModel.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryViewModel.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryViewModel~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryViewModel.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryViewModel.dia"
+  },
+  "/Volumes/Media/__Manus/DC/Sources/DC/ViewModels/ReaderViewModel.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderViewModel.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderViewModel.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderViewModel~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderViewModel.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderViewModel.dia"
+  },
+  "/Volumes/Media/__Manus/DC/Sources/DC/Views/ContentView.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ContentView.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ContentView.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ContentView~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ContentView.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ContentView.dia"
+  },
+  "/Volumes/Media/__Manus/DC/Sources/DC/Views/LibraryView.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryView.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryView.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryView~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryView.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/LibraryView.dia"
+  },
+  "/Volumes/Media/__Manus/DC/Sources/DC/Views/ReaderView.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderView.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderView.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderView~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderView.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ReaderView.dia"
+  },
+  "/Volumes/Media/__Manus/DC/Sources/DC/Views/ZoomableImageView.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ZoomableImageView.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ZoomableImageView.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ZoomableImageView~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ZoomableImageView.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/DC.build/ZoomableImageView.dia"
+  }
+}

@@ -1,0 +1,159 @@
+{
+  "": {
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/master.swiftdeps"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+BackingConfiguration.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+BackingConfiguration.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+BackingConfiguration.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+BackingConfiguration~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+BackingConfiguration.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+BackingConfiguration.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+Deprecated.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Deprecated.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Deprecated.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Deprecated~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Deprecated.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Deprecated.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+Helpers.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Helpers.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Helpers.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Helpers~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Helpers.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Helpers.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+MemoryFile.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+MemoryFile.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+MemoryFile.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+MemoryFile~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+MemoryFile.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+MemoryFile.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+Progress.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Progress.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Progress.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Progress~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Progress.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Progress.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+Reading.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Reading.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Reading.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Reading~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Reading.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Reading.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+ReadingDeprecated.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ReadingDeprecated.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ReadingDeprecated.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ReadingDeprecated~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ReadingDeprecated.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ReadingDeprecated.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+Writing.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Writing.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Writing.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Writing~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Writing.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+Writing.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+WritingDeprecated.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+WritingDeprecated.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+WritingDeprecated.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+WritingDeprecated~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+WritingDeprecated.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+WritingDeprecated.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive+ZIP64.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ZIP64.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ZIP64.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ZIP64~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ZIP64.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive+ZIP64.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Archive.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Archive.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Data+Compression.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Compression.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Compression.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Compression~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Compression.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Compression.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Data+CompressionDeprecated.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+CompressionDeprecated.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+CompressionDeprecated.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+CompressionDeprecated~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+CompressionDeprecated.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+CompressionDeprecated.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Data+Serialization.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Serialization.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Serialization.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Serialization~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Serialization.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Data+Serialization.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Date+ZIP.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Date+ZIP.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Date+ZIP.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Date+ZIP~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Date+ZIP.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Date+ZIP.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Entry+Serialization.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+Serialization.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+Serialization.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+Serialization~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+Serialization.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+Serialization.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Entry+ZIP64.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+ZIP64.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+ZIP64.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+ZIP64~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+ZIP64.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry+ZIP64.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/Entry.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/Entry.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/FileManager+ZIP.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIP.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIP.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIP~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIP.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIP.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/FileManager+ZIPDeprecated.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIPDeprecated.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIPDeprecated.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIPDeprecated~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIPDeprecated.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/FileManager+ZIPDeprecated.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/checkouts/ZIPFoundation/Sources/ZIPFoundation/URL+ZIP.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/URL+ZIP.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/URL+ZIP.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/URL+ZIP~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/URL+ZIP.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/URL+ZIP.dia"
+  },
+  "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/DerivedSources/resource_bundle_accessor.swift": {
+    "dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/resource_bundle_accessor.d",
+    "object": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/resource_bundle_accessor.swift.o",
+    "swiftmodule": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/resource_bundle_accessor~partial.swiftmodule",
+    "swift-dependencies": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/resource_bundle_accessor.swiftdeps",
+    "diagnostics": "/Volumes/Media/__Manus/DC/.build/arm64-apple-macosx/debug/ZIPFoundation.build/resource_bundle_accessor.dia"
+  }
+}
