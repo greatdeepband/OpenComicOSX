@@ -11,8 +11,8 @@ struct MagnifierView: View {
     let cursorInImageView: CGPoint
     let imageViewSize: CGSize
 
-    private let loupeRadius: CGFloat = 180
-    private let magnification: CGFloat = 1.3
+    private let loupeRadius: CGFloat = 270
+    private let magnification: CGFloat = 1.45
     private let borderWidth: CGFloat = 3.0
 
     var body: some View {
