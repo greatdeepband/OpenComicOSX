@@ -18,15 +18,22 @@ struct ReaderView: View {
         }
         .toolbar { toolbarContent }
         .navigationTitle(vm.comic.title)
-        // Install a local event monitor so arrow keys work regardless of focus.
-        .background(KeyEventHandler { key in
-            switch key {
-            case .leftArrow:  vm.previousPage()
-            case .rightArrow: vm.nextPage()
-            case .upArrow:    vm.zoomIn()
-            case .downArrow:  vm.zoomOut()
-            }
-        })
+        .onAppear  { KeyMonitor.shared.start(handler: handleKey) }
+        .onDisappear { KeyMonitor.shared.stop() }
+    }
+
+    private func handleKey(_ key: MonitoredKey) {
+        switch key {
+        case .leftArrow:   vm.previousPage()
+        case .rightArrow:  vm.nextPage()
+        case .upArrow:     vm.zoomIn()
+        case .downArrow:   vm.zoomOut()
+        case .cmdF:        toggleFullscreen()
+        }
+    }
+
+    private func toggleFullscreen() {
+        NSApp.keyWindow?.toggleFullScreen(nil)
     }
 
     // MARK: - Page Content
@@ -99,10 +106,12 @@ struct ReaderView: View {
                 Image(systemName: "1.magnifyingglass")
             }
 
+            Button(action: { toggleFullscreen() }) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+            }
+
             Menu {
-                Button("Fit to Width") {
-                    vm.fitToWidth(containerWidth: 900)
-                }
+                Button("Fit to Width") { vm.fitToWidth(containerWidth: 900) }
                 Button("Actual Size (100%)") { vm.zoomToActualSize() }
                 Divider()
                 ForEach(ReadingMode.allCases, id: \.self) { mode in
@@ -115,50 +124,42 @@ struct ReaderView: View {
     }
 }
 
-// MARK: - Key event handler
+// MARK: - Global key monitor (singleton)
 
-enum ArrowKey { case leftArrow, rightArrow, upArrow, downArrow }
-
-/// Installs an NSEvent local monitor for key-down events.
-/// Fires the callback for arrow keys and suppresses the event so it doesn't
-/// propagate to other responders (e.g. scroll views).
-struct KeyEventHandler: NSViewRepresentable {
-    let onArrowKey: (ArrowKey) -> Void
-
-    func makeNSView(context: Context) -> _KeyHandlerView {
-        let v = _KeyHandlerView()
-        v.onArrowKey = onArrowKey
-        return v
-    }
-
-    func updateNSView(_ v: _KeyHandlerView, context: Context) {
-        v.onArrowKey = onArrowKey
-    }
+enum MonitoredKey {
+    case leftArrow, rightArrow, upArrow, downArrow, cmdF
 }
 
-final class _KeyHandlerView: NSView {
-    var onArrowKey: ((ArrowKey) -> Void)?
+/// Singleton NSEvent local monitor. Installed on .onAppear, removed on .onDisappear.
+/// Using a singleton avoids duplicate monitors when the view re-renders.
+final class KeyMonitor {
+    static let shared = KeyMonitor()
     private var monitor: Any?
+    private var handler: ((MonitoredKey) -> Void)?
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if window != nil {
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self else { return event }
-                switch event.keyCode {
-                case 123: self.onArrowKey?(.leftArrow);  return nil   // suppress
-                case 124: self.onArrowKey?(.rightArrow); return nil
-                case 125: self.onArrowKey?(.downArrow);  return nil
-                case 126: self.onArrowKey?(.upArrow);    return nil
-                default:  return event
-                }
+    private init() {}
+
+    func start(handler: @escaping (MonitoredKey) -> Void) {
+        self.handler = handler
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, let handler = self.handler else { return event }
+
+            let cmd = event.modifierFlags.contains(.command)
+
+            switch (event.keyCode, cmd) {
+            case (123, false): handler(.leftArrow);  return nil
+            case (124, false): handler(.rightArrow); return nil
+            case (125, false): handler(.downArrow);  return nil
+            case (126, false): handler(.upArrow);    return nil
+            case (3,   true):  handler(.cmdF);       return nil   // keyCode 3 = F
+            default:           return event
             }
-        } else {
-            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
         }
     }
 
-    deinit {
-        if let m = monitor { NSEvent.removeMonitor(m) }
+    func stop() {
+        handler = nil
+        if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
     }
 }

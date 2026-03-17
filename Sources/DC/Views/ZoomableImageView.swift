@@ -4,7 +4,7 @@ import AppKit
 /// A high-quality zoomable and pannable image view.
 /// - Trackpad pinch / scroll-wheel to zoom
 /// - Drag to pan when zoomed in
-/// - Right-click hold → circular magnifier loupe (1.3×)
+/// - Right-click hold → circular magnifier loupe centred exactly on cursor
 struct ZoomableImageView: View {
     let image: NSImage
     @Binding var scale: CGFloat
@@ -17,6 +17,8 @@ struct ZoomableImageView: View {
 
     @State private var showLoupe: Bool = false
     @State private var loupePosition: CGPoint = .zero   // container coords
+
+    private let loupeRadius: CGFloat = 180
 
     var body: some View {
         GeometryReader { geo in
@@ -60,52 +62,28 @@ struct ZoomableImageView: View {
                         scale = (scale * factor).clamped(to: minScale...maxScale)
                     }
 
-                // ── Loupe overlay ────────────────────────────────────────────
+                // ── Loupe overlay — centred exactly on cursor ────────────────
                 if showLoupe {
-                    loupeOverlay(containerSize: geo.size)
+                    MagnifierView(
+                        image: image,
+                        cursorInImageView: containerToImageCoords(loupePosition, containerSize: geo.size),
+                        imageViewSize: computeImageViewSize(containerSize: geo.size)
+                    )
+                    // .position centres the view's frame on the given point —
+                    // so the loupe circle centre is exactly at loupePosition.
+                    .position(x: loupePosition.x, y: loupePosition.y)
+                    .allowsHitTesting(false)
                 }
 
                 // ── Right-click event catcher (on top, full frame) ───────────
                 RightClickCatcher(
-                    containerSize: geo.size,
-                    onBegan: { pos in
-                        loupePosition = pos
-                        showLoupe = true
-                    },
-                    onMoved: { pos in
-                        loupePosition = pos
-                    },
-                    onEnded: {
-                        showLoupe = false
-                    }
+                    onBegan: { pos in loupePosition = pos; showLoupe = true },
+                    onMoved: { pos in loupePosition = pos },
+                    onEnded: { showLoupe = false }
                 )
                 .allowsHitTesting(true)
             }
         }
-    }
-
-    // MARK: - Loupe overlay
-
-    @ViewBuilder
-    private func loupeOverlay(containerSize: CGSize) -> some View {
-        let loupeRadius: CGFloat = 90
-        let nudgeX: CGFloat = 20
-        let nudgeY: CGFloat = -(loupeRadius + 20)
-
-        let imgCoords = containerToImageCoords(loupePosition, containerSize: containerSize)
-
-        MagnifierView(
-            image: image,
-            cursorInImageView: imgCoords,
-            imageViewSize: computeImageViewSize(containerSize: containerSize)
-        )
-        .position(
-            x: (loupePosition.x + nudgeX + loupeRadius)
-                .clamped(to: loupeRadius...(containerSize.width  - loupeRadius)),
-            y: (loupePosition.y + nudgeY)
-                .clamped(to: loupeRadius...(containerSize.height - loupeRadius))
-        )
-        .allowsHitTesting(false)
     }
 
     // MARK: - Coordinate helpers
@@ -133,26 +111,19 @@ struct ZoomableImageView: View {
 
 // MARK: - Right-click catcher
 
-/// Transparent full-frame NSView that captures right-mouse events and
-/// converts them to SwiftUI (top-left origin) coordinates.
 struct RightClickCatcher: NSViewRepresentable {
-    let containerSize: CGSize
     var onBegan: (CGPoint) -> Void
     var onMoved: (CGPoint) -> Void
     var onEnded: () -> Void
 
     func makeNSView(context: Context) -> _RCatcherView {
         let v = _RCatcherView()
-        v.onBegan = onBegan
-        v.onMoved = onMoved
-        v.onEnded = onEnded
+        v.onBegan = onBegan; v.onMoved = onMoved; v.onEnded = onEnded
         return v
     }
 
     func updateNSView(_ v: _RCatcherView, context: Context) {
-        v.onBegan = onBegan
-        v.onMoved = onMoved
-        v.onEnded = onEnded
+        v.onBegan = onBegan; v.onMoved = onMoved; v.onEnded = onEnded
     }
 }
 
@@ -162,14 +133,12 @@ final class _RCatcherView: NSView {
     var onEnded: (() -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
-    // Transparent — don't intercept left-click gestures
     override func hitTest(_ point: NSPoint) -> NSView? { self }
 
     override func rightMouseDown(with event: NSEvent)    { onBegan?(pt(event)) }
     override func rightMouseDragged(with event: NSEvent) { onMoved?(pt(event)) }
     override func rightMouseUp(with event: NSEvent)      { onEnded?() }
 
-    /// NSEvent is bottom-left origin; SwiftUI is top-left origin.
     private func pt(_ event: NSEvent) -> CGPoint {
         let loc = convert(event.locationInWindow, from: nil)
         return CGPoint(x: loc.x, y: bounds.height - loc.y)
