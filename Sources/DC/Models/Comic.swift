@@ -2,7 +2,8 @@ import Foundation
 import AppKit
 
 /// Represents a single comic book loaded into the reader.
-struct Comic: Identifiable {
+struct Comic: Identifiable, Equatable {
+    static func == (lhs: Comic, rhs: Comic) -> Bool { lhs.id == rhs.id }
     let id: UUID
     let url: URL
     let title: String
