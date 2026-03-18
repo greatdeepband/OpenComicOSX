@@ -29,6 +29,24 @@ struct ReadingPositionStore {
         return Double(page) / Double(totalPages - 1)
     }
 
+    // MARK: - Scroll offset (for vertical modes)
+
+    private static let offsetKey = "scrollOffsets"
+
+    private static func loadOffsets() -> [String: Double] {
+        (UserDefaults.standard.dictionary(forKey: offsetKey) as? [String: Double]) ?? [:]
+    }
+
+    static func save(scrollOffset: Double, for url: URL) {
+        var store = loadOffsets()
+        store[url.path] = scrollOffset
+        UserDefaults.standard.set(store, forKey: offsetKey)
+    }
+
+    static func scrollOffset(for url: URL) -> Double? {
+        loadOffsets()[url.path]
+    }
+
     // MARK: - Reading mode
 
     private static func loadModes() -> [String: String] {

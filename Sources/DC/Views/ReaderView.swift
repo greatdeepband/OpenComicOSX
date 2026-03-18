@@ -106,6 +106,8 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func verticalScrollView(containerSize: CGSize, pagesPerRow: Int) -> some View {
+        // We need the total content height to compute the fractional offset.
+        // A background GeometryReader on the LazyVStack gives us this.
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(spacing: 4) {
@@ -114,7 +116,6 @@ struct ReaderView: View {
                             LoupableImage(image: page.image)
                                 .frame(maxWidth: containerSize.width * vm.scale)
                                 .id(page.id)
-                                // When this page's top edge enters the viewport, mark it as current.
                                 .background(
                                     GeometryReader { geo in
                                         Color.clear.preference(
@@ -157,8 +158,29 @@ struct ReaderView: View {
                         }
                     }
                 }
+                // Measure total content height.
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.onAppear { vm.scrollContentHeight = geo.size.height }
+                            .onChange(of: geo.size.height) { _, h in vm.scrollContentHeight = h }
+                    }
+                )
             }
             .coordinateSpace(name: "scroll")
+            // Track scroll offset fraction via the scroll view's own geometry.
+            .background(
+                GeometryReader { scrollGeo in
+                    Color.clear
+                        .preference(key: ScrollOffsetPreferenceKey.self,
+                                    value: scrollGeo.frame(in: .named("scrollOuter")).minY)
+                }
+            )
+            .onPreferenceChange(ScrollOffsetPreferenceKey.self) { minY in
+                guard !vm.isRestoringPosition, vm.scrollContentHeight > containerSize.height else { return }
+                let maxOffset = vm.scrollContentHeight - containerSize.height
+                let currentOffset = -minY
+                vm.scrollOffsetFraction = Double(max(0, min(currentOffset / maxOffset, 1)))
+            }
             .onPreferenceChange(TopPagePreferenceKey.self) { pageID in
                 if pageID >= 0 && pageID != vm.currentPage {
                     vm.updateCurrentPage(pageID)
@@ -170,28 +192,60 @@ struct ReaderView: View {
             }
             .onAppear {
                 let targetPage = min(vm.currentPage, vm.pageCount - 1)
-                guard targetPage > 0 else { return }
+                let savedOffset = vm.savedScrollOffset
+                guard targetPage > 0 || (savedOffset ?? 0) > 0 else { return }
                 Task { @MainActor in
-                    // Retry until the scroll lands (LazyVStack renders lazily).
-                    // Stop early once vm.currentPage reaches the target.
                     for _ in 0..<20 {
                         try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
                         proxy.scrollTo(vm.comic.pages[targetPage].id, anchor: .top)
-                        if !vm.isRestoringPosition { break } // tracker confirmed landing
+                        if !vm.isRestoringPosition { break }
+                    }
+                    // Fine-tune to exact pixel offset using AppKit NSScrollView.
+                    if let fraction = savedOffset, fraction > 0,
+                       vm.scrollContentHeight > containerSize.height {
+                        let maxOffset = vm.scrollContentHeight - containerSize.height
+                        let targetY = CGFloat(fraction) * maxOffset
+                        // Walk the responder chain to find the NSScrollView.
+                        if let nsScrollView = findNSScrollView() {
+                            // macOS scroll origin is bottom-left; flip to top-left.
+                            let flipped = nsScrollView.documentView?.isFlipped ?? true
+                            let docHeight = nsScrollView.documentView?.bounds.height ?? vm.scrollContentHeight
+                            let visibleHeight = nsScrollView.contentView.bounds.height
+                            let y: CGFloat = flipped ? targetY : (docHeight - visibleHeight - targetY)
+                            nsScrollView.documentView?.scroll(CGPoint(x: 0, y: max(0, y)))
+                        }
                     }
                     vm.isRestoringPosition = false
                 }
             }
         }
+        .coordinateSpace(name: "scrollOuter")
     }
 
-    // Preference key: reports the page index nearest the top of the scroll view.
+    /// Finds the first NSScrollView in the key window's view hierarchy.
+    private func findNSScrollView() -> NSScrollView? {
+        func search(_ view: NSView) -> NSScrollView? {
+            if let sv = view as? NSScrollView { return sv }
+            for sub in view.subviews {
+                if let found = search(sub) { return found }
+            }
+            return nil
+        }
+        return NSApp.keyWindow.flatMap { search($0.contentView ?? NSView()) }
+    }
+
     private struct TopPagePreferenceKey: PreferenceKey {
         static var defaultValue: Int = -1
         static func reduce(value: inout Int, nextValue: () -> Int) {
             let next = nextValue()
-            // Take the highest page index that is still within the viewport top area.
             if next >= 0 { value = next }
+        }
+    }
+
+    private struct ScrollOffsetPreferenceKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
         }
     }
 

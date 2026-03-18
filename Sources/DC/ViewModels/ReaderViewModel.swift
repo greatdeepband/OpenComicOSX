@@ -26,6 +26,16 @@ final class ReaderViewModel: ObservableObject {
     /// can't overwrite the restored page before the scroll lands.
     var isRestoringPosition: Bool = false
 
+    /// Fractional scroll offset (0.0 = top, 1.0 = bottom) for vertical modes.
+    /// Updated continuously while scrolling; saved on close.
+    var scrollOffsetFraction: Double = 0.0
+
+    /// Total scrollable content height, set by the scroll view.
+    var scrollContentHeight: CGFloat = 0.0
+
+    /// Saved fractional offset to restore on open (nil = not set).
+    private(set) var savedScrollOffset: Double? = nil
+
     init(comic: Comic) {
         self.comic = comic
         // Restore last reading position.
@@ -34,6 +44,8 @@ final class ReaderViewModel: ObservableObject {
             self.currentPage = saved
             self.isRestoringPosition = true
         }
+        // Restore scroll offset for vertical modes.
+        self.savedScrollOffset = ReadingPositionStore.scrollOffset(for: comic.url)
         // Restore last reading mode.
         if let savedMode = ReadingPositionStore.mode(for: comic.url),
            let mode = ReadingMode(rawValue: savedMode) {
@@ -86,10 +98,14 @@ final class ReaderViewModel: ObservableObject {
         currentPage = page
     }
 
-    /// Persists the current page and mode. Called when the reader is dismissed.
+    /// Persists the current page, scroll offset, and mode. Called when the reader is dismissed.
     func persistCurrentPosition() {
         ReadingPositionStore.save(page: currentPage, for: comic.url)
         ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
+        let isVertical = readingMode == .verticalScroll || readingMode == .verticalDouble
+        if isVertical {
+            ReadingPositionStore.save(scrollOffset: scrollOffsetFraction, for: comic.url)
+        }
     }
 
     // MARK: - Zoom
