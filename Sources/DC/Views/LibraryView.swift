@@ -148,9 +148,12 @@ struct LibraryView: View {
                 } else if library.recentComics.contains(where: { $0.url == url }) {
                     library.collapsedSections.remove("recent")
                 }
-                // Scroll after a short delay to let the grid render.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                    withAnimation { proxy.scrollTo(url, anchor: .center) }
+                // Retry scrollTo until the card is rendered in the LazyVGrid.
+                Task { @MainActor in
+                    for _ in 0..<20 {
+                        try? await Task.sleep(nanoseconds: 80_000_000) // 80ms
+                        proxy.scrollTo(url, anchor: .center)
+                    }
                 }
             }
             .onChange(of: library.galleries.count) {
