@@ -7,6 +7,8 @@ final class ReaderViewModel: ObservableObject {
     @Published var scale: CGFloat = 1.0
     @Published var offset: CGSize = .zero
     @Published var readingMode: ReadingMode = .singlePage
+    /// Updated by ReaderView via GeometryReader so toolbar actions have the real size.
+    @Published var containerSize: CGSize = CGSize(width: 900, height: 600)
 
     let comic: Comic
 
@@ -16,8 +18,7 @@ final class ReaderViewModel: ObservableObject {
         return comic.pages[currentPage].image
     }
 
-    // Zoom limits
-    let minScale: CGFloat = 0.5
+    let minScale: CGFloat = 0.1
     let maxScale: CGFloat = 8.0
 
     init(comic: Comic) {
@@ -46,9 +47,8 @@ final class ReaderViewModel: ObservableObject {
 
     // MARK: - Zoom
 
-    func zoom(by delta: CGFloat, anchor: CGPoint = .zero) {
-        let newScale = (scale * delta).clamped(to: minScale...maxScale)
-        scale = newScale
+    func zoom(by delta: CGFloat) {
+        scale = (scale * delta).clamped(to: minScale...maxScale)
     }
 
     func setScale(_ newScale: CGFloat) {
@@ -62,19 +62,40 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
+    /// Scales so the image width fills the container width exactly.
     func fitToWidth(containerWidth: CGFloat) {
-        guard let img = currentImage else { return }
-        let imgWidth = img.size.width
-        guard imgWidth > 0 else { return }
+        guard let img = currentImage, img.size.width > 0 else { return }
+        // ZoomableImageView uses scaledToFit inside the container.
+        // scale=1 means the image is already fitted to the container.
+        // To fill the width we need to find what scale makes the fitted image
+        // expand to fill the full width.
+        let imgAR = img.size.width / img.size.height
+        let conAR = containerWidth / containerSize.height
+        // At scale=1 the fitted width is:
+        let fittedWidth: CGFloat = imgAR > conAR
+            ? containerWidth                          // image is wider — already fills width
+            : containerSize.height * imgAR            // image is taller — fitted width < container
+        let targetScale = containerWidth / fittedWidth
         withAnimation(.easeOut(duration: 0.2)) {
-            scale = (containerWidth / imgWidth).clamped(to: minScale...maxScale)
+            scale = targetScale.clamped(to: minScale...maxScale)
             offset = .zero
         }
     }
 
+    /// 1 image pixel = 1 screen point.
     func zoomToActualSize() {
+        guard let img = currentImage, img.size.width > 0 else { return }
+        // At scale=1 the image is fitted to the container.
+        // Actual size means the image renders at its natural point size.
+        let imgAR = img.size.width / img.size.height
+        let conAR = containerSize.width / containerSize.height
+        let fittedWidth: CGFloat = imgAR > conAR
+            ? containerSize.width
+            : containerSize.height * imgAR
+        // Scale needed so fittedWidth * scale == img.size.width
+        let actualScale = img.size.width / fittedWidth
         withAnimation(.easeOut(duration: 0.2)) {
-            scale = 1.0
+            scale = actualScale.clamped(to: minScale...maxScale)
             offset = .zero
         }
     }
@@ -93,8 +114,8 @@ final class ReaderViewModel: ObservableObject {
 }
 
 enum ReadingMode: String, CaseIterable {
-    case singlePage = "Single Page"
-    case doublePage = "Double Page"
+    case singlePage    = "Single Page"
+    case doublePage    = "Double Page"
     case verticalScroll = "Vertical Scroll"
 }
 

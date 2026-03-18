@@ -13,8 +13,11 @@ struct ReaderView: View {
         GeometryReader { geo in
             ZStack {
                 Color.black.ignoresSafeArea()
-                pageContent(containerSize: geo.size)
+                modeContent(containerSize: geo.size)
             }
+            // Pass real container size to vm so Fit to Width works correctly.
+            .onChange(of: geo.size) { _, newSize in vm.containerSize = newSize }
+            .onAppear { vm.containerSize = geo.size }
         }
         .toolbar { toolbarContent }
         .navigationTitle(vm.comic.title)
@@ -36,10 +39,26 @@ struct ReaderView: View {
         NSApp.keyWindow?.toggleFullScreen(nil)
     }
 
-    // MARK: - Page Content
+    // MARK: - Mode content
 
     @ViewBuilder
-    private func pageContent(containerSize: CGSize) -> some View {
+    private func modeContent(containerSize: CGSize) -> some View {
+        switch vm.readingMode {
+        case .singlePage:
+            singlePageView(containerSize: containerSize)
+
+        case .doublePage:
+            doublePageView(containerSize: containerSize)
+
+        case .verticalScroll:
+            verticalScrollView(containerSize: containerSize)
+        }
+    }
+
+    // MARK: - Single Page
+
+    @ViewBuilder
+    private func singlePageView(containerSize: CGSize) -> some View {
         if let image = vm.currentImage {
             ZoomableImageView(
                 image: image,
@@ -48,18 +67,77 @@ struct ReaderView: View {
                 minScale: vm.minScale,
                 maxScale: vm.maxScale
             )
-            .gesture(
-                TapGesture(count: 2).onEnded {
-                    if vm.scale > 1.05 {
-                        vm.resetZoom()
-                    } else {
-                        vm.fitToWidth(containerWidth: containerSize.width)
+            .gesture(TapGesture(count: 2).onEnded {
+                if vm.scale > 1.05 { vm.resetZoom() }
+                else { vm.fitToWidth(containerWidth: containerSize.width) }
+            })
+        } else {
+            Text("No pages found").foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Double Page
+
+    @ViewBuilder
+    private func doublePageView(containerSize: CGSize) -> some View {
+        let leftImage  = vm.currentImage
+        let rightImage: NSImage? = {
+            let next = vm.currentPage + 1
+            guard next < vm.pageCount else { return nil }
+            return vm.comic.pages[next].image
+        }()
+
+        HStack(spacing: 2) {
+            if let img = leftImage {
+                Image(nsImage: img)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
+            }
+            if let img = rightImage {
+                Image(nsImage: img)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
+            } else {
+                Spacer().frame(maxWidth: containerSize.width / 2)
+            }
+        }
+        .frame(width: containerSize.width, height: containerSize.height)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { }   // absorb double-tap in double mode
+        .gesture(DragGesture(minimumDistance: 30).onEnded { v in
+            if v.translation.width < -30 {
+                // advance by 2
+                vm.goTo(page: min(vm.currentPage + 2, vm.pageCount - 1))
+            } else if v.translation.width > 30 {
+                vm.goTo(page: max(vm.currentPage - 2, 0))
+            }
+        })
+    }
+
+    // MARK: - Vertical Scroll
+
+    @ViewBuilder
+    private func verticalScrollView(containerSize: CGSize) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(spacing: 4) {
+                    ForEach(vm.comic.pages) { page in
+                        Image(nsImage: page.image)
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                            .frame(maxWidth: containerSize.width)
+                            .id(page.id)
                     }
                 }
-            )
-        } else {
-            Text("No pages found")
-                .foregroundStyle(.secondary)
+            }
+            .onAppear {
+                proxy.scrollTo(vm.currentPage, anchor: .top)
+            }
         }
     }
 
@@ -111,11 +189,18 @@ struct ReaderView: View {
             }
 
             Menu {
-                Button("Fit to Width") { vm.fitToWidth(containerWidth: 900) }
+                Button("Fit to Width")    { vm.fitToWidth(containerWidth: vm.containerSize.width) }
                 Button("Actual Size (100%)") { vm.zoomToActualSize() }
                 Divider()
                 ForEach(ReadingMode.allCases, id: \.self) { mode in
-                    Button(mode.rawValue) { vm.readingMode = mode }
+                    Button(action: { vm.readingMode = mode }) {
+                        HStack {
+                            Text(mode.rawValue)
+                            if vm.readingMode == mode {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -126,17 +211,12 @@ struct ReaderView: View {
 
 // MARK: - Global key monitor (singleton)
 
-enum MonitoredKey {
-    case leftArrow, rightArrow, upArrow, downArrow, cmdF
-}
+enum MonitoredKey { case leftArrow, rightArrow, upArrow, downArrow, cmdF }
 
-/// Singleton NSEvent local monitor. Installed on .onAppear, removed on .onDisappear.
-/// Using a singleton avoids duplicate monitors when the view re-renders.
 final class KeyMonitor {
     static let shared = KeyMonitor()
     private var monitor: Any?
     private var handler: ((MonitoredKey) -> Void)?
-
     private init() {}
 
     func start(handler: @escaping (MonitoredKey) -> Void) {
@@ -144,15 +224,13 @@ final class KeyMonitor {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let handler = self.handler else { return event }
-
             let cmd = event.modifierFlags.contains(.command)
-
             switch (event.keyCode, cmd) {
             case (123, false): handler(.leftArrow);  return nil
             case (124, false): handler(.rightArrow); return nil
             case (125, false): handler(.downArrow);  return nil
             case (126, false): handler(.upArrow);    return nil
-            case (3,   true):  handler(.cmdF);       return nil   // keyCode 3 = F
+            case (3,   true):  handler(.cmdF);       return nil
             default:           return event
             }
         }
