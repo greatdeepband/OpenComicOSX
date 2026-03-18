@@ -15,7 +15,6 @@ struct ReaderView: View {
                 Color.black.ignoresSafeArea()
                 modeContent(containerSize: geo.size)
             }
-            // Pass real container size to vm so Fit to Width works correctly.
             .onChange(of: geo.size) { _, newSize in vm.containerSize = newSize }
             .onAppear { vm.containerSize = geo.size }
         }
@@ -26,7 +25,7 @@ struct ReaderView: View {
     }
 
     private func handleKey(_ key: MonitoredKey) {
-        let isVertical = vm.readingMode == .verticalScroll
+        let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble
         switch key {
         case .leftArrow:   if !isVertical { vm.previousPage() }
         case .rightArrow:  if !isVertical { vm.nextPage() }
@@ -47,12 +46,12 @@ struct ReaderView: View {
         switch vm.readingMode {
         case .singlePage:
             singlePageView(containerSize: containerSize)
-
         case .doublePage:
             doublePageView(containerSize: containerSize)
-
         case .verticalScroll:
-            verticalScrollView(containerSize: containerSize)
+            verticalScrollView(containerSize: containerSize, pagesPerRow: 1)
+        case .verticalDouble:
+            verticalScrollView(containerSize: containerSize, pagesPerRow: 2)
         }
     }
 
@@ -88,82 +87,66 @@ struct ReaderView: View {
             return vm.comic.pages[next].image
         }()
 
-        ZStack {
-            HStack(spacing: 2) {
-                if let img = leftImage {
-                    LoupableImage(image: img)
-                        .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
-                }
-                if let img = rightImage {
-                    LoupableImage(image: img)
-                        .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
-                } else {
-                    Spacer().frame(maxWidth: containerSize.width / 2)
-                }
-            }
-            .scaleEffect(vm.scale)
-            .offset(x: vm.offset.width, y: vm.offset.height)
-
-            // Pan catcher — sits on top, handles left-drag for panning
-            MouseCatcher(
-                onLeftDragBegan: { _ in },
-                onLeftDragMoved: { delta in
-                    guard vm.scale > 1.0 else { return }
-                    let spreadWidth  = containerSize.width  * vm.scale
-                    let spreadHeight = containerSize.height * vm.scale
-                    let maxX = max(0, (spreadWidth  - containerSize.width)  / 2)
-                    let maxY = max(0, (spreadHeight - containerSize.height) / 2)
-                    vm.offset = CGSize(
-                        width:  (vm.offset.width  + delta.width) .clamped(to: -maxX...maxX),
-                        height: (vm.offset.height + delta.height).clamped(to: -maxY...maxY)
-                    )
-                },
-                onLeftDragEnded: { _ in },
-                onRightBegan: { _ in },
-                onRightMoved: { _ in },
-                onRightEnded: { }
-            )
-            .allowsHitTesting(vm.scale > 1.0)   // only intercept when zoomed
-        }
-        .frame(width: containerSize.width, height: containerSize.height)
-        .clipped()
-        .contentShape(Rectangle())
-        .onScrollWheel { event in
-            let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
-            let newScale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
-            vm.scale = newScale
-            if newScale <= 1.0 { vm.offset = .zero }
-        }
-        .gesture(MagnifyGesture()
-            .onEnded { v in
-                let newScale = (vm.scale * v.magnification).clamped(to: vm.minScale...vm.maxScale)
-                vm.scale = newScale
-                if newScale <= 1.0 { vm.offset = .zero }
+        SpreadView(
+            leftImage: leftImage,
+            rightImage: rightImage,
+            scale: $vm.scale,
+            offset: $vm.offset,
+            minScale: vm.minScale,
+            maxScale: vm.maxScale,
+            containerSize: containerSize,
+            onDoubleTap: {
+                if vm.scale > 1.05 { vm.resetZoom() }
+                else { vm.fitToWidth(containerWidth: containerSize.width) }
             }
         )
-        .onTapGesture(count: 2) {
-            if vm.scale > 1.05 { vm.resetZoom() }
-            else { vm.fitToWidth(containerWidth: containerSize.width) }
-        }
     }
 
-    // MARK: - Vertical Scroll
+    // MARK: - Vertical Scroll (single or double column)
 
     @ViewBuilder
-    private func verticalScrollView(containerSize: CGSize) -> some View {
+    private func verticalScrollView(containerSize: CGSize, pagesPerRow: Int) -> some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(spacing: 4) {
-                    ForEach(vm.comic.pages) { page in
-                        LoupableImage(image: page.image)
-                            .frame(maxWidth: containerSize.width * vm.scale,
-                                   maxHeight: containerSize.height * vm.scale)
-                            .id(page.id)
+                    if pagesPerRow == 1 {
+                        ForEach(vm.comic.pages) { page in
+                            LoupableImage(image: page.image)
+                                .frame(maxWidth: containerSize.width * vm.scale)
+                                .id(page.id)
+                        }
+                    } else {
+                        // Pair pages: (0,1), (2,3), ...
+                        let pairs = stride(from: 0, to: vm.pageCount, by: 2).map { i -> (ComicPage, ComicPage?) in
+                            let left = vm.comic.pages[i]
+                            let right = (i + 1 < vm.pageCount) ? vm.comic.pages[i + 1] : nil
+                            return (left, right)
+                        }
+                        ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
+                            HStack(spacing: 2) {
+                                LoupableImage(image: pair.0.image)
+                                    .frame(maxWidth: (containerSize.width / 2) * vm.scale,
+                                           maxHeight: containerSize.height * vm.scale)
+                                if let rightPage = pair.1 {
+                                    LoupableImage(image: rightPage.image)
+                                        .frame(maxWidth: (containerSize.width / 2) * vm.scale,
+                                               maxHeight: containerSize.height * vm.scale)
+                                } else {
+                                    Spacer()
+                                        .frame(maxWidth: (containerSize.width / 2) * vm.scale)
+                                }
+                            }
+                            .id(pair.0.id)
+                        }
                     }
                 }
             }
+            .onScrollWheel { event in
+                let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
+                vm.scale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
+            }
             .onAppear {
-                proxy.scrollTo(vm.currentPage, anchor: .top)
+                proxy.scrollTo(vm.comic.pages[min(vm.currentPage, vm.pageCount - 1)].id, anchor: .top)
             }
         }
     }
@@ -179,10 +162,11 @@ struct ReaderView: View {
         }
 
         ToolbarItemGroup(placement: .principal) {
+            let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble
             Button(action: { vm.previousPage() }) {
                 Image(systemName: "chevron.left")
             }
-            .disabled(vm.currentPage == 0 || vm.readingMode == .verticalScroll)
+            .disabled(vm.currentPage == 0 || isVertical)
 
             Text("\(vm.currentPage + 1) / \(vm.pageCount)")
                 .monospacedDigit()
@@ -191,7 +175,7 @@ struct ReaderView: View {
             Button(action: { vm.nextPage() }) {
                 Image(systemName: "chevron.right")
             }
-            .disabled(vm.currentPage >= vm.pageCount - 1 || vm.readingMode == .verticalScroll)
+            .disabled(vm.currentPage >= vm.pageCount - 1 || isVertical)
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
@@ -233,6 +217,141 @@ struct ReaderView: View {
                 Image(systemName: "ellipsis.circle")
             }
         }
+    }
+}
+
+// MARK: - Spread view (Double Page with spread-level loupe)
+
+/// Renders two pages side by side with a single MouseCatcher covering the whole spread.
+/// The loupe samples from whichever page the cursor is over, eliminating the cross-boundary glitch.
+struct SpreadView: View {
+    let leftImage:  NSImage?
+    let rightImage: NSImage?
+    @Binding var scale: CGFloat
+    @Binding var offset: CGSize
+    let minScale: CGFloat
+    let maxScale: CGFloat
+    let containerSize: CGSize
+    let onDoubleTap: () -> Void
+
+    @State private var showLoupe = false
+    @State private var loupePosition: CGPoint = .zero
+    @State private var loupeImage: NSImage? = nil
+    @State private var loupeImageViewSize: CGSize = .zero
+    @State private var loupeCursorInImage: CGPoint = .zero
+
+    var body: some View {
+        ZStack {
+            // Pages
+            HStack(spacing: 2) {
+                if let img = leftImage {
+                    Image(nsImage: img)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
+                }
+                if let img = rightImage {
+                    Image(nsImage: img)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
+                } else {
+                    Spacer().frame(maxWidth: containerSize.width / 2)
+                }
+            }
+            .scaleEffect(scale)
+            .offset(x: offset.width, y: offset.height)
+
+            // Loupe overlay
+            if showLoupe, let img = loupeImage {
+                MagnifierView(
+                    image: img,
+                    cursorInImageView: loupeCursorInImage,
+                    imageViewSize: loupeImageViewSize
+                )
+                .position(x: loupePosition.x, y: loupePosition.y)
+                .allowsHitTesting(false)
+            }
+
+            // Single MouseCatcher covers the full spread
+            MouseCatcher(
+                onLeftDragBegan: { _ in },
+                onLeftDragMoved: { delta in
+                    guard scale > 1.0 else { return }
+                    let spreadWidth  = containerSize.width  * scale
+                    let spreadHeight = containerSize.height * scale
+                    let maxX = max(0, (spreadWidth  - containerSize.width)  / 2)
+                    let maxY = max(0, (spreadHeight - containerSize.height) / 2)
+                    offset = CGSize(
+                        width:  (offset.width  + delta.width) .clamped(to: -maxX...maxX),
+                        height: (offset.height + delta.height).clamped(to: -maxY...maxY)
+                    )
+                },
+                onLeftDragEnded: { _ in },
+                onRightBegan: { pos in
+                    loupePosition = pos
+                    updateLoupe(at: pos)
+                    showLoupe = true
+                },
+                onRightMoved: { pos in
+                    loupePosition = pos
+                    updateLoupe(at: pos)
+                },
+                onRightEnded: { showLoupe = false }
+            )
+            .allowsHitTesting(true)
+        }
+        .frame(width: containerSize.width, height: containerSize.height)
+        .clipped()
+        .contentShape(Rectangle())
+        .onScrollWheel { event in
+            let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
+            let newScale = (scale * factor).clamped(to: minScale...maxScale)
+            scale = newScale
+            if newScale <= 1.0 { offset = .zero }
+        }
+        .gesture(MagnifyGesture()
+            .onEnded { v in
+                let newScale = (scale * v.magnification).clamped(to: minScale...maxScale)
+                scale = newScale
+                if newScale <= 1.0 { offset = .zero }
+            }
+        )
+        .onTapGesture(count: 2) { onDoubleTap() }
+    }
+
+    /// Determine which page the cursor is over and compute loupe parameters for that page.
+    private func updateLoupe(at pos: CGPoint) {
+        let halfW = containerSize.width / 2
+
+        // Which side is the cursor on?
+        let isLeft = pos.x < halfW
+        guard let img = isLeft ? leftImage : rightImage else { return }
+
+        // The page occupies half the container width
+        let pageContainerSize = CGSize(width: halfW, height: containerSize.height)
+
+        // Cursor position relative to the page's container
+        let localX = isLeft ? pos.x : pos.x - halfW
+        let localPos = CGPoint(x: localX, y: pos.y)
+
+        // Compute the rendered image size within its half-container (scaledToFit)
+        let imgAR = img.size.width / img.size.height
+        let conAR = pageContainerSize.width / pageContainerSize.height
+        let ivSize: CGSize = imgAR > conAR
+            ? CGSize(width: pageContainerSize.width, height: pageContainerSize.width / imgAR)
+            : CGSize(width: pageContainerSize.height * imgAR, height: pageContainerSize.height)
+
+        // Convert local cursor to image-view coords
+        let ox = (pageContainerSize.width  - ivSize.width)  / 2
+        let oy = (pageContainerSize.height - ivSize.height) / 2
+        let cursorInIV = CGPoint(x: localPos.x - ox, y: localPos.y - oy)
+
+        loupeImage = img
+        loupeImageViewSize = ivSize
+        loupeCursorInImage = cursorInIV
     }
 }
 

@@ -128,9 +128,10 @@ final class ReaderViewModel: ObservableObject {
 }
 
 enum ReadingMode: String, CaseIterable {
-    case singlePage    = "Single Page"
-    case doublePage    = "Double Page"
+    case singlePage     = "Single Page"
+    case doublePage     = "Double Page"
     case verticalScroll = "Vertical Scroll"
+    case verticalDouble = "Vertical Double"
 }
 
 extension Comparable {
