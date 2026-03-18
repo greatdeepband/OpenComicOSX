@@ -3,7 +3,7 @@ import AppKit
 
 /// A high-quality zoomable and pannable image view.
 /// - Trackpad pinch / scroll-wheel to zoom
-/// - Drag to pan when zoomed in
+/// - Left-click drag to pan when zoomed in
 /// - Right-click hold → circular magnifier loupe centred exactly on cursor
 struct ZoomableImageView: View {
     let image: NSImage
@@ -13,7 +13,6 @@ struct ZoomableImageView: View {
     let maxScale: CGFloat
 
     @GestureState private var gestureScale: CGFloat = 1.0
-    @GestureState private var gestureDrag: CGSize = .zero
 
     @State private var showLoupe: Bool = false
     @State private var loupePosition: CGPoint = .zero   // container coords
@@ -30,10 +29,7 @@ struct ZoomableImageView: View {
                     .antialiased(true)
                     .scaledToFit()
                     .scaleEffect(scale * gestureScale)
-                    .offset(
-                        x: offset.width + gestureDrag.width,
-                        y: offset.height + gestureDrag.height
-                    )
+                    .offset(x: offset.width, y: offset.height)
                     .frame(width: geo.size.width, height: geo.size.height)
                     .contentShape(Rectangle())
                     .gesture(
@@ -41,45 +37,41 @@ struct ZoomableImageView: View {
                             .updating($gestureScale) { v, s, _ in s = v.magnification }
                             .onEnded { v in
                                 scale = (scale * v.magnification).clamped(to: minScale...maxScale)
-                            }
-                    )
-                    .gesture(
-                        DragGesture()
-                            .updating($gestureDrag) { v, s, _ in
-                                guard scale > 1.05 else { return }
-                                s = v.translation
-                            }
-                            .onEnded { v in
-                                guard scale > 1.05 else { return }
-                                offset = CGSize(
-                                    width: offset.width + v.translation.width,
-                                    height: offset.height + v.translation.height
-                                )
+                                offset = clampedOffset(offset, containerSize: geo.size, scale: scale)
                             }
                     )
                     .onScrollWheel { event in
                         let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
-                        scale = (scale * factor).clamped(to: minScale...maxScale)
+                        let newScale = (scale * factor).clamped(to: minScale...maxScale)
+                        scale = newScale
+                        offset = clampedOffset(offset, containerSize: geo.size, scale: newScale)
                     }
 
-                // ── Loupe overlay — centred exactly on cursor ────────────────
+                // ── Loupe overlay ────────────────────────────────────────────
                 if showLoupe {
                     MagnifierView(
                         image: image,
                         cursorInImageView: containerToImageCoords(loupePosition, containerSize: geo.size),
                         imageViewSize: computeImageViewSize(containerSize: geo.size)
                     )
-                    // .position centres the view's frame on the given point —
-                    // so the loupe circle centre is exactly at loupePosition.
                     .position(x: loupePosition.x, y: loupePosition.y)
                     .allowsHitTesting(false)
                 }
 
-                // ── Right-click event catcher (on top, full frame) ───────────
-                RightClickCatcher(
-                    onBegan: { pos in loupePosition = pos; showLoupe = true },
-                    onMoved: { pos in loupePosition = pos },
-                    onEnded: { showLoupe = false }
+                // ── Unified mouse catcher (pan + loupe) ──────────────────────
+                MouseCatcher(
+                    onLeftDragBegan: { _ in },
+                    onLeftDragMoved: { delta in
+                        let newOffset = CGSize(
+                            width:  offset.width  + delta.width,
+                            height: offset.height + delta.height
+                        )
+                        offset = clampedOffset(newOffset, containerSize: geo.size, scale: scale)
+                    },
+                    onLeftDragEnded: { _ in },
+                    onRightBegan:  { pos in loupePosition = pos; showLoupe = true },
+                    onRightMoved:  { pos in loupePosition = pos },
+                    onRightEnded:  { showLoupe = false }
                 )
                 .allowsHitTesting(true)
             }
@@ -88,7 +80,6 @@ struct ZoomableImageView: View {
 
     // MARK: - Coordinate helpers
 
-    /// Size the image actually occupies on screen after scaledToFit + reader scale.
     private func computeImageViewSize(containerSize: CGSize) -> CGSize {
         let img = image.size
         guard img.width > 0, img.height > 0 else { return containerSize }
@@ -100,46 +91,96 @@ struct ZoomableImageView: View {
         return CGSize(width: fit.width * scale, height: fit.height * scale)
     }
 
-    /// Map a container-space point to image-view space (origin = top-left of the fitted image).
     private func containerToImageCoords(_ point: CGPoint, containerSize: CGSize) -> CGPoint {
         let ivSize = computeImageViewSize(containerSize: containerSize)
         let ox = (containerSize.width  - ivSize.width)  / 2 + offset.width
         let oy = (containerSize.height - ivSize.height) / 2 + offset.height
         return CGPoint(x: point.x - ox, y: point.y - oy)
     }
+
+    /// Clamp offset so the image never leaves the container entirely.
+    private func clampedOffset(_ proposed: CGSize, containerSize: CGSize, scale: CGFloat) -> CGSize {
+        guard scale > 1.0 else { return .zero }
+        let ivSize = computeImageViewSize(containerSize: containerSize)
+        // Maximum pan in each axis = half the overhang
+        let maxX = max(0, (ivSize.width  - containerSize.width)  / 2)
+        let maxY = max(0, (ivSize.height - containerSize.height) / 2)
+        return CGSize(
+            width:  proposed.width.clamped(to: -maxX...maxX),
+            height: proposed.height.clamped(to: -maxY...maxY)
+        )
+    }
 }
 
-// MARK: - Right-click catcher
+// MARK: - Unified mouse catcher (left drag + right click)
 
-struct RightClickCatcher: NSViewRepresentable {
-    var onBegan: (CGPoint) -> Void
-    var onMoved: (CGPoint) -> Void
-    var onEnded: () -> Void
+struct MouseCatcher: NSViewRepresentable {
+    var onLeftDragBegan: (CGPoint) -> Void
+    var onLeftDragMoved: (CGSize) -> Void
+    var onLeftDragEnded: (CGPoint) -> Void
+    var onRightBegan:   (CGPoint) -> Void
+    var onRightMoved:   (CGPoint) -> Void
+    var onRightEnded:   () -> Void
 
-    func makeNSView(context: Context) -> _RCatcherView {
-        let v = _RCatcherView()
-        v.onBegan = onBegan; v.onMoved = onMoved; v.onEnded = onEnded
+    func makeNSView(context: Context) -> _MouseCatcherView {
+        let v = _MouseCatcherView()
+        v.onLeftDragBegan = onLeftDragBegan
+        v.onLeftDragMoved = onLeftDragMoved
+        v.onLeftDragEnded = onLeftDragEnded
+        v.onRightBegan    = onRightBegan
+        v.onRightMoved    = onRightMoved
+        v.onRightEnded    = onRightEnded
         return v
     }
 
-    func updateNSView(_ v: _RCatcherView, context: Context) {
-        v.onBegan = onBegan; v.onMoved = onMoved; v.onEnded = onEnded
+    func updateNSView(_ v: _MouseCatcherView, context: Context) {
+        v.onLeftDragBegan = onLeftDragBegan
+        v.onLeftDragMoved = onLeftDragMoved
+        v.onLeftDragEnded = onLeftDragEnded
+        v.onRightBegan    = onRightBegan
+        v.onRightMoved    = onRightMoved
+        v.onRightEnded    = onRightEnded
     }
 }
 
-final class _RCatcherView: NSView {
-    var onBegan: ((CGPoint) -> Void)?
-    var onMoved: ((CGPoint) -> Void)?
-    var onEnded: (() -> Void)?
+final class _MouseCatcherView: NSView {
+    var onLeftDragBegan: ((CGPoint) -> Void)?
+    var onLeftDragMoved: ((CGSize) -> Void)?
+    var onLeftDragEnded: ((CGPoint) -> Void)?
+    var onRightBegan:    ((CGPoint) -> Void)?
+    var onRightMoved:    ((CGPoint) -> Void)?
+    var onRightEnded:    (() -> Void)?
+
+    private var lastDragLocation: NSPoint = .zero
 
     override var acceptsFirstResponder: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { self }
 
-    override func rightMouseDown(with event: NSEvent)    { onBegan?(pt(event)) }
-    override func rightMouseDragged(with event: NSEvent) { onMoved?(pt(event)) }
-    override func rightMouseUp(with event: NSEvent)      { onEnded?() }
+    // Left drag — pan
+    override func mouseDown(with event: NSEvent) {
+        lastDragLocation = event.locationInWindow
+        onLeftDragBegan?(swiftPt(event))
+    }
+    override func mouseDragged(with event: NSEvent) {
+        let current = event.locationInWindow
+        let delta = CGSize(
+            width:  current.x - lastDragLocation.x,
+            height: -(current.y - lastDragLocation.y)   // flip Y for SwiftUI coords
+        )
+        lastDragLocation = current
+        onLeftDragMoved?(delta)
+    }
+    override func mouseUp(with event: NSEvent) {
+        onLeftDragEnded?(swiftPt(event))
+    }
 
-    private func pt(_ event: NSEvent) -> CGPoint {
+    // Right click — loupe
+    override func rightMouseDown(with event: NSEvent)    { onRightBegan?(swiftPt(event)) }
+    override func rightMouseDragged(with event: NSEvent) { onRightMoved?(swiftPt(event)) }
+    override func rightMouseUp(with event: NSEvent)      { onRightEnded?() }
+
+    /// Convert NSEvent window coords → SwiftUI view coords (Y flipped).
+    private func swiftPt(_ event: NSEvent) -> CGPoint {
         let loc = convert(event.locationInWindow, from: nil)
         return CGPoint(x: loc.x, y: bounds.height - loc.y)
     }
@@ -179,3 +220,5 @@ extension View {
         modifier(ScrollWheelModifier(action: action))
     }
 }
+
+

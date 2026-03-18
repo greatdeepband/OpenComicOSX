@@ -40,10 +40,13 @@ struct LoupableImage: View {
                 .allowsHitTesting(false)
             }
 
-            RightClickCatcher(
-                onBegan: { pos in loupePosition = pos; showLoupe = true },
-                onMoved: { pos in loupePosition = pos },
-                onEnded: { showLoupe = false }
+            MouseCatcher(
+                onLeftDragBegan: { _ in },
+                onLeftDragMoved: { _ in },
+                onLeftDragEnded: { _ in },
+                onRightBegan: { pos in loupePosition = pos; showLoupe = true },
+                onRightMoved: { pos in loupePosition = pos },
+                onRightEnded: { showLoupe = false }
             )
             .allowsHitTesting(true)
         }
