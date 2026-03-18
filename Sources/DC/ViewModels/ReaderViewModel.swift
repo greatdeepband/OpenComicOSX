@@ -38,6 +38,8 @@ final class ReaderViewModel: ObservableObject {
 
     init(comic: Comic) {
         self.comic = comic
+        // Persist page count for stats.
+        ReadingPositionStore.save(pageCount: comic.pages.count, for: comic.url)
         // Restore last reading position.
         let saved = ReadingPositionStore.page(for: comic.url)
         if saved > 0 && saved < comic.pages.count {

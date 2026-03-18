@@ -60,6 +60,16 @@ final class LibraryViewModel: ObservableObject {
     /// Incremented whenever a thumbnail is saved — cards observe this to reload.
     @Published var thumbnailGeneration: Int = 0
 
+    /// Total number of unique comics across all galleries.
+    var totalComics: Int {
+        Set(galleries.flatMap { $0.comics }).count
+    }
+
+    /// Cumulative pages read across all comics (sum of page counts for opened comics).
+    var totalPages: Int {
+        ReadingPositionStore.totalPagesRead()
+    }
+
     /// In-memory thumbnail cache: comic URL path → NSImage.
     /// Populated eagerly at launch so cards render without any disk I/O.
     @Published var thumbnailCache: [String: NSImage] = [:]

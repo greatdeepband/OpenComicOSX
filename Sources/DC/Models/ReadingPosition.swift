@@ -47,6 +47,29 @@ struct ReadingPositionStore {
         loadOffsets()[url.path]
     }
 
+    // MARK: - Page count (for stats)
+
+    private static let pageCountKey = "pageCounts"
+
+    private static func loadPageCounts() -> [String: Int] {
+        (UserDefaults.standard.dictionary(forKey: pageCountKey) as? [String: Int]) ?? [:]
+    }
+
+    static func save(pageCount: Int, for url: URL) {
+        guard pageCount > 0 else { return }
+        var store = loadPageCounts()
+        store[url.path] = pageCount
+        UserDefaults.standard.set(store, forKey: pageCountKey)
+    }
+
+    static func pageCount(for url: URL) -> Int {
+        loadPageCounts()[url.path] ?? 0
+    }
+
+    static func totalPagesRead() -> Int {
+        loadPageCounts().values.reduce(0, +)
+    }
+
     // MARK: - Reading mode
 
     private static func loadModes() -> [String: String] {

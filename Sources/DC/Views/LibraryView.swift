@@ -50,8 +50,24 @@ struct LibraryView: View {
 
     private var header: some View {
         HStack {
-            Text("Open Comic")
-                .font(.largeTitle.bold())
+            HStack(spacing: 24) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Comics")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("\(library.totalComics)")
+                        .font(.title2.bold())
+                        .foregroundStyle(.primary)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pages Read")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("\(library.totalPages)")
+                        .font(.title2.bold())
+                        .foregroundStyle(.primary)
+                }
+            }
             Spacer()
             Button(action: { showCreateGallery = true }) {
                 Text("Create Gallery")
