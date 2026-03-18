@@ -6,8 +6,8 @@ import AppKit
 struct LibraryView: View {
     @EnvironmentObject var library: LibraryViewModel
 
-    /// Which sections are collapsed (by their string key).
-    @State private var collapsed: Set<String> = []
+    /// All sections start collapsed. Keys: "recent" or gallery UUID strings.
+    @State private var collapsed: Set<String> = ["recent"]
     /// Controls the Create Gallery sheet.
     @State private var showCreateGallery = false
     /// Controls the Rename sheet — holds the gallery being renamed.
@@ -72,59 +72,78 @@ struct LibraryView: View {
     // MARK: - Main content
 
     private var mainContent: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
 
-                // Recent section
-                if !library.recentComics.isEmpty {
-                    GallerySectionHeader(
-                        title: "Recent",
-                        key: "recent",
-                        collapsed: $collapsed
-                    )
-                    if !collapsed.contains("recent") {
-                        LazyVGrid(columns: columns, spacing: 16) {
-                            ForEach(library.recentComics) { recent in
-                                ComicCard(url: recent.url, title: recent.title, readingProgress: recent.readingProgress)
-                                    .onTapGesture { Task { await library.load(url: recent.url) } }
-                                    .contextMenu {
-                                        Button("Open") { Task { await library.load(url: recent.url) } }
-                                        Divider()
-                                        Button("Remove from Recents", role: .destructive) {
-                                            library.removeRecent(recent)
+                    // Recent section
+                    if !library.recentComics.isEmpty {
+                        GallerySectionHeader(
+                            title: "Recent",
+                            key: "recent",
+                            collapsed: $collapsed
+                        )
+                        if !collapsed.contains("recent") {
+                            LazyVGrid(columns: columns, spacing: 16) {
+                                ForEach(library.recentComics) { recent in
+                                    ComicCard(url: recent.url, title: recent.title, readingProgress: recent.readingProgress)
+                                        .id(recent.url)
+                                        .onTapGesture { Task { await library.load(url: recent.url) } }
+                                        .contextMenu {
+                                            Button("Open") { Task { await library.load(url: recent.url) } }
+                                            Divider()
+                                            Button("Remove from Recents", role: .destructive) {
+                                                library.removeRecent(recent)
+                                            }
                                         }
-                                    }
+                                }
+                            }
+                            .padding(.horizontal)
+                            .padding(.bottom, 20)
+                        }
+                    }
+
+                    // Gallery sections
+                    ForEach(library.galleries) { gallery in
+                        GallerySectionHeader(
+                            title: gallery.name,
+                            key: gallery.id.uuidString,
+                            collapsed: $collapsed,
+                            menuContent: AnyView(galleryMenu(for: gallery))
+                        )
+                        if !collapsed.contains(gallery.id.uuidString) {
+                            if gallery.comics.isEmpty {
+                                emptyGalleryPlaceholder(for: gallery)
+                            } else {
+                                DraggableComicGrid(
+                                    gallery: gallery,
+                                    columns: columns
+                                )
                             }
                         }
-                        .padding(.horizontal)
-                        .padding(.bottom, 20)
+                    }
+
+                    // Empty state when no recents and no galleries
+                    if library.recentComics.isEmpty && library.galleries.isEmpty {
+                        emptyState
                     }
                 }
-
-                // Gallery sections
-                ForEach(library.galleries) { gallery in
-                    GallerySectionHeader(
-                        title: gallery.name,
-                        key: gallery.id.uuidString,
-                        collapsed: $collapsed,
-                        menuContent: AnyView(galleryMenu(for: gallery))
-                    )
-                    if !collapsed.contains(gallery.id.uuidString) {
-                        if gallery.comics.isEmpty {
-                            emptyGalleryPlaceholder(for: gallery)
-                        } else {
-                            DraggableComicGrid(
-                                gallery: gallery,
-                                columns: columns
-                            )
-                        }
+            }
+            .onAppear {
+                // Collapse all gallery sections on every appearance.
+                var keys: Set<String> = ["recent"]
+                for g in library.galleries { keys.insert(g.id.uuidString) }
+                collapsed = keys
+                // Scroll to the last opened comic so the user sees where they left off.
+                if let url = library.lastOpenedURL {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        withAnimation { proxy.scrollTo(url, anchor: .center) }
                     }
                 }
-
-                // Empty state when no recents and no galleries
-                if library.recentComics.isEmpty && library.galleries.isEmpty {
-                    emptyState
-                }
+            }
+            .onChange(of: library.galleries.count) {
+                // Collapse any newly added gallery.
+                for g in library.galleries { collapsed.insert(g.id.uuidString) }
             }
         }
     }
@@ -225,16 +244,11 @@ struct LibraryView: View {
 
 // MARK: - Draggable Comic Grid
 
-/// A grid of comic cards for a single gallery that supports drag-to-reorder and multi-select.
+/// A grid of comic cards for a single gallery that supports drag-to-reorder.
 struct DraggableComicGrid: View {
     let gallery: Gallery
     let columns: [GridItem]
     @EnvironmentObject var library: LibraryViewModel
-
-    /// Currently selected comic URLs within this gallery.
-    @State private var selection: Set<URL> = []
-    /// The last tapped index, used as the anchor for shift-click range selection.
-    @State private var lastTappedIndex: Int? = nil
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: 16) {
@@ -242,32 +256,15 @@ struct DraggableComicGrid: View {
                 ComicCard(
                     url: url,
                     title: url.deletingPathExtension().lastPathComponent,
-                    readingProgress: nil,
-                    isSelected: selection.contains(url)
+                    readingProgress: nil
                 )
-                .onTapGesture {
-                    handleTap(url: url, index: index)
-                }
-                .simultaneousGesture(
-                    TapGesture().modifiers(.shift).onEnded {
-                        handleShiftTap(url: url, index: index)
-                    }
-                )
+                .id(url)
+                .onTapGesture { Task { await library.load(url: url) } }
                 .contextMenu {
-                    if selection.contains(url) && selection.count > 1 {
-                        Button("Open") { Task { await library.load(url: url) } }
-                        Divider()
-                        Button("Remove \(selection.count) Comics from Gallery", role: .destructive) {
-                            library.removeComics(selection, from: gallery.id)
-                            selection = []
-                        }
-                    } else {
-                        Button("Open") { Task { await library.load(url: url) } }
-                        Divider()
-                        Button("Remove from Gallery", role: .destructive) {
-                            library.removeComics([url], from: gallery.id)
-                            selection.remove(url)
-                        }
+                    Button("Open") { Task { await library.load(url: url) } }
+                    Divider()
+                    Button("Remove from Gallery", role: .destructive) {
+                        library.removeComics([url], from: gallery.id)
                     }
                 }
                 .onDrag {
@@ -282,35 +279,6 @@ struct DraggableComicGrid: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 20)
-        // Clicking on the background clears selection.
-        .background(
-            Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture { selection = []; lastTappedIndex = nil }
-        )
-    }
-
-    // MARK: - Selection logic
-
-    private func handleTap(url: URL, index: Int) {
-        // Plain tap with no modifier: open the comic and clear selection.
-        selection = []
-        lastTappedIndex = index
-        Task { await library.load(url: url) }
-    }
-
-    private func handleShiftTap(url: URL, index: Int) {
-        if let anchor = lastTappedIndex {
-            // Select the range between anchor and current index.
-            let lo = min(anchor, index)
-            let hi = max(anchor, index)
-            let range = gallery.comics[lo...hi]
-            selection = Set(range)
-        } else {
-            // No anchor yet — just select this card.
-            selection = [url]
-        }
-        lastTappedIndex = index
     }
 }
 
@@ -398,7 +366,6 @@ struct ComicCard: View {
     let url: URL
     let title: String
     let readingProgress: Double?
-    var isSelected: Bool = false
 
     @EnvironmentObject var library: LibraryViewModel
     @State private var thumbnail: NSImage? = nil
@@ -409,12 +376,6 @@ struct ComicCard: View {
                 .aspectRatio(0.7, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
-                .overlay {
-                    if isSelected {
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(Color.accentColor, lineWidth: 3)
-                    }
-                }
                 .overlay(alignment: .bottomTrailing) {
                     if let progress = readingProgress, progress > 0.02 {
                         progressBadge(progress)
@@ -425,7 +386,6 @@ struct ComicCard: View {
                 .font(.caption)
                 .lineLimit(2)
                 .truncationMode(.middle)
-                .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
         }
         .contentShape(Rectangle())
         .onAppear { loadThumb() }

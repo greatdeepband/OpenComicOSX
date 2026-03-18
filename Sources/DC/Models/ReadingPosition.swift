@@ -1,22 +1,25 @@
 import Foundation
 
-/// Persists the last-read page for each comic file.
+/// Persists the last-read page and reading mode for each comic file.
 /// Stored in UserDefaults keyed by the comic file path.
 struct ReadingPositionStore {
-    private static let key = "readingPositions"
+    private static let pageKey = "readingPositions"
+    private static let modeKey = "readingModes"
 
-    private static func load() -> [String: Int] {
-        (UserDefaults.standard.dictionary(forKey: key) as? [String: Int]) ?? [:]
+    // MARK: - Page
+
+    private static func loadPages() -> [String: Int] {
+        (UserDefaults.standard.dictionary(forKey: pageKey) as? [String: Int]) ?? [:]
     }
 
     static func save(page: Int, for url: URL) {
-        var store = load()
+        var store = loadPages()
         store[url.path] = page
-        UserDefaults.standard.set(store, forKey: key)
+        UserDefaults.standard.set(store, forKey: pageKey)
     }
 
     static func page(for url: URL) -> Int {
-        load()[url.path] ?? 0
+        loadPages()[url.path] ?? 0
     }
 
     /// Returns reading progress as a fraction (0.0 – 1.0) for the given comic.
@@ -24,5 +27,21 @@ struct ReadingPositionStore {
         guard totalPages > 1 else { return 0 }
         let page = page(for: url)
         return Double(page) / Double(totalPages - 1)
+    }
+
+    // MARK: - Reading mode
+
+    private static func loadModes() -> [String: String] {
+        (UserDefaults.standard.dictionary(forKey: modeKey) as? [String: String]) ?? [:]
+    }
+
+    static func save(mode: String, for url: URL) {
+        var store = loadModes()
+        store[url.path] = mode
+        UserDefaults.standard.set(store, forKey: modeKey)
+    }
+
+    static func mode(for url: URL) -> String? {
+        loadModes()[url.path]
     }
 }

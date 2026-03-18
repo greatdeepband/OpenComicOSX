@@ -207,7 +207,7 @@ struct ReaderView: View {
                 Button("Actual Size (100%)") { vm.zoomToActualSize() }
                 Divider()
                 ForEach(ReadingMode.allCases, id: \.self) { mode in
-                    Button(action: { vm.readingMode = mode }) {
+                    Button(action: { vm.readingMode = mode; vm.saveMode() }) {
                         HStack {
                             Text(mode.rawValue)
                             if vm.readingMode == mode {

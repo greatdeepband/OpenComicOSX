@@ -28,6 +28,11 @@ final class ReaderViewModel: ObservableObject {
         if saved > 0 && saved < comic.pages.count {
             self.currentPage = saved
         }
+        // Restore last reading mode.
+        if let savedMode = ReadingPositionStore.mode(for: comic.url),
+           let mode = ReadingMode(rawValue: savedMode) {
+            self.readingMode = mode
+        }
     }
 
     // MARK: - Navigation
@@ -57,6 +62,10 @@ final class ReaderViewModel: ObservableObject {
 
     private func savePosition() {
         ReadingPositionStore.save(page: currentPage, for: comic.url)
+    }
+
+    func saveMode() {
+        ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
     }
 
     // MARK: - Zoom

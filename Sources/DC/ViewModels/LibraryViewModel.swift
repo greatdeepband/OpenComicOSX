@@ -48,6 +48,8 @@ final class LibraryViewModel: ObservableObject {
     @Published var openComic: Comic? = nil
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
+    /// The URL of the last comic opened — used to scroll the library back to that card.
+    @Published var lastOpenedURL: URL? = nil
 
     /// Incremented whenever a thumbnail is saved — cards observe this to reload.
     @Published var thumbnailGeneration: Int = 0
@@ -158,6 +160,7 @@ final class LibraryViewModel: ObservableObject {
                 try ComicLoader.load(url: url)
             }.value
             openComic = comic
+            lastOpenedURL = url
             addRecent(url: url)
             // Generate thumbnail in background if not already cached.
             Task.detached(priority: .background) { [weak self] in
