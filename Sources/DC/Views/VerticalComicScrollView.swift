@@ -1,28 +1,35 @@
 import AppKit
 import SwiftUI
 
-/// Custom NSView that draws an NSImage scaled to fill its bounds exactly (aspect-fit).
+// MARK: - Flipped NSStackView (top-left origin, like UIKit)
+
+private final class FlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
+// MARK: - Page drawing view
+
 private final class ComicPageView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
 
+    // Must match the container — top-left origin.
     override var isFlipped: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let image = image else { return }
         NSColor.black.setFill()
-        dirtyRect.fill()
-        // Scale to fill bounds while preserving aspect ratio (aspect-fit).
+        bounds.fill()
+        guard let image = image else { return }
         let imgSize = image.size
         guard imgSize.width > 0, imgSize.height > 0 else { return }
+
+        // Aspect-fit: scale image to fill bounds width, centre vertically.
         let boundsAR = bounds.width / bounds.height
         let imgAR    = imgSize.width / imgSize.height
         let drawRect: NSRect
         if imgAR > boundsAR {
-            // Image wider than bounds — fit width, letterbox top/bottom.
             let h = bounds.width / imgAR
             drawRect = NSRect(x: 0, y: (bounds.height - h) / 2, width: bounds.width, height: h)
         } else {
-            // Image taller than bounds — fit height, pillarbox left/right.
             let w = bounds.height * imgAR
             drawRect = NSRect(x: (bounds.width - w) / 2, y: 0, width: w, height: bounds.height)
         }
@@ -30,17 +37,13 @@ private final class ComicPageView: NSView {
     }
 }
 
-/// NSViewRepresentable wrapping NSScrollView for vertical reading modes.
-/// Replaces SwiftUI ScrollView+LazyVStack to enable:
-/// - Exact pixel-position restore via NSScrollView.documentView.scroll(_:)
-/// - Reliable scroll offset tracking via NSScrollView notifications
-/// - Correct image scaling regardless of natural image size
+// MARK: - NSViewRepresentable
+
 struct VerticalComicScrollView: NSViewRepresentable {
     let pages: [ComicPage]
     let pagesPerRow: Int
     let scale: CGFloat
     let containerWidth: CGFloat
-    /// Fractional offset (0–1) to restore on first appearance. Nil = start at top.
     let restoreOffset: Double?
     var onPageChanged: (Int) -> Void
     var onOffsetChanged: (Double) -> Void
@@ -57,7 +60,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.contentView.drawsBackground = false
 
-        let stack = NSStackView()
+        let stack = FlippedStackView()
         stack.orientation = .vertical
         stack.spacing = 4
         stack.alignment = .centerX
@@ -140,15 +143,13 @@ struct VerticalComicScrollView: NSViewRepresentable {
             }
         }
 
-        // Constrain stack width so the scroll view doesn't expand horizontally.
-        // Remove old width constraints first.
+        // Remove old width constraints and add new one.
         stack.constraints.filter { $0.firstAttribute == .width }.forEach { stack.removeConstraint($0) }
         stack.widthAnchor.constraint(equalToConstant: totalWidth).isActive = true
 
         scrollView.layoutSubtreeIfNeeded()
     }
 
-    /// Creates a ComicPageView sized to `width` × proportional height.
     private func makePageView(image: NSImage, width: CGFloat) -> ComicPageView {
         let v = ComicPageView()
         v.image = image
@@ -195,7 +196,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
                 return
             }
             let targetY = CGFloat(fraction) * maxOffset
-            dcLog("[DC] NSSCROLL restore: fraction=\(fraction) docH=\(docH) visH=\(visH) maxOffset=\(maxOffset) targetY=\(targetY)")
+            dcLog("[DC] NSSCROLL restore: fraction=\(fraction) targetY=\(targetY)")
             doc.scroll(CGPoint(x: 0, y: targetY))
             sv.reflectScrolledClipView(sv.contentView)
             hasRestoredOnce = true
@@ -212,7 +213,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
             let fraction = Double(currentY / maxOffset).clamped(to: 0...1)
             onOffsetChanged(fraction)
 
-            // Find the page view whose top edge is closest to the current scroll position.
             var bestPage = 0
             var bestDist = CGFloat.greatestFiniteMagnitude
             for entry in pageViews {
