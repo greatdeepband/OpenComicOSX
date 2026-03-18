@@ -32,9 +32,9 @@ enum ComicLoader {
         case .pdf:
             return try loadPDF(url: url)
         case .cbr:
-            return try loadArchive(url: url, tool: "unrar", args: ["p", "-inul"])
+            return try loadArchive(url: url, tool: "unrar", args: ["e", "-inul", "-y"])
         case .cb7:
-            return try loadArchive(url: url, tool: "7z", args: ["e", "-so"])
+            return try loadArchive(url: url, tool: "7z", args: ["e", "-y"])
         case .cbt:
             return try loadTAR(url: url)
         case .epub:
@@ -48,10 +48,13 @@ enum ComicLoader {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
 
         try FileManager.default.unzipItem(at: url, to: tmpDir)
-        let pages = try loadImagesFromDirectory(tmpDir)
+
+        // Load images eagerly (force bitmap data into memory) BEFORE deleting tmp dir.
+        let pages = try loadImagesFromDirectory(tmpDir, eager: true)
+        try? FileManager.default.removeItem(at: tmpDir)
+
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
         return Comic(url: url, format: .cbz, pages: pages)
     }
@@ -66,7 +69,7 @@ enum ComicLoader {
         for i in 0..<doc.pageCount {
             guard let page = doc.page(at: i) else { continue }
             let bounds = page.bounds(for: .mediaBox)
-            let scale: CGFloat = 2.0  // render at 2x for sharpness
+            let scale: CGFloat = 2.0
             let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
             let image = NSImage(size: size)
             image.lockFocus()
@@ -87,11 +90,13 @@ enum ComicLoader {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
 
         let result = shell("tar", args: ["-xf", url.path, "-C", tmpDir.path])
         guard result == 0 else { throw LoadError.extractionFailed("tar exited \(result)") }
-        let pages = try loadImagesFromDirectory(tmpDir)
+
+        let pages = try loadImagesFromDirectory(tmpDir, eager: true)
+        try? FileManager.default.removeItem(at: tmpDir)
+
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
         return Comic(url: url, format: .cbt, pages: pages)
     }
@@ -102,34 +107,65 @@ enum ComicLoader {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        let fullArgs = args + [url.path, tmpDir.path]
+        // Extract flat into tmpDir (no subdirectory nesting from the tool itself)
+        let fullArgs = args + [url.path, "-o\(tmpDir.path)"]
         let result = shell(tool, args: fullArgs)
         guard result == 0 else {
-            throw LoadError.extractionFailed("\(tool) not found or failed (exit \(result)). Install via Homebrew: brew install \(tool == "unrar" ? "unrar" : "sevenzip")")
+            throw LoadError.extractionFailed(
+                "\(tool) not found or failed (exit \(result)). " +
+                "Install via Homebrew: brew install \(tool == "unrar" ? "unrar" : "sevenzip")"
+            )
         }
-        let pages = try loadImagesFromDirectory(tmpDir)
+
+        let pages = try loadImagesFromDirectory(tmpDir, eager: true)
+        try? FileManager.default.removeItem(at: tmpDir)
+
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
         return Comic(url: url, format: ComicFormat.from(url: url)!, pages: pages)
     }
 
     // MARK: - Helpers
 
-    /// Reads all image files from a directory, sorted by filename.
-    private static func loadImagesFromDirectory(_ dir: URL) throws -> [ComicPage] {
-        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
-        let files = try FileManager.default.contentsOfDirectory(
+    /// Recursively finds all image files under `dir`, sorted by relative path,
+    /// and loads them into NSImage instances.
+    ///
+    /// - Parameter eager: When true, forces each image's bitmap data into memory
+    ///   immediately so the file can be safely deleted afterwards.
+    private static func loadImagesFromDirectory(_ dir: URL, eager: Bool = false) throws -> [ComicPage] {
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif"])
+
+        // Use deep enumerator so images inside subdirectories are found.
+        guard let enumerator = FileManager.default.enumerator(
             at: dir,
             includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        )
-        let imageFiles = files
-            .filter { imageExtensions.contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return []
+        }
+
+        var imageFiles: [URL] = []
+        for case let fileURL as URL in enumerator {
+            let ext = fileURL.pathExtension.lowercased()
+            guard imageExtensions.contains(ext) else { continue }
+            // Skip macOS metadata files (e.g. __MACOSX/)
+            let components = fileURL.pathComponents
+            if components.contains("__MACOSX") { continue }
+            imageFiles.append(fileURL)
+        }
+
+        // Sort by the path relative to the root dir for natural page order.
+        imageFiles.sort {
+            $0.path.localizedStandardCompare($1.path) == .orderedAscending
+        }
 
         return imageFiles.enumerated().compactMap { (idx, fileURL) in
             guard let image = NSImage(contentsOf: fileURL) else { return nil }
+            if eager {
+                // Force decode: draw into a 1×1 context to ensure bitmap data is loaded.
+                image.lockFocus()
+                image.unlockFocus()
+            }
             return ComicPage(id: idx, image: image)
         }
     }
