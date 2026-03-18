@@ -6,9 +6,6 @@ import AppKit
 struct LibraryView: View {
     @EnvironmentObject var library: LibraryViewModel
 
-    /// Collapsed section keys. Galleries start collapsed on cold launch; Recent starts open.
-    /// After first appearance, this state is owned by the user for the session.
-    @State private var collapsed: Set<String> = []
     /// Controls the Create Gallery sheet.
     @State private var showCreateGallery = false
     /// Controls the Rename sheet — holds the gallery being renamed.
@@ -82,9 +79,9 @@ struct LibraryView: View {
                         GallerySectionHeader(
                             title: "Recent",
                             key: "recent",
-                            collapsed: $collapsed
+                            collapsed: $library.collapsedSections
                         )
-                        if !collapsed.contains("recent") {
+                        if !library.collapsedSections.contains("recent") {
                             LazyVGrid(columns: columns, spacing: 16) {
                                 ForEach(library.recentComics) { recent in
                                     ComicCard(url: recent.url, title: recent.title, readingProgress: recent.readingProgress)
@@ -109,10 +106,10 @@ struct LibraryView: View {
                         GallerySectionHeader(
                             title: gallery.name,
                             key: gallery.id.uuidString,
-                            collapsed: $collapsed,
+                            collapsed: $library.collapsedSections,
                             menuContent: AnyView(galleryMenu(for: gallery))
                         )
-                        if !collapsed.contains(gallery.id.uuidString) {
+                        if !library.collapsedSections.contains(gallery.id.uuidString) {
                             if gallery.comics.isEmpty {
                                 emptyGalleryPlaceholder(for: gallery)
                             } else {
@@ -135,7 +132,7 @@ struct LibraryView: View {
                     // Cold launch: collapse all galleries, leave Recent open.
                     var keys: Set<String> = []
                     for g in library.galleries { keys.insert(g.id.uuidString) }
-                    collapsed = keys
+                    library.collapsedSections = keys
                     library.hasLaunched = true
                 }
             }
@@ -146,11 +143,10 @@ struct LibraryView: View {
                 let inGallery = library.galleries.contains(where: { $0.comics.contains(url) })
                 if inGallery {
                     for g in library.galleries where g.comics.contains(url) {
-                        collapsed.remove(g.id.uuidString)
+                        library.collapsedSections.remove(g.id.uuidString)
                     }
                 } else if library.recentComics.contains(where: { $0.url == url }) {
-                    // Only fall back to Recent if the comic isn't in any gallery.
-                    collapsed.remove("recent")
+                    library.collapsedSections.remove("recent")
                 }
                 // Scroll after a short delay to let the grid render.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -159,8 +155,8 @@ struct LibraryView: View {
             }
             .onChange(of: library.galleries.count) {
                 // Collapse any newly added gallery (only applies during the session).
-                for g in library.galleries where !collapsed.contains(g.id.uuidString) {
-                    collapsed.insert(g.id.uuidString)
+                for g in library.galleries where !library.collapsedSections.contains(g.id.uuidString) {
+                    library.collapsedSections.insert(g.id.uuidString)
                 }
             }
         }

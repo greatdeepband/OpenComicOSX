@@ -54,6 +54,9 @@ final class LibraryViewModel: ObservableObject {
     /// True after the first cold launch — survives LibraryView re-creation.
     var hasLaunched: Bool = false
 
+    /// Collapsed gallery section keys — survives LibraryView re-creation.
+    @Published var collapsedSections: Set<String> = []
+
     /// Incremented whenever a thumbnail is saved — cards observe this to reload.
     @Published var thumbnailGeneration: Int = 0
 
