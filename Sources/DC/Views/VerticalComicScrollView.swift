@@ -33,7 +33,20 @@ private final class ComicPageView: NSView {
             let w = bounds.height * imgAR
             drawRect = NSRect(x: (bounds.width - w) / 2, y: 0, width: w, height: bounds.height)
         }
+
+        // When the view is flipped (isFlipped=true), NSGraphicsContext has a
+        // vertical flip transform applied. NSImage.draw(in:) is not flip-aware,
+        // so we must counter-rotate the context around the draw rect's centre.
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.saveGState()
+        // Translate to the centre of the draw rect, flip, translate back.
+        let cx = drawRect.midX
+        let cy = drawRect.midY
+        ctx.translateBy(x: cx, y: cy)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.translateBy(x: -cx, y: -cy)
         image.draw(in: drawRect, from: .zero, operation: .copy, fraction: 1.0)
+        ctx.restoreGState()
     }
 }
 
