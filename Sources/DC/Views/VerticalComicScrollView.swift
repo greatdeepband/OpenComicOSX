@@ -13,7 +13,8 @@ struct LoupeInfo {
     let image: NSImage
     let cursorInImageView: CGPoint
     let imageViewSize: CGSize
-    let positionInScrollView: CGPoint
+    /// Cursor position in window coordinates (AppKit, bottom-left origin).
+    let positionInWindow: CGPoint
 }
 
 extension Notification.Name {
@@ -30,12 +31,14 @@ private final class ComicPageView: NSView {
     // MARK: Right-click loupe
 
     override func rightMouseDown(with event: NSEvent) {
+        NSCursor.hide()
         postLoupe(event: event, name: .loupeBegan)
     }
     override func rightMouseDragged(with event: NSEvent) {
         postLoupe(event: event, name: .loupeMoved)
     }
     override func rightMouseUp(with event: NSEvent) {
+        NSCursor.unhide()
         NotificationCenter.default.post(name: .loupeEnded, object: nil)
     }
 
@@ -43,13 +46,8 @@ private final class ComicPageView: NSView {
         guard let image = image else { return }
         // Cursor in this view's flipped coordinate space.
         let localPt = convert(event.locationInWindow, from: nil)
-        // Cursor in the scroll view's coordinate space (for overlay positioning).
-        let scrollPt: CGPoint
-        if let sv = enclosingScrollView {
-            scrollPt = sv.contentView.convert(event.locationInWindow, from: nil)
-        } else {
-            scrollPt = localPt
-        }
+        // Raw window coordinates (bottom-left origin) — SwiftUI overlay will convert.
+        let windowPt = event.locationInWindow
         // Compute image-view size (aspect-fit within this view's bounds).
         let imgSize = image.size
         guard imgSize.width > 0, imgSize.height > 0 else { return }
@@ -67,7 +65,7 @@ private final class ComicPageView: NSView {
         let info = LoupeInfo(image: image,
                              cursorInImageView: cursorInIV,
                              imageViewSize: ivSize,
-                             positionInScrollView: scrollPt)
+                             positionInWindow: windowPt)
         NotificationCenter.default.post(name: name, object: info)
     }
 

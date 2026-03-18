@@ -131,18 +131,32 @@ struct ReaderView: View {
 
     private struct VerticalLoupeOverlay: View {
         @State private var loupeInfo: LoupeInfo? = nil
+        @State private var overlayFrame: CGRect = .zero
 
         var body: some View {
-            ZStack {
-                if let info = loupeInfo {
-                    MagnifierView(
-                        image: info.image,
-                        cursorInImageView: info.cursorInImageView,
-                        imageViewSize: info.imageViewSize
-                    )
-                    .position(x: info.positionInScrollView.x,
-                              y: info.positionInScrollView.y)
+            GeometryReader { geo in
+                ZStack {
+                    if let info = loupeInfo {
+                        // Convert AppKit window coords (bottom-left) to SwiftUI overlay coords (top-left).
+                        // geo.frame(in: .global) gives the overlay's frame in SwiftUI global space.
+                        // NSWindow content view height lets us flip Y.
+                        // AppKit window coords: origin bottom-left of content view.
+                        // SwiftUI global coords: origin top-left of content view.
+                        // overlayFrame is in SwiftUI global space (top-left origin).
+                        let winH = NSApp.keyWindow?.contentView?.bounds.height ?? 800
+                        let swiftUIX = info.positionInWindow.x - overlayFrame.minX
+                        // Flip Y: AppKit Y from bottom → SwiftUI Y from top, then subtract overlay top.
+                        let swiftUIY = (winH - info.positionInWindow.y) - overlayFrame.minY
+                        MagnifierView(
+                            image: info.image,
+                            cursorInImageView: info.cursorInImageView,
+                            imageViewSize: info.imageViewSize
+                        )
+                        .position(x: swiftUIX, y: swiftUIY)
+                    }
                 }
+                .onAppear { overlayFrame = geo.frame(in: .global) }
+                .onChange(of: geo.frame(in: .global)) { _, f in overlayFrame = f }
             }
             .onReceive(NotificationCenter.default.publisher(for: .loupeBegan)) { n in
                 loupeInfo = n.object as? LoupeInfo
