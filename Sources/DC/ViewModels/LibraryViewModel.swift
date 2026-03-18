@@ -254,6 +254,13 @@ final class LibraryViewModel: ObservableObject {
         saveGalleries()
     }
 
+    /// Remove specific comic URLs from a gallery.
+    func removeComics(_ urls: Set<URL>, from galleryID: UUID) {
+        guard let idx = galleries.firstIndex(where: { $0.id == galleryID }) else { return }
+        galleries[idx].comics.removeAll { urls.contains($0) }
+        saveGalleries()
+    }
+
     /// Reset a gallery's comic order back to folder-first, then alphabetical.
     func resetGalleryOrder(id: UUID) {
         guard let idx = galleries.firstIndex(where: { $0.id == id }) else { return }
