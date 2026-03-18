@@ -209,7 +209,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
                 return
             }
             let targetY = CGFloat(fraction) * maxOffset
-            dcLog("[DC] NSSCROLL restore: fraction=\(fraction) targetY=\(targetY)")
             doc.scroll(CGPoint(x: 0, y: targetY))
             sv.reflectScrolledClipView(sv.contentView)
             hasRestoredOnce = true
