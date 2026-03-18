@@ -26,3 +26,5 @@ venv/
 # Build artifacts
 *.log
 *.tmp
+build/
+.swiftpm/
