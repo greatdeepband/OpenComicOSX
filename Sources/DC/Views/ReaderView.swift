@@ -173,7 +173,16 @@ struct ReaderView: View {
                 vm.scale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
             }
             .onAppear {
-                proxy.scrollTo(vm.comic.pages[min(vm.currentPage, vm.pageCount - 1)].id, anchor: .top)
+                let targetPage = min(vm.currentPage, vm.pageCount - 1)
+                guard targetPage > 0 else { return }
+                // LazyVStack hasn't rendered distant pages yet when onAppear fires.
+                // Retry scrollTo on the next few run-loop cycles until it lands.
+                Task { @MainActor in
+                    for _ in 0..<10 {
+                        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+                        proxy.scrollTo(vm.comic.pages[targetPage].id, anchor: .top)
+                    }
+                }
             }
         }
     }
