@@ -244,27 +244,32 @@ struct SpreadView: View {
     @State private var loupeCursorInImage: CGPoint = .zero
 
     var body: some View {
+        // Derive live page width from container + scale so pages reflow on window resize.
+        let scaledTotal = containerSize.width * scale
+        let pageW = (scaledTotal - 2) / 2  // 2pt gap
+        let pageH = containerSize.height * scale
+
         ZStack {
-            // Pages
+            // Pages — use real frame widths, no scaleEffect
             HStack(spacing: 2) {
                 if let img = leftImage {
                     Image(nsImage: img)
                         .resizable()
                         .interpolation(.high)
                         .scaledToFit()
-                        .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
+                        .frame(width: pageW, height: pageH)
                 }
                 if let img = rightImage {
                     Image(nsImage: img)
                         .resizable()
                         .interpolation(.high)
                         .scaledToFit()
-                        .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
+                        .frame(width: pageW, height: pageH)
                 } else {
-                    Spacer().frame(maxWidth: containerSize.width / 2)
+                    Spacer().frame(width: pageW)
                 }
             }
-            .scaleEffect(scale)
+            .frame(width: scaledTotal)
             .offset(x: offset.width, y: offset.height)
 
             // Loupe overlay
@@ -327,27 +332,33 @@ struct SpreadView: View {
 
     /// Determine which page the cursor is over and compute loupe parameters for that page.
     private func updateLoupe(at pos: CGPoint) {
-        let halfW = containerSize.width / 2
+        // Use the same scaled dimensions as the layout.
+        let scaledTotal = containerSize.width * scale
+        let pageW = (scaledTotal - 2) / 2
+        let pageH = containerSize.height * scale
+        // The spread is centred in the container; compute its origin.
+        let spreadOriginX = (containerSize.width - scaledTotal) / 2 + offset.width
+        let spreadOriginY = (containerSize.height - pageH) / 2 + offset.height
 
         // Which side is the cursor on?
-        let isLeft = pos.x < halfW
+        let leftEdge  = spreadOriginX
+        let midX      = spreadOriginX + pageW + 2
+        let isLeft    = pos.x < midX
         guard let img = isLeft ? leftImage : rightImage else { return }
 
-        // The page occupies half the container width
-        let pageContainerSize = CGSize(width: halfW, height: containerSize.height)
+        // Cursor relative to the page's top-left corner
+        let localX = isLeft ? pos.x - leftEdge : pos.x - midX
+        let localY = pos.y - spreadOriginY
+        let localPos = CGPoint(x: localX, y: localY)
+        let pageContainerSize = CGSize(width: pageW, height: pageH)
 
-        // Cursor position relative to the page's container
-        let localX = isLeft ? pos.x : pos.x - halfW
-        let localPos = CGPoint(x: localX, y: pos.y)
-
-        // Compute the rendered image size within its half-container (scaledToFit)
+        // Compute rendered image size within its page frame (scaledToFit)
         let imgAR = img.size.width / img.size.height
         let conAR = pageContainerSize.width / pageContainerSize.height
         let ivSize: CGSize = imgAR > conAR
             ? CGSize(width: pageContainerSize.width, height: pageContainerSize.width / imgAR)
             : CGSize(width: pageContainerSize.height * imgAR, height: pageContainerSize.height)
 
-        // Convert local cursor to image-view coords
         let ox = (pageContainerSize.width  - ivSize.width)  / 2
         let oy = (pageContainerSize.height - ivSize.height) / 2
         let cursorInIV = CGPoint(x: localPos.x - ox, y: localPos.y - oy)
