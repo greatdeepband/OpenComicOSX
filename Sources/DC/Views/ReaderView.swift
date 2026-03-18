@@ -175,13 +175,17 @@ struct ReaderView: View {
             .onAppear {
                 let targetPage = min(vm.currentPage, vm.pageCount - 1)
                 guard targetPage > 0 else { return }
-                // LazyVStack hasn't rendered distant pages yet when onAppear fires.
-                // Retry scrollTo on the next few run-loop cycles until it lands.
+                // Lock out preference-key updates so the initial scroll can't be
+                // overwritten by the LazyVStack reporting page 0 while it builds.
+                vm.isRestoringPosition = true
                 Task { @MainActor in
-                    for _ in 0..<10 {
+                    // Retry for up to 700ms to let LazyVStack render the target page.
+                    for _ in 0..<14 {
                         try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
                         proxy.scrollTo(vm.comic.pages[targetPage].id, anchor: .top)
                     }
+                    // Unlock: user scrolling can now update currentPage normally.
+                    vm.isRestoringPosition = false
                 }
             }
         }

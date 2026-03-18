@@ -21,6 +21,11 @@ final class ReaderViewModel: ObservableObject {
     let minScale: CGFloat = 0.1
     let maxScale: CGFloat = 8.0
 
+    /// True during the initial scroll-to-saved-position phase.
+    /// While true, preference key updates from the scroll view are ignored so they
+    /// can't overwrite the restored page before the scroll lands.
+    var isRestoringPosition: Bool = false
+
     init(comic: Comic) {
         self.comic = comic
         // Restore last reading position.
@@ -70,6 +75,7 @@ final class ReaderViewModel: ObservableObject {
 
     /// Called by the vertical scroll view as pages scroll into view.
     func updateCurrentPage(_ page: Int) {
+        guard !isRestoringPosition else { return }
         currentPage = page
         // Don't call savePosition here — it fires too frequently while scrolling.
         // Position is saved once on close via persistCurrentPosition().
