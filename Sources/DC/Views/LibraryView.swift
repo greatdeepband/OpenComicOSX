@@ -81,6 +81,7 @@ struct LibraryView: View {
                             key: "recent",
                             collapsed: $library.collapsedSections
                         )
+                        .id("header:recent")
                         if !library.collapsedSections.contains("recent") {
                             LazyVGrid(columns: columns, spacing: 16) {
                                 ForEach(library.recentComics) { recent in
@@ -109,6 +110,7 @@ struct LibraryView: View {
                             collapsed: $library.collapsedSections,
                             menuContent: AnyView(galleryMenu(for: gallery))
                         )
+                        .id("header:" + gallery.id.uuidString)
                         if !library.collapsedSections.contains(gallery.id.uuidString) {
                             if gallery.comics.isEmpty {
                                 emptyGalleryPlaceholder(for: gallery)
@@ -148,12 +150,16 @@ struct LibraryView: View {
                 } else if library.recentComics.contains(where: { $0.url == url }) {
                     library.collapsedSections.remove("recent")
                 }
-                // Retry scrollTo until the card is rendered in the LazyVGrid.
-                Task { @MainActor in
-                    for _ in 0..<20 {
-                        try? await Task.sleep(nanoseconds: 80_000_000) // 80ms
-                        proxy.scrollTo(url, anchor: .center)
-                    }
+                // Scroll to the section header (always rendered) so it's reliable.
+                let scrollTarget: String
+                if inGallery,
+                   let g = library.galleries.first(where: { $0.comics.contains(url) }) {
+                    scrollTarget = "header:" + g.id.uuidString
+                } else {
+                    scrollTarget = "header:recent"
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(scrollTarget, anchor: .top) }
                 }
             }
             .onChange(of: library.galleries.count) {
