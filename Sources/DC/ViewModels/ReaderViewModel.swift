@@ -33,7 +33,8 @@ final class ReaderViewModel: ObservableObject {
         dcLog("[DC] RESTORE init: url=\(comic.url.lastPathComponent) savedPage=\(saved) pageCount=\(comic.pages.count)")
         if saved > 0 && saved < comic.pages.count {
             self.currentPage = saved
-            dcLog("[DC] RESTORE init: currentPage set to \(saved)")
+            self.isRestoringPosition = true  // block tracker until scroll lands
+            dcLog("[DC] RESTORE init: currentPage set to \(saved), isRestoringPosition=true")
         }
         // Restore last reading mode.
         if let savedMode = ReadingPositionStore.mode(for: comic.url),
