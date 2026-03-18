@@ -1,11 +1,8 @@
 import SwiftUI
 import AppKit
 
-/// Circular magnifier loupe — renders a 1.3× crop of `image` centred on `cursorInImageView`.
-///
-/// Coordinate contract:
-/// - `cursorInImageView`: point in image-view space (screen points, top-left origin).
-/// - `imageViewSize`: rendered size of the image on screen (screen points).
+/// Circular magnifier loupe — renders a 1.45× crop of `image` centred on `cursorInImageView`.
+/// When the cursor is near or past the image edge the loupe shows black for the out-of-bounds area.
 struct MagnifierView: View {
     let image: NSImage
     let cursorInImageView: CGPoint
@@ -27,33 +24,34 @@ struct MagnifierView: View {
         Canvas { ctx, size in
             guard imageViewSize.width > 0, imageViewSize.height > 0 else { return }
 
-            // How many image-view points fit inside the loupe at this magnification.
             let srcW = size.width  / magnification
             let srcH = size.height / magnification
             let halfW = srcW / 2
             let halfH = srcH / 2
 
-            // Clamp the CENTRE so the full srcW×srcH window always stays inside the image.
-            // This prevents the source rect from going out of bounds, which would cause
-            // the clamped (smaller) region to be stretched across the full loupe circle.
-            let clampedCX = cursorInImageView.x.clamped(to: halfW...(imageViewSize.width  - halfW))
-            let clampedCY = cursorInImageView.y.clamped(to: halfH...(imageViewSize.height - halfH))
-
+            // No clamping — use the raw cursor position.
+            // The source rect may extend outside the image bounds; the out-of-bounds
+            // portion simply won't be drawn, leaving the canvas background (black).
             let srcRect = CGRect(
-                x: clampedCX - halfW,
-                y: clampedCY - halfH,
+                x: cursorInImageView.x - halfW,
+                y: cursorInImageView.y - halfH,
                 width: srcW,
                 height: srcH
             )
 
-            // Convert image-view-space rect → NSImage source rect.
-            // NSImage uses bottom-left origin, so flip Y.
-            let imgSize = image.size
-            let normX = srcRect.minX / imageViewSize.width
-            let normY = srcRect.minY / imageViewSize.height
-            let normW = srcRect.width  / imageViewSize.width
-            let normH = srcRect.height / imageViewSize.height
+            // Intersect with image bounds to get the drawable portion.
+            let ivBounds = CGRect(origin: .zero, size: imageViewSize)
+            let visible = srcRect.intersection(ivBounds)
+            guard !visible.isNull, visible.width > 0, visible.height > 0 else { return }
 
+            // Map the visible portion of the source rect to normalised image coords.
+            let imgSize = image.size
+            let normX = visible.minX / imageViewSize.width
+            let normY = visible.minY / imageViewSize.height
+            let normW = visible.width  / imageViewSize.width
+            let normH = visible.height / imageViewSize.height
+
+            // NSImage uses bottom-left origin — flip Y.
             let imgSrcRect = CGRect(
                 x: normX * imgSize.width,
                 y: (1.0 - normY - normH) * imgSize.height,
@@ -61,11 +59,24 @@ struct MagnifierView: View {
                 height: normH * imgSize.height
             )
 
-            let destRect = CGRect(origin: .zero, size: size)
+            // Map the visible source portion to the corresponding destination rect
+            // inside the loupe canvas, preserving spatial alignment.
+            let scaleX = size.width  / srcW
+            let scaleY = size.height / srcH
+            let destRect = CGRect(
+                x: (visible.minX - srcRect.minX) * scaleX,
+                y: (visible.minY - srcRect.minY) * scaleY,
+                width:  visible.width  * scaleX,
+                height: visible.height * scaleY
+            )
 
             ctx.withCGContext { cgCtx in
                 cgCtx.interpolationQuality = .high
-                cgCtx.addEllipse(in: destRect)
+                // Fill background black so out-of-bounds area is clearly empty.
+                cgCtx.setFillColor(CGColor(gray: 0, alpha: 1))
+                cgCtx.fill(CGRect(origin: .zero, size: size))
+
+                cgCtx.addEllipse(in: CGRect(origin: .zero, size: size))
                 cgCtx.clip()
 
                 // Canvas CGContext has top-left origin; NSImage.draw needs bottom-left.
@@ -73,11 +84,19 @@ struct MagnifierView: View {
                 cgCtx.translateBy(x: 0, y: size.height)
                 cgCtx.scaleBy(x: 1, y: -1)
 
+                // Flip destRect Y to match the flipped context.
+                let flippedDest = CGRect(
+                    x: destRect.minX,
+                    y: size.height - destRect.maxY,
+                    width: destRect.width,
+                    height: destRect.height
+                )
+
                 NSGraphicsContext.saveGraphicsState()
                 let nsCtx = NSGraphicsContext(cgContext: cgCtx, flipped: false)
                 NSGraphicsContext.current = nsCtx
                 image.draw(
-                    in: destRect,
+                    in: flippedDest,
                     from: imgSrcRect,
                     operation: .copy,
                     fraction: 1.0,
