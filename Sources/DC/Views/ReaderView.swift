@@ -26,9 +26,10 @@ struct ReaderView: View {
     }
 
     private func handleKey(_ key: MonitoredKey) {
+        let isVertical = vm.readingMode == .verticalScroll
         switch key {
-        case .leftArrow:   vm.previousPage()
-        case .rightArrow:  vm.nextPage()
+        case .leftArrow:   if !isVertical { vm.previousPage() }
+        case .rightArrow:  if !isVertical { vm.nextPage() }
         case .upArrow:     vm.zoomIn()
         case .downArrow:   vm.zoomOut()
         case .cmdF:        toggleFullscreen()
@@ -181,7 +182,7 @@ struct ReaderView: View {
             Button(action: { vm.previousPage() }) {
                 Image(systemName: "chevron.left")
             }
-            .disabled(vm.currentPage == 0)
+            .disabled(vm.currentPage == 0 || vm.readingMode == .verticalScroll)
 
             Text("\(vm.currentPage + 1) / \(vm.pageCount)")
                 .monospacedDigit()
@@ -190,7 +191,7 @@ struct ReaderView: View {
             Button(action: { vm.nextPage() }) {
                 Image(systemName: "chevron.right")
             }
-            .disabled(vm.currentPage >= vm.pageCount - 1)
+            .disabled(vm.currentPage >= vm.pageCount - 1 || vm.readingMode == .verticalScroll)
         }
 
         ToolbarItemGroup(placement: .primaryAction) {

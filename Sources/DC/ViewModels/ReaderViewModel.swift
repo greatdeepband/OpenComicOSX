@@ -6,7 +6,7 @@ final class ReaderViewModel: ObservableObject {
     @Published var currentPage: Int = 0
     @Published var scale: CGFloat = 1.0
     @Published var offset: CGSize = .zero
-    @Published var readingMode: ReadingMode = .singlePage
+    @Published var readingMode: ReadingMode = .verticalScroll
     /// Updated by ReaderView via GeometryReader so toolbar actions have the real size.
     @Published var containerSize: CGSize = CGSize(width: 900, height: 600)
 
