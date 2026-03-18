@@ -105,12 +105,25 @@ struct ReaderView: View {
                 Spacer().frame(maxWidth: containerSize.width / 2)
             }
         }
+        .scaleEffect(vm.scale)
         .frame(width: containerSize.width, height: containerSize.height)
+        .clipped()
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { }   // absorb double-tap in double mode
+        .onScrollWheel { event in
+            let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
+            vm.scale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
+        }
+        .gesture(MagnifyGesture()
+            .onEnded { v in
+                vm.scale = (vm.scale * v.magnification).clamped(to: vm.minScale...vm.maxScale)
+            }
+        )
+        .onTapGesture(count: 2) {
+            if vm.scale > 1.05 { vm.resetZoom() }
+            else { vm.fitToWidth(containerWidth: containerSize.width) }
+        }
         .gesture(DragGesture(minimumDistance: 30).onEnded { v in
             if v.translation.width < -30 {
-                // advance by 2
                 vm.goTo(page: min(vm.currentPage + 2, vm.pageCount - 1))
             } else if v.translation.width > 30 {
                 vm.goTo(page: max(vm.currentPage - 2, 0))
@@ -130,7 +143,7 @@ struct ReaderView: View {
                             .resizable()
                             .interpolation(.high)
                             .scaledToFit()
-                            .frame(maxWidth: containerSize.width)
+                            .frame(maxWidth: containerSize.width * vm.scale)
                             .id(page.id)
                     }
                 }
