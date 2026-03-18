@@ -7,10 +7,69 @@ private final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
 }
 
+// MARK: - Loupe notification
+
+struct LoupeInfo {
+    let image: NSImage
+    let cursorInImageView: CGPoint
+    let imageViewSize: CGSize
+    let positionInScrollView: CGPoint
+}
+
+extension Notification.Name {
+    static let loupeBegan  = Notification.Name("VerticalLoupeBegan")
+    static let loupeMoved  = Notification.Name("VerticalLoupeMoved")
+    static let loupeEnded  = Notification.Name("VerticalLoupeEnded")
+}
+
 // MARK: - Page drawing view
 
 private final class ComicPageView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
+
+    // MARK: Right-click loupe
+
+    override func rightMouseDown(with event: NSEvent) {
+        postLoupe(event: event, name: .loupeBegan)
+    }
+    override func rightMouseDragged(with event: NSEvent) {
+        postLoupe(event: event, name: .loupeMoved)
+    }
+    override func rightMouseUp(with event: NSEvent) {
+        NotificationCenter.default.post(name: .loupeEnded, object: nil)
+    }
+
+    private func postLoupe(event: NSEvent, name: Notification.Name) {
+        guard let image = image else { return }
+        // Cursor in this view's flipped coordinate space.
+        let localPt = convert(event.locationInWindow, from: nil)
+        // Cursor in the scroll view's coordinate space (for overlay positioning).
+        let scrollPt: CGPoint
+        if let sv = enclosingScrollView {
+            scrollPt = sv.contentView.convert(event.locationInWindow, from: nil)
+        } else {
+            scrollPt = localPt
+        }
+        // Compute image-view size (aspect-fit within this view's bounds).
+        let imgSize = image.size
+        guard imgSize.width > 0, imgSize.height > 0 else { return }
+        let boundsAR = bounds.width / bounds.height
+        let imgAR    = imgSize.width / imgSize.height
+        let ivSize: CGSize
+        if imgAR > boundsAR {
+            ivSize = CGSize(width: bounds.width, height: bounds.width / imgAR)
+        } else {
+            ivSize = CGSize(width: bounds.height * imgAR, height: bounds.height)
+        }
+        let ox = (bounds.width  - ivSize.width)  / 2
+        let oy = (bounds.height - ivSize.height) / 2
+        let cursorInIV = CGPoint(x: localPt.x - ox, y: localPt.y - oy)
+        let info = LoupeInfo(image: image,
+                             cursorInImageView: cursorInIV,
+                             imageViewSize: ivSize,
+                             positionInScrollView: scrollPt)
+        NotificationCenter.default.post(name: name, object: info)
+    }
 
     // Must match the container — top-left origin.
     override var isFlipped: Bool { true }

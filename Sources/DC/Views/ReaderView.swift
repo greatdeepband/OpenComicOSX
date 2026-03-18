@@ -106,18 +106,53 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func verticalScrollView(containerSize: CGSize, pagesPerRow: Int) -> some View {
-        VerticalComicScrollView(
-            pages: vm.comic.pages,
-            pagesPerRow: pagesPerRow,
-            scale: vm.scale,
-            containerWidth: containerSize.width,
-            restoreOffset: vm.savedScrollOffset,
-            onPageChanged: { page in vm.updateCurrentPage(page) },
-            onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction }
-        )
-        .onScrollWheel { event in
-            let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
-            vm.scale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
+        ZStack {
+            VerticalComicScrollView(
+                pages: vm.comic.pages,
+                pagesPerRow: pagesPerRow,
+                scale: vm.scale,
+                containerWidth: containerSize.width,
+                restoreOffset: vm.savedScrollOffset,
+                onPageChanged: { page in vm.updateCurrentPage(page) },
+                onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction }
+            )
+            .onScrollWheel { event in
+                let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
+                vm.scale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
+            }
+
+            // Loupe overlay — listens for notifications from ComicPageView.
+            VerticalLoupeOverlay()
+                .allowsHitTesting(false)
+        }
+    }
+
+    // MARK: - Loupe overlay for vertical modes
+
+    private struct VerticalLoupeOverlay: View {
+        @State private var loupeInfo: LoupeInfo? = nil
+
+        var body: some View {
+            ZStack {
+                if let info = loupeInfo {
+                    MagnifierView(
+                        image: info.image,
+                        cursorInImageView: info.cursorInImageView,
+                        imageViewSize: info.imageViewSize
+                    )
+                    .position(x: info.positionInScrollView.x,
+                              y: info.positionInScrollView.y)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .loupeBegan)) { n in
+                loupeInfo = n.object as? LoupeInfo
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .loupeMoved)) { n in
+                loupeInfo = n.object as? LoupeInfo
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .loupeEnded)) { _ in
+                loupeInfo = nil
+            }
         }
     }
 
