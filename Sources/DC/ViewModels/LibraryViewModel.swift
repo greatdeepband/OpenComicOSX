@@ -335,11 +335,15 @@ final class LibraryViewModel: ObservableObject {
     }
 
     /// Save to disk and insert into the in-memory cache atomically.
+    /// The cache stores the 200×280 scaled thumbnail, NOT the original full-res image.
     func saveThumbnailAndCache(_ image: NSImage, for comicURL: URL) {
         let url = LibraryViewModel.thumbnailURL(for: comicURL)
         LibraryViewModel.saveThumbnail(image, to: url)
         let key = LibraryViewModel.thumbnailCacheKey(for: comicURL)
-        thumbnailCache[key] = image
+        // Load the scaled-down version from disk to avoid keeping the full-res image in RAM.
+        if let thumb = NSImage(contentsOf: url) {
+            thumbnailCache[key] = thumb
+        }
         thumbnailGeneration += 1
     }
 
