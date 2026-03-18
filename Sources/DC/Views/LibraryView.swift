@@ -143,11 +143,13 @@ struct LibraryView: View {
                 // Only act when transitioning from reader back to library (non-nil → nil).
                 guard oldComic != nil, newComic == nil, let url = library.lastOpenedURL else { return }
                 // Expand the gallery that contains this comic so the card is in the view tree.
-                for g in library.galleries where g.comics.contains(url) {
-                    collapsed.remove(g.id.uuidString)
-                }
-                // Also expand Recent if the comic is there.
-                if library.recentComics.contains(where: { $0.url == url }) {
+                let inGallery = library.galleries.contains(where: { $0.comics.contains(url) })
+                if inGallery {
+                    for g in library.galleries where g.comics.contains(url) {
+                        collapsed.remove(g.id.uuidString)
+                    }
+                } else if library.recentComics.contains(where: { $0.url == url }) {
+                    // Only fall back to Recent if the comic isn't in any gallery.
                     collapsed.remove("recent")
                 }
                 // Scroll after a short delay to let the grid render.
