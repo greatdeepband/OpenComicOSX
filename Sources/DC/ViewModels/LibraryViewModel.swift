@@ -101,28 +101,36 @@ final class LibraryViewModel: ObservableObject {
     // MARK: - Background thumbnail generation on launch
 
     private func generateMissingThumbnails() async {
-        // Recents
         let recents = await recentComics
-        for recent in recents {
-            await generateThumbnailIfNeeded(for: recent.url)
-        }
-        // Galleries
         let allGalleries = await galleries
-        for gallery in allGalleries {
-            for url in gallery.comics {
-                await generateThumbnailIfNeeded(for: url)
-            }
-        }
+        var all: [URL] = recents.map { $0.url }
+        for gallery in allGalleries { all.append(contentsOf: gallery.comics) }
+        await generateThumbnailsParallel(for: all)
     }
 
-    private func generateThumbnailIfNeeded(for url: URL) async {
-        let thumbURL = LibraryViewModel.thumbnailURL(for: url)
-        guard !FileManager.default.fileExists(atPath: thumbURL.path) else { return }
-        let cover = await Task.detached(priority: .background) {
-            ComicLoader.loadCover(url: url)
-        }.value
-        guard let cover else { return }
-        await MainActor.run { self.saveThumbnailAndCache(cover, for: url) }
+    /// Extract and cache covers for a list of URLs, 4 at a time.
+    private func generateThumbnailsParallel(for urls: [URL]) async {
+        let missing = urls.filter {
+            !FileManager.default.fileExists(atPath: LibraryViewModel.thumbnailURL(for: $0).path)
+        }
+        guard !missing.isEmpty else { return }
+        let concurrency = 4
+        await withTaskGroup(of: Void.self) { group in
+            var inFlight = 0
+            for url in missing {
+                if inFlight >= concurrency {
+                    await group.next()
+                    inFlight -= 1
+                }
+                inFlight += 1
+                group.addTask(priority: .background) { [weak self] in
+                    guard let self else { return }
+                    let cover = ComicLoader.loadCover(url: url)
+                    guard let cover else { return }
+                    await MainActor.run { self.saveThumbnailAndCache(cover, for: url) }
+                }
+            }
+        }
     }
 
     // MARK: - File Picker (open single file)
@@ -204,11 +212,9 @@ final class LibraryViewModel: ObservableObject {
         gallery.comics = resolveComics(from: folders)
         galleries.append(gallery)
         saveGalleries()
-        // Cache thumbnails in background
+        // Cache thumbnails in parallel (up to 4 concurrent workers).
         Task.detached(priority: .background) { [weak self, comics = gallery.comics] in
-            for url in comics {
-                await self?.generateThumbnailIfNeeded(for: url)
-            }
+            await self?.generateThumbnailsParallel(for: comics)
         }
     }
 
@@ -227,9 +233,7 @@ final class LibraryViewModel: ObservableObject {
         galleries[idx].comics = resolveComics(from: galleries[idx].sourceFolders)
         saveGalleries()
         Task.detached(priority: .background) { [weak self, comics = galleries[idx].comics] in
-            for url in comics {
-                await self?.generateThumbnailIfNeeded(for: url)
-            }
+            await self?.generateThumbnailsParallel(for: comics)
         }
     }
 
