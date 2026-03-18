@@ -9,6 +9,9 @@ final class LibraryViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String? = nil
 
+    /// Incremented whenever a thumbnail is saved — cards observe this to reload.
+    @Published var thumbnailGeneration: Int = 0
+
     private let recentsKey = "recentComics"
 
     /// Disk cache directory for cover thumbnails.
@@ -21,6 +24,28 @@ final class LibraryViewModel: ObservableObject {
 
     init() {
         loadRecents()
+        // Generate thumbnails for any recents that don't have one cached yet.
+        Task.detached(priority: .background) { [weak self] in
+            await self?.generateMissingThumbnails()
+        }
+    }
+
+    // MARK: - Background thumbnail generation on launch
+
+    private func generateMissingThumbnails() async {
+        let comics = await recentComics  // capture on main actor
+        for recent in comics {
+            let thumbURL = LibraryViewModel.thumbnailURL(for: recent.url)
+            guard !FileManager.default.fileExists(atPath: thumbURL.path) else { continue }
+            // Load cover on a background thread
+            let cover = await Task.detached(priority: .background) {
+                ComicLoader.loadCover(url: recent.url)
+            }.value
+            guard let cover else { continue }
+            LibraryViewModel.saveThumbnail(cover, to: thumbURL)
+            // Notify UI that a new thumbnail is available
+            await MainActor.run { self.thumbnailGeneration += 1 }
+        }
     }
 
     // MARK: - File Picker
@@ -56,6 +81,7 @@ final class LibraryViewModel: ObservableObject {
                 if !FileManager.default.fileExists(atPath: thumbURL.path),
                    let cover = comic.pages.first?.image {
                     LibraryViewModel.saveThumbnail(cover, to: thumbURL)
+                    await MainActor.run { self.thumbnailGeneration += 1 }
                 }
             }
         } catch {
@@ -109,7 +135,7 @@ final class LibraryViewModel: ObservableObject {
         return NSImage(contentsOf: url)
     }
 
-    nonisolated private static func saveThumbnail(_ image: NSImage, to url: URL) {
+    nonisolated static func saveThumbnail(_ image: NSImage, to url: URL) {
         let size = CGSize(width: 200, height: 280)
         let thumb = NSImage(size: size)
         thumb.lockFocus()
@@ -133,10 +159,8 @@ struct RecentComic: Identifiable, Codable {
     var title: String { url.deletingPathExtension().lastPathComponent }
     /// Computed from ReadingPositionStore — not stored in Codable (no page count available here).
     var readingProgress: Double? {
-        // We don't know total pages without loading the file, so return nil here.
-        // LibraryView can show a badge only when progress > 0 (page > 0).
         let page = ReadingPositionStore.page(for: url)
-        return page > 0 ? Double(page) / 100.0 : nil  // rough indicator, refined when opened
+        return page > 0 ? Double(page) / 100.0 : nil
     }
 
     init(url: URL) {

@@ -107,6 +107,8 @@ struct LibraryView: View {
 
 struct RecentComicCard: View {
     let comic: RecentComic
+    /// Observed so the card reloads when a background thumbnail is saved.
+    @EnvironmentObject var library: LibraryViewModel
     @State private var thumbnail: NSImage? = nil
 
     var body: some View {
@@ -127,8 +129,13 @@ struct RecentComicCard: View {
                 .truncationMode(.middle)
         }
         .contentShape(Rectangle())
-        .onAppear {
-            thumbnail = LibraryViewModel.loadThumbnail(for: comic.url)
+        .onAppear { loadThumb() }
+        .onChange(of: library.thumbnailGeneration) { _ in loadThumb() }
+    }
+
+    private func loadThumb() {
+        if let img = LibraryViewModel.loadThumbnail(for: comic.url) {
+            thumbnail = img
         }
     }
 

@@ -40,6 +40,102 @@ enum ComicLoader {
         }
     }
 
+    // MARK: - Cover-only fast load (for thumbnails)
+
+    /// Extracts only the first image from the archive — much faster than loading all pages.
+    /// Returns nil if the format is unsupported or extraction fails.
+    static func loadCover(url: URL) -> NSImage? {
+        guard let format = ComicFormat.from(url: url) else { return nil }
+        switch format {
+        case .cbz:
+            return loadCoverCBZ(url: url)
+        case .pdf:
+            return loadCoverPDF(url: url)
+        case .cbr, .cb7:
+            return loadCoverWithUnar(url: url)
+        case .cbt:
+            return loadCoverTAR(url: url)
+        case .epub:
+            return nil
+        }
+    }
+
+    private static func loadCoverCBZ(url: URL) -> NSImage? {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        guard (try? FileManager.default.unzipItem(at: url, to: tmpDir)) != nil else { return nil }
+        return firstImageInDirectory(tmpDir)
+    }
+
+    private static func loadCoverPDF(url: URL) -> NSImage? {
+        guard let doc = PDFDocument(url: url), let page = doc.page(at: 0) else { return nil }
+        let bounds = page.bounds(for: .mediaBox)
+        let scale: CGFloat = 1.0   // lower res is fine for a thumbnail
+        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        if let ctx = NSGraphicsContext.current?.cgContext {
+            ctx.scaleBy(x: scale, y: scale)
+            page.draw(with: .mediaBox, to: ctx)
+        }
+        image.unlockFocus()
+        return image
+    }
+
+    private static func loadCoverTAR(url: URL) -> NSImage? {
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let result = shell("tar", args: ["-xf", url.path, "-C", tmpDir.path])
+        guard result == 0 else { return nil }
+        return firstImageInDirectory(tmpDir)
+    }
+
+    private static func loadCoverWithUnar(url: URL) -> NSImage? {
+        let unarPaths = ["/opt/homebrew/bin/unar", "/usr/local/bin/unar"]
+        let unarPath = unarPaths.first { FileManager.default.fileExists(atPath: $0) } ?? "unar"
+
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+
+        let result = shellFull(unarPath, args: ["-o", tmpDir.path, "-force-overwrite", url.path])
+        guard result == 0 else { return nil }
+        return firstImageInDirectory(tmpDir)
+    }
+
+    /// Returns the first image file found in a directory (recursive, sorted).
+    private static func firstImageInDirectory(_ dir: URL) -> NSImage? {
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
+        guard let enumerator = FileManager.default.enumerator(
+            at: dir,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return nil }
+
+        var imageFiles: [URL] = []
+        for case let fileURL as URL in enumerator {
+            let ext = fileURL.pathExtension.lowercased()
+            guard imageExtensions.contains(ext) else { continue }
+            let components = fileURL.pathComponents
+            if components.contains("__MACOSX") { continue }
+            imageFiles.append(fileURL)
+        }
+        imageFiles.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+
+        guard let first = imageFiles.first, let image = NSImage(contentsOf: first) else { return nil }
+        // Force decode before the tmp dir is removed.
+        image.lockFocus()
+        image.unlockFocus()
+        return image
+    }
+
     // MARK: - CBZ (ZIP)
 
     private static func loadCBZ(url: URL) throws -> Comic {
