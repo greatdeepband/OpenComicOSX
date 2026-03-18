@@ -21,7 +21,11 @@ struct ReaderView: View {
         .toolbar { toolbarContent }
         .navigationTitle(vm.comic.title)
         .onAppear  { KeyMonitor.shared.start(handler: handleKey) }
-        .onDisappear { KeyMonitor.shared.stop() }
+        .onDisappear {
+            KeyMonitor.shared.stop()
+            // Always persist position when leaving the reader (covers vertical scroll mode).
+            vm.persistCurrentPosition()
+        }
     }
 
     private func handleKey(_ key: MonitoredKey) {
@@ -114,13 +118,19 @@ struct ReaderView: View {
                             LoupableImage(image: page.image)
                                 .frame(maxWidth: containerSize.width * vm.scale)
                                 .id(page.id)
+                                // When this page's top edge enters the viewport, mark it as current.
+                                .background(
+                                    GeometryReader { geo in
+                                        Color.clear.preference(
+                                            key: TopPagePreferenceKey.self,
+                                            value: geo.frame(in: .named("scroll")).minY < 80 ? page.id : -1
+                                        )
+                                    }
+                                )
                         }
                     } else {
-                        // Pair pages: (0,1), (2,3), ...
-                        // The pair fills the full container width together — each page gets half.
-                        // This mirrors how single-page vertical scroll fills the full width.
                         let totalWidth = containerSize.width * vm.scale
-                        let pageWidth  = (totalWidth - 2) / 2   // 2pt gap
+                        let pageWidth  = (totalWidth - 2) / 2
                         let pairs = stride(from: 0, to: vm.pageCount, by: 2).map { i -> (ComicPage, ComicPage?) in
                             let left = vm.comic.pages[i]
                             let right = (i + 1 < vm.pageCount) ? vm.comic.pages[i + 1] : nil
@@ -140,8 +150,22 @@ struct ReaderView: View {
                             }
                             .frame(width: totalWidth)
                             .id(pair.0.id)
+                            .background(
+                                GeometryReader { geo in
+                                    Color.clear.preference(
+                                        key: TopPagePreferenceKey.self,
+                                        value: geo.frame(in: .named("scroll")).minY < 80 ? pair.0.id : -1
+                                    )
+                                }
+                            )
                         }
                     }
+                }
+            }
+            .coordinateSpace(name: "scroll")
+            .onPreferenceChange(TopPagePreferenceKey.self) { pageID in
+                if pageID >= 0 && pageID != vm.currentPage {
+                    vm.updateCurrentPage(pageID)
                 }
             }
             .onScrollWheel { event in
@@ -151,6 +175,16 @@ struct ReaderView: View {
             .onAppear {
                 proxy.scrollTo(vm.comic.pages[min(vm.currentPage, vm.pageCount - 1)].id, anchor: .top)
             }
+        }
+    }
+
+    // Preference key: reports the page index nearest the top of the scroll view.
+    private struct TopPagePreferenceKey: PreferenceKey {
+        static var defaultValue: Int = -1
+        static func reduce(value: inout Int, nextValue: () -> Int) {
+            let next = nextValue()
+            // Take the highest page index that is still within the viewport top area.
+            if next >= 0 { value = next }
         }
     }
 

@@ -68,6 +68,19 @@ final class ReaderViewModel: ObservableObject {
         ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
     }
 
+    /// Called by the vertical scroll view as pages scroll into view.
+    func updateCurrentPage(_ page: Int) {
+        currentPage = page
+        // Don't call savePosition here — it fires too frequently while scrolling.
+        // Position is saved once on close via persistCurrentPosition().
+    }
+
+    /// Persists the current page and mode. Called when the reader is dismissed.
+    func persistCurrentPosition() {
+        ReadingPositionStore.save(page: currentPage, for: comic.url)
+        ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
+    }
+
     // MARK: - Zoom
 
     func zoom(by delta: CGFloat) {
