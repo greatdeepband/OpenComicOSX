@@ -30,13 +30,16 @@ final class ReaderViewModel: ObservableObject {
         self.comic = comic
         // Restore last reading position.
         let saved = ReadingPositionStore.page(for: comic.url)
+        dcLog("[DC] RESTORE init: url=\(comic.url.lastPathComponent) savedPage=\(saved) pageCount=\(comic.pages.count)")
         if saved > 0 && saved < comic.pages.count {
             self.currentPage = saved
+            dcLog("[DC] RESTORE init: currentPage set to \(saved)")
         }
         // Restore last reading mode.
         if let savedMode = ReadingPositionStore.mode(for: comic.url),
            let mode = ReadingMode(rawValue: savedMode) {
             self.readingMode = mode
+            dcLog("[DC] RESTORE init: readingMode set to \(savedMode)")
         }
     }
 
@@ -75,7 +78,11 @@ final class ReaderViewModel: ObservableObject {
 
     /// Called by the vertical scroll view as pages scroll into view.
     func updateCurrentPage(_ page: Int) {
-        guard !isRestoringPosition else { return }
+        guard !isRestoringPosition else {
+            dcLog("[DC] TRACKER suppressed: proposed=\(page) current=\(currentPage)")
+            return
+        }
+        dcLog("[DC] TRACKER: page=\(page)")
         currentPage = page
         // Don't call savePosition here — it fires too frequently while scrolling.
         // Position is saved once on close via persistCurrentPosition().
@@ -83,6 +90,7 @@ final class ReaderViewModel: ObservableObject {
 
     /// Persists the current page and mode. Called when the reader is dismissed.
     func persistCurrentPosition() {
+        dcLog("[DC] SAVE: url=\(comic.url.lastPathComponent) page=\(currentPage) mode=\(readingMode.rawValue)")
         ReadingPositionStore.save(page: currentPage, for: comic.url)
         ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
     }

@@ -21,11 +21,7 @@ struct ReaderView: View {
         .toolbar { toolbarContent }
         .navigationTitle(vm.comic.title)
         .onAppear  { KeyMonitor.shared.start(handler: handleKey) }
-        .onDisappear {
-            KeyMonitor.shared.stop()
-            // Always persist position when leaving the reader (covers vertical scroll mode).
-            vm.persistCurrentPosition()
-        }
+        .onDisappear { KeyMonitor.shared.stop() }
     }
 
     private func handleKey(_ key: MonitoredKey) {
@@ -174,17 +170,16 @@ struct ReaderView: View {
             }
             .onAppear {
                 let targetPage = min(vm.currentPage, vm.pageCount - 1)
+                dcLog("[DC] SCROLL onAppear: currentPage=\(vm.currentPage) targetPage=\(targetPage) pageCount=\(vm.pageCount)")
                 guard targetPage > 0 else { return }
-                // Lock out preference-key updates so the initial scroll can't be
-                // overwritten by the LazyVStack reporting page 0 while it builds.
                 vm.isRestoringPosition = true
                 Task { @MainActor in
-                    // Retry for up to 700ms to let LazyVStack render the target page.
-                    for _ in 0..<14 {
-                        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+                    for i in 0..<14 {
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        dcLog("[DC] SCROLL retry \(i): scrollTo page \(targetPage)")
                         proxy.scrollTo(vm.comic.pages[targetPage].id, anchor: .top)
                     }
-                    // Unlock: user scrolling can now update currentPage normally.
+                    dcLog("[DC] SCROLL restore done, unlocking tracker")
                     vm.isRestoringPosition = false
                 }
             }
@@ -206,7 +201,10 @@ struct ReaderView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
-            Button(action: { library.closeComic() }) {
+            Button(action: {
+                vm.persistCurrentPosition()
+                library.closeComic()
+            }) {
                 Label("Library", systemImage: "chevron.left")
             }
         }
