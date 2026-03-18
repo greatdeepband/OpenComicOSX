@@ -314,7 +314,11 @@ struct ComicCard: View {
     }
 
     private func loadThumb() {
-        if let img = LibraryViewModel.loadThumbnail(for: url) {
+        // Prefer the in-memory cache (O(1), no disk I/O).
+        if let img = library.cachedThumbnail(for: url) {
+            thumbnail = img
+        } else if let img = LibraryViewModel.loadThumbnail(for: url) {
+            // Fallback to disk if the cache hasn't populated yet.
             thumbnail = img
         }
     }

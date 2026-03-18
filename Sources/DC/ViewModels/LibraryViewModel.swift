@@ -52,6 +52,10 @@ final class LibraryViewModel: ObservableObject {
     /// Incremented whenever a thumbnail is saved — cards observe this to reload.
     @Published var thumbnailGeneration: Int = 0
 
+    /// In-memory thumbnail cache: comic URL path → NSImage.
+    /// Populated eagerly at launch so cards render without any disk I/O.
+    @Published var thumbnailCache: [String: NSImage] = [:]
+
     private let recentsKey = "recentComics"
     private let galleriesKey = "galleries_v1"
 
@@ -66,9 +70,32 @@ final class LibraryViewModel: ObservableObject {
     init() {
         loadRecents()
         loadGalleries()
-        Task.detached(priority: .background) { [weak self] in
+        // First: load all existing thumbnails from disk into RAM.
+        Task.detached(priority: .utility) { [weak self] in
+            await self?.preloadThumbnailCache()
+            // Then generate any that are still missing.
             await self?.generateMissingThumbnails()
         }
+    }
+
+    // MARK: - Eager cache pre-load
+
+    private func preloadThumbnailCache() async {
+        let dir = LibraryViewModel.thumbnailCacheDir
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil
+        ) else { return }
+
+        // Build a path→image map for every JPEG in the cache directory.
+        var loaded: [String: NSImage] = [:]
+        for file in files where file.pathExtension == "jpg" {
+            if let img = NSImage(contentsOf: file) {
+                // The filename is the abs(hash) of the comic path.
+                // We'll store by filename stem so lookups are O(1).
+                loaded[file.deletingPathExtension().lastPathComponent] = img
+            }
+        }
+        await MainActor.run { self.thumbnailCache = loaded }
     }
 
     // MARK: - Background thumbnail generation on launch
@@ -95,8 +122,7 @@ final class LibraryViewModel: ObservableObject {
             ComicLoader.loadCover(url: url)
         }.value
         guard let cover else { return }
-        LibraryViewModel.saveThumbnail(cover, to: thumbURL)
-        await MainActor.run { self.thumbnailGeneration += 1 }
+        await MainActor.run { self.saveThumbnailAndCache(cover, for: url) }
     }
 
     // MARK: - File Picker (open single file)
@@ -131,8 +157,7 @@ final class LibraryViewModel: ObservableObject {
                 let thumbURL = LibraryViewModel.thumbnailURL(for: url)
                 if !FileManager.default.fileExists(atPath: thumbURL.path),
                    let cover = comic.pages.first?.image {
-                    LibraryViewModel.saveThumbnail(cover, to: thumbURL)
-                    await MainActor.run { self.thumbnailGeneration += 1 }
+                    await MainActor.run { self.saveThumbnailAndCache(cover, for: url) }
                 }
             }
         } catch {
@@ -263,10 +288,31 @@ final class LibraryViewModel: ObservableObject {
         return thumbnailCacheDir.appendingPathComponent("\(hash).jpg")
     }
 
+    /// Disk-based lookup (used only during background generation).
     nonisolated static func loadThumbnail(for comicURL: URL) -> NSImage? {
         let url = thumbnailURL(for: comicURL)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return NSImage(contentsOf: url)
+    }
+
+    /// Cache key used by both the pre-loader and the in-memory lookup.
+    nonisolated static func thumbnailCacheKey(for comicURL: URL) -> String {
+        let hash = abs(comicURL.path.hashValue)
+        return "\(hash)"
+    }
+
+    /// Fast in-memory lookup — O(1), no disk I/O.
+    func cachedThumbnail(for comicURL: URL) -> NSImage? {
+        thumbnailCache[LibraryViewModel.thumbnailCacheKey(for: comicURL)]
+    }
+
+    /// Save to disk and insert into the in-memory cache atomically.
+    func saveThumbnailAndCache(_ image: NSImage, for comicURL: URL) {
+        let url = LibraryViewModel.thumbnailURL(for: comicURL)
+        LibraryViewModel.saveThumbnail(image, to: url)
+        let key = LibraryViewModel.thumbnailCacheKey(for: comicURL)
+        thumbnailCache[key] = image
+        thumbnailGeneration += 1
     }
 
     nonisolated static func saveThumbnail(_ image: NSImage, to url: URL) {
