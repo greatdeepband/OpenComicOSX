@@ -11,7 +11,7 @@ struct LibraryView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text("DC")
+                Text("Open Comic")
                     .font(.largeTitle.bold())
                 Spacer()
                 Button(action: { library.openFilePicker() }) {

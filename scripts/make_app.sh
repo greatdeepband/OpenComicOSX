@@ -3,7 +3,7 @@ set -e
 
 REPO="/Volumes/Media/__Manus/DC"
 BUILD="$REPO/build"
-APP="$BUILD/DC.app"
+APP="$BUILD/Open Comic.app"
 CONTENTS="$APP/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"

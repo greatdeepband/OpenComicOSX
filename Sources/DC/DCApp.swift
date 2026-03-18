@@ -5,7 +5,7 @@ struct DCApp: App {
     @StateObject private var library = LibraryViewModel()
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Open Comic") {
             ContentView()
                 .environmentObject(library)
         }
