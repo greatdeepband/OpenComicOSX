@@ -6,8 +6,11 @@ import AppKit
 struct LibraryView: View {
     @EnvironmentObject var library: LibraryViewModel
 
-    /// All sections start collapsed. Keys: "recent" or gallery UUID strings.
-    @State private var collapsed: Set<String> = ["recent"]
+    /// Collapsed section keys. Galleries start collapsed on cold launch; Recent starts open.
+    /// After first appearance, this state is owned by the user for the session.
+    @State private var collapsed: Set<String> = []
+    /// True after the first onAppear — prevents re-collapsing when returning from the reader.
+    @State private var hasAppeared = false
     /// Controls the Create Gallery sheet.
     @State private var showCreateGallery = false
     /// Controls the Rename sheet — holds the gallery being renamed.
@@ -130,20 +133,26 @@ struct LibraryView: View {
                 }
             }
             .onAppear {
-                // Collapse all gallery sections on every appearance.
-                var keys: Set<String> = ["recent"]
-                for g in library.galleries { keys.insert(g.id.uuidString) }
-                collapsed = keys
-                // Scroll to the last opened comic so the user sees where they left off.
-                if let url = library.lastOpenedURL {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        withAnimation { proxy.scrollTo(url, anchor: .center) }
+                if !hasAppeared {
+                    // Cold launch: collapse all galleries, leave Recent open.
+                    var keys: Set<String> = []
+                    for g in library.galleries { keys.insert(g.id.uuidString) }
+                    collapsed = keys
+                    hasAppeared = true
+                } else {
+                    // Returning from reader: just scroll to the last opened comic.
+                    if let url = library.lastOpenedURL {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            withAnimation { proxy.scrollTo(url, anchor: .center) }
+                        }
                     }
                 }
             }
             .onChange(of: library.galleries.count) {
-                // Collapse any newly added gallery.
-                for g in library.galleries { collapsed.insert(g.id.uuidString) }
+                // Collapse any newly added gallery (only applies during the session).
+                for g in library.galleries where !collapsed.contains(g.id.uuidString) {
+                    collapsed.insert(g.id.uuidString)
+                }
             }
         }
     }
