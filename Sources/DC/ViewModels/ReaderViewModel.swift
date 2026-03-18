@@ -46,6 +46,7 @@ final class ReaderViewModel: ObservableObject {
         }
         // Restore scroll offset for vertical modes.
         self.savedScrollOffset = ReadingPositionStore.scrollOffset(for: comic.url)
+        dcLog("[DC] INIT: url=\(comic.url.lastPathComponent) savedPage=\(saved) savedOffset=\(String(describing: self.savedScrollOffset)) mode=\(String(describing: ReadingPositionStore.mode(for: comic.url)))")
         // Restore last reading mode.
         if let savedMode = ReadingPositionStore.mode(for: comic.url),
            let mode = ReadingMode(rawValue: savedMode) {
@@ -100,6 +101,7 @@ final class ReaderViewModel: ObservableObject {
 
     /// Persists the current page, scroll offset, and mode. Called when the reader is dismissed.
     func persistCurrentPosition() {
+        dcLog("[DC] SAVE: page=\(currentPage) offsetFraction=\(scrollOffsetFraction) contentHeight=\(scrollContentHeight) mode=\(readingMode.rawValue)")
         ReadingPositionStore.save(page: currentPage, for: comic.url)
         ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
         let isVertical = readingMode == .verticalScroll || readingMode == .verticalDouble
