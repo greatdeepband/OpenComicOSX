@@ -9,8 +9,6 @@ struct LibraryView: View {
     /// Collapsed section keys. Galleries start collapsed on cold launch; Recent starts open.
     /// After first appearance, this state is owned by the user for the session.
     @State private var collapsed: Set<String> = []
-    /// True after the first onAppear — prevents re-collapsing when returning from the reader.
-    @State private var hasAppeared = false
     /// Controls the Create Gallery sheet.
     @State private var showCreateGallery = false
     /// Controls the Rename sheet — holds the gallery being renamed.
@@ -133,19 +131,28 @@ struct LibraryView: View {
                 }
             }
             .onAppear {
-                if !hasAppeared {
+                if !library.hasLaunched {
                     // Cold launch: collapse all galleries, leave Recent open.
                     var keys: Set<String> = []
                     for g in library.galleries { keys.insert(g.id.uuidString) }
                     collapsed = keys
-                    hasAppeared = true
-                } else {
-                    // Returning from reader: just scroll to the last opened comic.
-                    if let url = library.lastOpenedURL {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                            withAnimation { proxy.scrollTo(url, anchor: .center) }
-                        }
-                    }
+                    library.hasLaunched = true
+                }
+            }
+            .onChange(of: library.openComic) { _, newComic in
+                // Fired when returning from reader (openComic becomes nil).
+                guard newComic == nil, let url = library.lastOpenedURL else { return }
+                // Expand the gallery that contains this comic so the card is in the view tree.
+                for g in library.galleries where g.comics.contains(url) {
+                    collapsed.remove(g.id.uuidString)
+                }
+                // Also expand Recent if the comic is there.
+                if library.recentComics.contains(where: { $0.url == url }) {
+                    collapsed.remove("recent")
+                }
+                // Scroll after a short delay to let the grid render.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    withAnimation { proxy.scrollTo(url, anchor: .center) }
                 }
             }
             .onChange(of: library.galleries.count) {

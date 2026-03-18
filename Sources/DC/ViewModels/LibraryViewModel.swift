@@ -51,6 +51,9 @@ final class LibraryViewModel: ObservableObject {
     /// The URL of the last comic opened — used to scroll the library back to that card.
     @Published var lastOpenedURL: URL? = nil
 
+    /// True after the first cold launch — survives LibraryView re-creation.
+    var hasLaunched: Bool = false
+
     /// Incremented whenever a thumbnail is saved — cards observe this to reload.
     @Published var thumbnailGeneration: Int = 0
 
