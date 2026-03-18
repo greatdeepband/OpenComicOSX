@@ -87,42 +87,63 @@ struct ReaderView: View {
             return vm.comic.pages[next].image
         }()
 
-        HStack(spacing: 2) {
-            if let img = leftImage {
-                LoupableImage(image: img)
-                    .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
+        ZStack {
+            HStack(spacing: 2) {
+                if let img = leftImage {
+                    LoupableImage(image: img)
+                        .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
+                }
+                if let img = rightImage {
+                    LoupableImage(image: img)
+                        .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
+                } else {
+                    Spacer().frame(maxWidth: containerSize.width / 2)
+                }
             }
-            if let img = rightImage {
-                LoupableImage(image: img)
-                    .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
-            } else {
-                Spacer().frame(maxWidth: containerSize.width / 2)
-            }
+            .scaleEffect(vm.scale)
+            .offset(x: vm.offset.width, y: vm.offset.height)
+
+            // Pan catcher — sits on top, handles left-drag for panning
+            MouseCatcher(
+                onLeftDragBegan: { _ in },
+                onLeftDragMoved: { delta in
+                    guard vm.scale > 1.0 else { return }
+                    let spreadWidth  = containerSize.width  * vm.scale
+                    let spreadHeight = containerSize.height * vm.scale
+                    let maxX = max(0, (spreadWidth  - containerSize.width)  / 2)
+                    let maxY = max(0, (spreadHeight - containerSize.height) / 2)
+                    vm.offset = CGSize(
+                        width:  (vm.offset.width  + delta.width) .clamped(to: -maxX...maxX),
+                        height: (vm.offset.height + delta.height).clamped(to: -maxY...maxY)
+                    )
+                },
+                onLeftDragEnded: { _ in },
+                onRightBegan: { _ in },
+                onRightMoved: { _ in },
+                onRightEnded: { }
+            )
+            .allowsHitTesting(vm.scale > 1.0)   // only intercept when zoomed
         }
-        .scaleEffect(vm.scale)
         .frame(width: containerSize.width, height: containerSize.height)
         .clipped()
         .contentShape(Rectangle())
         .onScrollWheel { event in
             let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
-            vm.scale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
+            let newScale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
+            vm.scale = newScale
+            if newScale <= 1.0 { vm.offset = .zero }
         }
         .gesture(MagnifyGesture()
             .onEnded { v in
-                vm.scale = (vm.scale * v.magnification).clamped(to: vm.minScale...vm.maxScale)
+                let newScale = (vm.scale * v.magnification).clamped(to: vm.minScale...vm.maxScale)
+                vm.scale = newScale
+                if newScale <= 1.0 { vm.offset = .zero }
             }
         )
         .onTapGesture(count: 2) {
             if vm.scale > 1.05 { vm.resetZoom() }
             else { vm.fitToWidth(containerWidth: containerSize.width) }
         }
-        .gesture(DragGesture(minimumDistance: 30).onEnded { v in
-            if v.translation.width < -30 {
-                vm.goTo(page: min(vm.currentPage + 2, vm.pageCount - 1))
-            } else if v.translation.width > 30 {
-                vm.goTo(page: max(vm.currentPage - 2, 0))
-            }
-        })
     }
 
     // MARK: - Vertical Scroll
