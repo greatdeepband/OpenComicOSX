@@ -22,7 +22,7 @@ final class ReaderViewModel: ObservableObject {
     let maxScale: CGFloat = 8.0
 
     /// True during the initial scroll-to-saved-position phase.
-    /// While true, preference key updates from the scroll view are ignored so they
+    /// Blocks preference key updates so the LazyVStack reporting page 0
     /// can't overwrite the restored page before the scroll lands.
     var isRestoringPosition: Bool = false
 
@@ -30,17 +30,14 @@ final class ReaderViewModel: ObservableObject {
         self.comic = comic
         // Restore last reading position.
         let saved = ReadingPositionStore.page(for: comic.url)
-        dcLog("[DC] RESTORE init: url=\(comic.url.lastPathComponent) savedPage=\(saved) pageCount=\(comic.pages.count)")
         if saved > 0 && saved < comic.pages.count {
             self.currentPage = saved
-            self.isRestoringPosition = true  // block tracker until scroll lands
-            dcLog("[DC] RESTORE init: currentPage set to \(saved), isRestoringPosition=true")
+            self.isRestoringPosition = true
         }
         // Restore last reading mode.
         if let savedMode = ReadingPositionStore.mode(for: comic.url),
            let mode = ReadingMode(rawValue: savedMode) {
             self.readingMode = mode
-            dcLog("[DC] RESTORE init: readingMode set to \(savedMode)")
         }
     }
 
@@ -79,19 +76,18 @@ final class ReaderViewModel: ObservableObject {
 
     /// Called by the vertical scroll view as pages scroll into view.
     func updateCurrentPage(_ page: Int) {
-        guard !isRestoringPosition else {
-            dcLog("[DC] TRACKER suppressed: proposed=\(page) current=\(currentPage)")
+        if isRestoringPosition {
+            // Once the scroll view reports the target page, we know the scroll landed.
+            if page == currentPage {
+                isRestoringPosition = false
+            }
             return
         }
-        dcLog("[DC] TRACKER: page=\(page)")
         currentPage = page
-        // Don't call savePosition here — it fires too frequently while scrolling.
-        // Position is saved once on close via persistCurrentPosition().
     }
 
     /// Persists the current page and mode. Called when the reader is dismissed.
     func persistCurrentPosition() {
-        dcLog("[DC] SAVE: url=\(comic.url.lastPathComponent) page=\(currentPage) mode=\(readingMode.rawValue)")
         ReadingPositionStore.save(page: currentPage, for: comic.url)
         ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
     }
@@ -116,16 +112,11 @@ final class ReaderViewModel: ObservableObject {
     /// Scales so the image width fills the container width exactly.
     func fitToWidth(containerWidth: CGFloat) {
         guard let img = currentImage, img.size.width > 0 else { return }
-        // ZoomableImageView uses scaledToFit inside the container.
-        // scale=1 means the image is already fitted to the container.
-        // To fill the width we need to find what scale makes the fitted image
-        // expand to fill the full width.
         let imgAR = img.size.width / img.size.height
         let conAR = containerWidth / containerSize.height
-        // At scale=1 the fitted width is:
         let fittedWidth: CGFloat = imgAR > conAR
-            ? containerWidth                          // image is wider — already fills width
-            : containerSize.height * imgAR            // image is taller — fitted width < container
+            ? containerWidth
+            : containerSize.height * imgAR
         let targetScale = containerWidth / fittedWidth
         withAnimation(.easeOut(duration: 0.2)) {
             scale = targetScale.clamped(to: minScale...maxScale)
@@ -136,14 +127,11 @@ final class ReaderViewModel: ObservableObject {
     /// 1 image pixel = 1 screen point.
     func zoomToActualSize() {
         guard let img = currentImage, img.size.width > 0 else { return }
-        // At scale=1 the image is fitted to the container.
-        // Actual size means the image renders at its natural point size.
         let imgAR = img.size.width / img.size.height
         let conAR = containerSize.width / containerSize.height
         let fittedWidth: CGFloat = imgAR > conAR
             ? containerSize.width
             : containerSize.height * imgAR
-        // Scale needed so fittedWidth * scale == img.size.width
         let actualScale = img.size.width / fittedWidth
         withAnimation(.easeOut(duration: 0.2)) {
             scale = actualScale.clamped(to: minScale...maxScale)

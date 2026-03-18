@@ -170,16 +170,15 @@ struct ReaderView: View {
             }
             .onAppear {
                 let targetPage = min(vm.currentPage, vm.pageCount - 1)
-                dcLog("[DC] SCROLL onAppear: currentPage=\(vm.currentPage) targetPage=\(targetPage) pageCount=\(vm.pageCount)")
                 guard targetPage > 0 else { return }
-                vm.isRestoringPosition = true
                 Task { @MainActor in
-                    for i in 0..<14 {
-                        try? await Task.sleep(nanoseconds: 50_000_000)
-                        dcLog("[DC] SCROLL retry \(i): scrollTo page \(targetPage)")
+                    // Retry until the scroll lands (LazyVStack renders lazily).
+                    // Stop early once vm.currentPage reaches the target.
+                    for _ in 0..<20 {
+                        try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
                         proxy.scrollTo(vm.comic.pages[targetPage].id, anchor: .top)
+                        if !vm.isRestoringPosition { break } // tracker confirmed landing
                     }
-                    dcLog("[DC] SCROLL restore done, unlocking tracker")
                     vm.isRestoringPosition = false
                 }
             }
