@@ -89,17 +89,11 @@ struct ReaderView: View {
 
         HStack(spacing: 2) {
             if let img = leftImage {
-                Image(nsImage: img)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
+                LoupableImage(image: img)
                     .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
             }
             if let img = rightImage {
-                Image(nsImage: img)
-                    .resizable()
-                    .interpolation(.high)
-                    .scaledToFit()
+                LoupableImage(image: img)
                     .frame(maxWidth: containerSize.width / 2, maxHeight: containerSize.height)
             } else {
                 Spacer().frame(maxWidth: containerSize.width / 2)
@@ -139,11 +133,9 @@ struct ReaderView: View {
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(spacing: 4) {
                     ForEach(vm.comic.pages) { page in
-                        Image(nsImage: page.image)
-                            .resizable()
-                            .interpolation(.high)
-                            .scaledToFit()
-                            .frame(maxWidth: containerSize.width * vm.scale)
+                        LoupableImage(image: page.image)
+                            .frame(maxWidth: containerSize.width * vm.scale,
+                                   maxHeight: containerSize.height * vm.scale)
                             .id(page.id)
                     }
                 }
