@@ -45,7 +45,6 @@ struct LibraryView: View {
             } onCancel: {
                 renamingGallery = nil
             }
-            .environmentObject(library)
         }
     }
 
@@ -75,9 +74,10 @@ struct LibraryView: View {
     private var mainContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+
                 // Recent section
                 if !library.recentComics.isEmpty {
-                    SectionHeader(
+                    GallerySectionHeader(
                         title: "Recent",
                         key: "recent",
                         collapsed: $collapsed
@@ -103,29 +103,20 @@ struct LibraryView: View {
 
                 // Gallery sections
                 ForEach(library.galleries) { gallery in
-                    SectionHeader(
+                    GallerySectionHeader(
                         title: gallery.name,
                         key: gallery.id.uuidString,
                         collapsed: $collapsed,
-                        trailingMenu: {
-                            AnyView(galleryMenu(for: gallery))
-                        }
+                        menuContent: AnyView(galleryMenu(for: gallery))
                     )
                     if !collapsed.contains(gallery.id.uuidString) {
                         if gallery.comics.isEmpty {
                             emptyGalleryPlaceholder(for: gallery)
                         } else {
-                            LazyVGrid(columns: columns, spacing: 16) {
-                                ForEach(gallery.comics, id: \.self) { url in
-                                    ComicCard(url: url, title: url.deletingPathExtension().lastPathComponent, readingProgress: nil)
-                                        .onTapGesture { Task { await library.load(url: url) } }
-                                        .contextMenu {
-                                            Button("Open") { Task { await library.load(url: url) } }
-                                        }
-                                }
-                            }
-                            .padding(.horizontal)
-                            .padding(.bottom, 20)
+                            DraggableComicGrid(
+                                gallery: gallery,
+                                columns: columns
+                            )
                         }
                     }
                 }
@@ -143,13 +134,15 @@ struct LibraryView: View {
     private func galleryMenu(for gallery: Gallery) -> some View {
         Group {
             Button("Add Folders…") {
-                pickFolders { urls in
-                    library.addFolders(urls, to: gallery.id)
-                }
+                pickFolders { urls in library.addFolders(urls, to: gallery.id) }
             }
             Button("Rename…") {
                 renameText = gallery.name
                 renamingGallery = gallery
+            }
+            Divider()
+            Button("Reset to Alphabetical Order") {
+                library.resetGalleryOrder(id: gallery.id)
             }
             Divider()
             Button("Delete Gallery", role: .destructive) {
@@ -163,9 +156,7 @@ struct LibraryView: View {
     private func emptyGalleryPlaceholder(for gallery: Gallery) -> some View {
         HStack {
             Button("Add Folders…") {
-                pickFolders { urls in
-                    library.addFolders(urls, to: gallery.id)
-                }
+                pickFolders { urls in library.addFolders(urls, to: gallery.id) }
             }
             .buttonStyle(.bordered)
             .padding(.horizontal)
@@ -232,13 +223,72 @@ struct LibraryView: View {
     }
 }
 
-// MARK: - Section Header
+// MARK: - Draggable Comic Grid
 
-struct SectionHeader: View {
+/// A grid of comic cards for a single gallery that supports drag-to-reorder.
+struct DraggableComicGrid: View {
+    let gallery: Gallery
+    let columns: [GridItem]
+    @EnvironmentObject var library: LibraryViewModel
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 16) {
+            ForEach(Array(gallery.comics.enumerated()), id: \.element) { index, url in
+                ComicCard(url: url, title: url.deletingPathExtension().lastPathComponent, readingProgress: nil)
+                    .onTapGesture { Task { await library.load(url: url) } }
+                    .contextMenu {
+                        Button("Open") { Task { await library.load(url: url) } }
+                    }
+                    .onDrag {
+                        NSItemProvider(object: url.path as NSString)
+                    }
+                    .onDrop(of: [.plainText], delegate: ComicDropDelegate(
+                        targetIndex: index,
+                        galleryID: gallery.id,
+                        library: library
+                    ))
+            }
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 20)
+    }
+}
+
+// MARK: - Drop Delegate for comic reordering
+
+struct ComicDropDelegate: DropDelegate {
+    let targetIndex: Int
+    let galleryID: UUID
+    let library: LibraryViewModel
+
+    func performDrop(info: DropInfo) -> Bool {
+        guard let item = info.itemProviders(for: [.plainText]).first else { return false }
+        item.loadItem(forTypeIdentifier: "public.plain-text", options: nil) { data, _ in
+            guard let data = data as? Data,
+                  let path = String(data: data, encoding: .utf8),
+                  let gallery = library.galleries.first(where: { $0.id == galleryID }),
+                  let sourceIndex = gallery.comics.firstIndex(where: { $0.path == path })
+            else { return }
+            DispatchQueue.main.async {
+                library.moveComics(in: galleryID, from: IndexSet(integer: sourceIndex), to: targetIndex)
+            }
+        }
+        return true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+}
+
+// MARK: - Gallery Section Header
+// Layout: [Title]  [▾/▸]  [⋯]
+
+struct GallerySectionHeader: View {
     let title: String
     let key: String
     @Binding var collapsed: Set<String>
-    var trailingMenu: (() -> AnyView)? = nil
+    var menuContent: AnyView? = nil
 
     private var isCollapsed: Bool { collapsed.contains(key) }
 
@@ -247,13 +297,22 @@ struct SectionHeader: View {
             Text(title)
                 .font(.headline)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
 
             Spacer()
 
-            // Context menu for galleries (three-dot button)
-            if let menu = trailingMenu {
+            // Collapse chevron — first on the right
+            Button(action: toggleCollapse) {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .foregroundStyle(.secondary)
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+
+            // Options menu — second on the right (only for galleries)
+            if let menu = menuContent {
                 Menu {
-                    menu()
+                    menu
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .foregroundStyle(.secondary)
@@ -261,27 +320,19 @@ struct SectionHeader: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
             }
-
-            // Collapse chevron
-            Button(action: {
-                if isCollapsed { collapsed.remove(key) } else { collapsed.insert(key) }
-            }) {
-                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
-                    .foregroundStyle(.secondary)
-                    .font(.caption.weight(.semibold))
-            }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
-        .onTapGesture {
-            if isCollapsed { collapsed.remove(key) } else { collapsed.insert(key) }
-        }
+        .onTapGesture { toggleCollapse() }
+    }
+
+    private func toggleCollapse() {
+        if isCollapsed { collapsed.remove(key) } else { collapsed.insert(key) }
     }
 }
 
-// MARK: - Comic Card (generic, works for recents and galleries)
+// MARK: - Comic Card
 
 struct ComicCard: View {
     let url: URL
@@ -314,11 +365,9 @@ struct ComicCard: View {
     }
 
     private func loadThumb() {
-        // Prefer the in-memory cache (O(1), no disk I/O).
         if let img = library.cachedThumbnail(for: url) {
             thumbnail = img
         } else if let img = LibraryViewModel.loadThumbnail(for: url) {
-            // Fallback to disk if the cache hasn't populated yet.
             thumbnail = img
         }
     }
@@ -362,6 +411,10 @@ struct CreateGallerySheet: View {
 
     @State private var name = ""
     @State private var selectedFolders: [URL] = []
+
+    private var nameIsValid: Bool {
+        !name.trimmingCharacters(in: .whitespaces).isEmpty
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -416,11 +469,14 @@ struct CreateGallerySheet: View {
                     .keyboardShortcut(.escape)
                 Spacer()
                 Button("Create") {
-                    library.createGallery(name: name.isEmpty ? "Gallery" : name, folders: selectedFolders)
+                    library.createGallery(
+                        name: name.trimmingCharacters(in: .whitespaces),
+                        folders: selectedFolders
+                    )
                     dismiss()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty && selectedFolders.isEmpty)
+                .disabled(!nameIsValid)
             }
         }
         .padding(24)

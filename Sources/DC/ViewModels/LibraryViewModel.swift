@@ -243,6 +243,20 @@ final class LibraryViewModel: ObservableObject {
         saveGalleries()
     }
 
+    /// Reorder comics within a gallery (drag-to-reorder).
+    func moveComics(in galleryID: UUID, from source: IndexSet, to destination: Int) {
+        guard let idx = galleries.firstIndex(where: { $0.id == galleryID }) else { return }
+        galleries[idx].comics.move(fromOffsets: source, toOffset: destination)
+        saveGalleries()
+    }
+
+    /// Reset a gallery's comic order back to folder-first, then alphabetical.
+    func resetGalleryOrder(id: UUID) {
+        guard let idx = galleries.firstIndex(where: { $0.id == id }) else { return }
+        galleries[idx].comics = resolveComics(from: galleries[idx].sourceFolders)
+        saveGalleries()
+    }
+
     private func loadGalleries() {
         guard let data = UserDefaults.standard.data(forKey: galleriesKey),
               let decoded = try? JSONDecoder().decode([Gallery].self, from: data)
