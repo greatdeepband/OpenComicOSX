@@ -139,9 +139,9 @@ struct LibraryView: View {
                     library.hasLaunched = true
                 }
             }
-            .onChange(of: library.openComic) { _, newComic in
-                // Fired when returning from reader (openComic becomes nil).
-                guard newComic == nil, let url = library.lastOpenedURL else { return }
+            .onChange(of: library.openComic) { oldComic, newComic in
+                // Only act when transitioning from reader back to library (non-nil → nil).
+                guard oldComic != nil, newComic == nil, let url = library.lastOpenedURL else { return }
                 // Expand the gallery that contains this comic so the card is in the view tree.
                 for g in library.galleries where g.comics.contains(url) {
                     collapsed.remove(g.id.uuidString)
