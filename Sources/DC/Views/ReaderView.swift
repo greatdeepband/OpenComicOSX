@@ -117,6 +117,10 @@ struct ReaderView: View {
                         }
                     } else {
                         // Pair pages: (0,1), (2,3), ...
+                        // The pair fills the full container width together — each page gets half.
+                        // This mirrors how single-page vertical scroll fills the full width.
+                        let totalWidth = containerSize.width * vm.scale
+                        let pageWidth  = (totalWidth - 2) / 2   // 2pt gap
                         let pairs = stride(from: 0, to: vm.pageCount, by: 2).map { i -> (ComicPage, ComicPage?) in
                             let left = vm.comic.pages[i]
                             let right = (i + 1 < vm.pageCount) ? vm.comic.pages[i + 1] : nil
@@ -125,17 +129,16 @@ struct ReaderView: View {
                         ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
                             HStack(spacing: 2) {
                                 LoupableImage(image: pair.0.image)
-                                    .frame(maxWidth: (containerSize.width / 2) * vm.scale,
-                                           maxHeight: containerSize.height * vm.scale)
+                                    .frame(width: pageWidth)
                                 if let rightPage = pair.1 {
                                     LoupableImage(image: rightPage.image)
-                                        .frame(maxWidth: (containerSize.width / 2) * vm.scale,
-                                               maxHeight: containerSize.height * vm.scale)
+                                        .frame(width: pageWidth)
                                 } else {
                                     Spacer()
-                                        .frame(maxWidth: (containerSize.width / 2) * vm.scale)
+                                        .frame(width: pageWidth)
                                 }
                             }
+                            .frame(width: totalWidth)
                             .id(pair.0.id)
                         }
                     }
