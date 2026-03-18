@@ -23,6 +23,11 @@ final class ReaderViewModel: ObservableObject {
 
     init(comic: Comic) {
         self.comic = comic
+        // Restore last reading position.
+        let saved = ReadingPositionStore.page(for: comic.url)
+        if saved > 0 && saved < comic.pages.count {
+            self.currentPage = saved
+        }
     }
 
     // MARK: - Navigation
@@ -31,6 +36,7 @@ final class ReaderViewModel: ObservableObject {
         let step = readingMode == .doublePage ? 2 : 1
         guard currentPage < pageCount - 1 else { return }
         currentPage = min(currentPage + step, pageCount - 1)
+        savePosition()
         resetZoom()
     }
 
@@ -38,13 +44,19 @@ final class ReaderViewModel: ObservableObject {
         let step = readingMode == .doublePage ? 2 : 1
         guard currentPage > 0 else { return }
         currentPage = max(currentPage - step, 0)
+        savePosition()
         resetZoom()
     }
 
     func goTo(page: Int) {
         guard page >= 0 && page < pageCount else { return }
         currentPage = page
+        savePosition()
         resetZoom()
+    }
+
+    private func savePosition() {
+        ReadingPositionStore.save(page: currentPage, for: comic.url)
     }
 
     // MARK: - Zoom

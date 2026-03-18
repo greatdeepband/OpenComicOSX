@@ -86,6 +86,15 @@ struct LibraryView: View {
                             .onTapGesture {
                                 Task { await library.load(url: recent.url) }
                             }
+                            .contextMenu {
+                                Button("Open") {
+                                    Task { await library.load(url: recent.url) }
+                                }
+                                Divider()
+                                Button("Remove from Recents", role: .destructive) {
+                                    library.removeRecent(recent)
+                                }
+                            }
                     }
                 }
                 .padding()
@@ -98,16 +107,18 @@ struct LibraryView: View {
 
 struct RecentComicCard: View {
     let comic: RecentComic
+    @State private var thumbnail: NSImage? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.secondary.opacity(0.15))
+            coverImage
                 .aspectRatio(0.7, contentMode: .fit)
-                .overlay {
-                    Image(systemName: "book.pages")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.tertiary)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
+                .overlay(alignment: .bottomTrailing) {
+                    if let progress = comic.readingProgress, progress > 0.02 {
+                        progressBadge(progress)
+                    }
                 }
 
             Text(comic.title)
@@ -116,12 +127,38 @@ struct RecentComicCard: View {
                 .truncationMode(.middle)
         }
         .contentShape(Rectangle())
-        .hoverEffect()
+        .onAppear {
+            thumbnail = LibraryViewModel.loadThumbnail(for: comic.url)
+        }
     }
-}
 
-extension View {
-    func hoverEffect() -> some View {
-        self.onHover { _ in }  // placeholder — extend with hover state if needed
+    @ViewBuilder
+    private var coverImage: some View {
+        if let img = thumbnail {
+            Image(nsImage: img)
+                .resizable()
+                .interpolation(.high)
+                .scaledToFill()
+        } else {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.secondary.opacity(0.15))
+                .overlay {
+                    Image(systemName: "book.pages")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.tertiary)
+                }
+        }
+    }
+
+    private func progressBadge(_ progress: Double) -> some View {
+        ZStack {
+            Capsule()
+                .fill(.black.opacity(0.6))
+                .frame(width: 44, height: 18)
+            Text("\(Int(progress * 100))%")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .padding(6)
     }
 }

@@ -29,7 +29,12 @@ cp "$BUILD/DC" "$MACOS/DC"
 chmod +x "$MACOS/DC"
 
 # Copy Info.plist
-cp "$REPO/Sources/DC/Resources/Info.plist" "$CONTENTS/Info.plist"
+cp "$REPO/AppBundle/Info.plist" "$CONTENTS/Info.plist"
+
+# Copy app icon
+if [ -f "$REPO/AppBundle/DC.icns" ]; then
+    cp "$REPO/AppBundle/DC.icns" "$RESOURCES/DC.icns"
+fi
 
 # Copy ZIPFoundation bundle if present
 if [ -d "$BUILD/ZIPFoundation_ZIPFoundation.bundle" ]; then

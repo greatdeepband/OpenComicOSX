@@ -31,10 +31,8 @@ enum ComicLoader {
             return try loadCBZ(url: url)
         case .pdf:
             return try loadPDF(url: url)
-        case .cbr:
-            return try loadArchive(url: url, tool: "unrar", args: ["e", "-inul", "-y"])
-        case .cb7:
-            return try loadArchive(url: url, tool: "7z", args: ["e", "-y"])
+        case .cbr, .cb7:
+            return try loadWithUnar(url: url)
         case .cbt:
             return try loadTAR(url: url)
         case .epub:
@@ -101,20 +99,24 @@ enum ComicLoader {
         return Comic(url: url, format: .cbt, pages: pages)
     }
 
-    // MARK: - Generic archive via external tool (CBR, CB7)
+    // MARK: - CBR / CB7 via unar
 
-    private static func loadArchive(url: URL, tool: String, args: [String]) throws -> Comic {
+    private static func loadWithUnar(url: URL) throws -> Comic {
+        // unar is installed by Homebrew at /opt/homebrew/bin/unar (Apple Silicon)
+        // or /usr/local/bin/unar (Intel). Fall back to PATH lookup.
+        let unarPaths = ["/opt/homebrew/bin/unar", "/usr/local/bin/unar"]
+        let unarPath = unarPaths.first { FileManager.default.fileExists(atPath: $0) }
+            ?? "unar"  // rely on PATH if neither exists
+
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
 
-        // Extract flat into tmpDir (no subdirectory nesting from the tool itself)
-        let fullArgs = args + [url.path, "-o\(tmpDir.path)"]
-        let result = shell(tool, args: fullArgs)
+        // unar -o <outputDir> <archive>
+        let result = shellFull(unarPath, args: ["-o", tmpDir.path, "-force-overwrite", url.path])
         guard result == 0 else {
             throw LoadError.extractionFailed(
-                "\(tool) not found or failed (exit \(result)). " +
-                "Install via Homebrew: brew install \(tool == "unrar" ? "unrar" : "sevenzip")"
+                "unar failed (exit \(result)). Make sure unar is installed: brew install unar"
             )
         }
 
@@ -175,6 +177,19 @@ enum ComicLoader {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         task.arguments = [command] + args
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+        return task.terminationStatus
+    }
+
+    /// Like `shell` but uses a full executable path directly (no env lookup).
+    @discardableResult
+    private static func shellFull(_ executablePath: String, args: [String]) -> Int32 {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executablePath)
+        task.arguments = args
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         try? task.run()
