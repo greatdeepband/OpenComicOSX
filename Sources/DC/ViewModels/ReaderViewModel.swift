@@ -28,14 +28,16 @@ final class ReaderViewModel: ObservableObject {
     // MARK: - Navigation
 
     func nextPage() {
+        let step = readingMode == .doublePage ? 2 : 1
         guard currentPage < pageCount - 1 else { return }
-        currentPage += 1
+        currentPage = min(currentPage + step, pageCount - 1)
         resetZoom()
     }
 
     func previousPage() {
+        let step = readingMode == .doublePage ? 2 : 1
         guard currentPage > 0 else { return }
-        currentPage -= 1
+        currentPage = max(currentPage - step, 0)
         resetZoom()
     }
 
