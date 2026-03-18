@@ -114,7 +114,7 @@ final class LibraryViewModel: ObservableObject {
             !FileManager.default.fileExists(atPath: LibraryViewModel.thumbnailURL(for: $0).path)
         }
         guard !missing.isEmpty else { return }
-        let concurrency = 4
+        let concurrency = 8
         await withTaskGroup(of: Void.self) { group in
             var inFlight = 0
             for url in missing {
