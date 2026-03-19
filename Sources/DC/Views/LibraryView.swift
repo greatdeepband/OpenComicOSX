@@ -111,9 +111,8 @@ struct LibraryView: View {
     // MARK: - Main content
 
     private var mainContent: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
 
                     // Flat search results — shown instead of gallery sections when a query is active
                     if !library.searchQuery.isEmpty {
@@ -194,46 +193,37 @@ struct LibraryView: View {
                     }
 
                     } // end else (no search query)
-                }
             }
-            .onAppear {
-                if !library.hasLaunched {
-                    // Cold launch: collapse all galleries, leave Recent open.
-                    var keys: Set<String> = []
-                    for g in library.galleries { keys.insert(g.id.uuidString) }
-                    library.collapsedSections = keys
-                    library.hasLaunched = true
-                }
+        }
+        .scrollPosition(id: $library.libraryScrollID, anchor: .center)
+        .onAppear {
+            if !library.hasLaunched {
+                // Cold launch: collapse all galleries, leave Recent open.
+                var keys: Set<String> = []
+                for g in library.galleries { keys.insert(g.id.uuidString) }
+                library.collapsedSections = keys
+                library.hasLaunched = true
             }
-            .onChange(of: library.openComic) { oldComic, newComic in
-                // Only act when transitioning from reader back to library (non-nil → nil).
-                guard oldComic != nil, newComic == nil, let url = library.lastOpenedURL else { return }
-                // Expand the gallery that contains this comic so the card is in the view tree.
-                let inGallery = library.galleries.contains(where: { $0.comics.contains(url) })
-                if inGallery {
-                    for g in library.galleries where g.comics.contains(url) {
-                        library.collapsedSections.remove(g.id.uuidString)
-                    }
-                } else if library.recentComics.contains(where: { $0.url == url }) {
-                    library.collapsedSections.remove("recent")
+        }
+        .onChange(of: library.openComic) { oldComic, newComic in
+            // Only act when transitioning from reader back to library (non-nil → nil).
+            guard oldComic != nil, newComic == nil, let url = library.lastOpenedURL else { return }
+            // Expand the gallery that contains this comic so the card is in the view tree.
+            let inGallery = library.galleries.contains(where: { $0.comics.contains(url) })
+            if inGallery {
+                for g in library.galleries where g.comics.contains(url) {
+                    library.collapsedSections.remove(g.id.uuidString)
                 }
-                // Scroll to the section header (always rendered) so it's reliable.
-                let scrollTarget: String
-                if inGallery,
-                   let g = library.galleries.first(where: { $0.comics.contains(url) }) {
-                    scrollTarget = "header:" + g.id.uuidString
-                } else {
-                    scrollTarget = "header:recent"
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(scrollTarget, anchor: .top) }
-                }
+            } else if library.recentComics.contains(where: { $0.url == url }) {
+                library.collapsedSections.remove("recent")
             }
-            .onChange(of: library.galleries.count) {
-                // Collapse any newly added gallery (only applies during the session).
-                for g in library.galleries where !library.collapsedSections.contains(g.id.uuidString) {
-                    library.collapsedSections.insert(g.id.uuidString)
-                }
+            // scrollPosition(id:) handles lazy materialisation automatically.
+            library.libraryScrollID = url
+        }
+        .onChange(of: library.galleries.count) {
+            // Collapse any newly added gallery (only applies during the session).
+            for g in library.galleries where !library.collapsedSections.contains(g.id.uuidString) {
+                library.collapsedSections.insert(g.id.uuidString)
             }
         }
     }

@@ -63,6 +63,9 @@ final class LibraryViewModel: ObservableObject {
     /// Current search query — empty string means no filter.
     @Published var searchQuery: String = ""
 
+    /// Bound to ScrollView.scrollPosition(id:) — set to lastOpenedURL on reader close to restore position.
+    @Published var libraryScrollID: URL? = nil
+
     /// Recent comics filtered by searchQuery (case-insensitive substring match on title).
     var filteredRecentComics: [RecentComic] {
         guard !searchQuery.isEmpty else { return recentComics }
