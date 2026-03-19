@@ -187,7 +187,10 @@ struct VerticalComicScrollView: NSViewRepresentable {
         context.coordinator.pageViews.removeAll()
         context.coordinator.pageConstraints.removeAll()
 
-        let totalWidth = containerWidth * scale
+        // Single-column: total width scales with zoom so pages grow wider.
+        // Double-column: total width is pinned to containerWidth (no horizontal scroll);
+        //   zoom only increases page height, making the column taller to scroll through.
+        let totalWidth = pagesPerRow == 1 ? containerWidth * scale : containerWidth
 
         if pagesPerRow == 1 {
             for page in pages {
@@ -200,6 +203,9 @@ struct VerticalComicScrollView: NSViewRepresentable {
             }
         } else {
             let pageWidth = (totalWidth - 2) / 2
+            // In double-column mode the height of each page is scaled:
+            //   naturalHeight = pageWidth * (imageHeight / imageWidth)
+            //   scaledHeight  = naturalHeight * scale
             for i in stride(from: 0, to: pages.count, by: 2) {
                 let row = NSStackView()
                 row.orientation = .horizontal
@@ -208,7 +214,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
                 row.translatesAutoresizingMaskIntoConstraints = false
 
                 let leftPage = pages[i]
-                let (leftV, leftWC, leftHC) = makePageView(image: leftPage.image, width: pageWidth)
+                let (leftV, leftWC, leftHC) = makePageView(image: leftPage.image, width: pageWidth, heightScale: scale)
                 row.addArrangedSubview(leftV)
                 context.coordinator.pageViews.append((pageIndex: leftPage.id, view: leftV))
 
@@ -221,7 +227,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
                 if i + 1 < pages.count {
                     let rightPage = pages[i + 1]
-                    let (rightV, rightWC, rightHC) = makePageView(image: rightPage.image, width: pageWidth)
+                    let (rightV, rightWC, rightHC) = makePageView(image: rightPage.image, width: pageWidth, heightScale: scale)
                     row.addArrangedSubview(rightV)
                     context.coordinator.pageConstraints.append(
                         PageConstraints(view: rightV, image: rightPage.image, widthConstraint: rightWC, heightConstraint: rightHC, rowConstraint: nil)
@@ -247,25 +253,28 @@ struct VerticalComicScrollView: NSViewRepresentable {
     /// This avoids tearing down and recreating any NSView, keeping memory flat and
     /// eliminating the visible flash that the old buildPages()-on-zoom approach caused.
     private func applyScale(stack: NSStackView, scrollView: NSScrollView, context: Context) {
-        let totalWidth = containerWidth * scale
-
         if pagesPerRow == 1 {
+            // Single-column: width and height both scale.
+            let totalWidth = containerWidth * scale
             for pc in context.coordinator.pageConstraints {
                 let ar = pc.image.size.height / max(pc.image.size.width, 1)
                 pc.widthConstraint.constant  = totalWidth
                 pc.heightConstraint.constant = max(totalWidth * ar, 1)
             }
+            context.coordinator.stackWidthConstraint?.constant = totalWidth
         } else {
+            // Double-column: width is pinned to containerWidth; only height scales.
+            // This keeps both pages visible without horizontal scrolling.
+            let totalWidth = containerWidth
             let pageWidth = (totalWidth - 2) / 2
             for pc in context.coordinator.pageConstraints {
-                let ar = pc.image.size.height / max(pc.image.size.width, 1)
-                pc.widthConstraint.constant  = pageWidth
-                pc.heightConstraint.constant = max(pageWidth * ar, 1)
-                pc.rowConstraint?.constant   = totalWidth   // only set on left-page entries
+                let naturalH = pageWidth * (pc.image.size.height / max(pc.image.size.width, 1))
+                pc.heightConstraint.constant = max(naturalH * scale, 1)
+                // widthConstraint and rowConstraint are already correct (pinned to containerWidth).
             }
+            // Stack width stays at containerWidth — no update needed.
         }
 
-        context.coordinator.stackWidthConstraint?.constant = totalWidth
         scrollView.layoutSubtreeIfNeeded()
     }
 
@@ -273,12 +282,15 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
     /// Creates a ComicPageView and returns it together with its width and height constraints
     /// so the coordinator can update them in-place later without a full rebuild.
-    private func makePageView(image: NSImage, width: CGFloat) -> (ComicPageView, NSLayoutConstraint, NSLayoutConstraint) {
+    /// `heightScale` is applied on top of the natural aspect-ratio height.
+    /// For single-column pages this is the same as the width scale (width already includes scale).
+    /// For double-column pages the width is fixed; only height is scaled.
+    private func makePageView(image: NSImage, width: CGFloat, heightScale: CGFloat = 1.0) -> (ComicPageView, NSLayoutConstraint, NSLayoutConstraint) {
         let v = ComicPageView()
         v.image = image
         v.translatesAutoresizingMaskIntoConstraints = false
         let ar = image.size.height / max(image.size.width, 1)
-        let h = max(width * ar, 1)
+        let h = max(width * ar * heightScale, 1)
         let wc = v.widthAnchor.constraint(equalToConstant: width)
         let hc = v.heightAnchor.constraint(equalToConstant: h)
         wc.isActive = true
