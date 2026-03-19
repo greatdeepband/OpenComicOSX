@@ -150,7 +150,7 @@ struct LibraryView: View {
                             LazyVGrid(columns: columns, spacing: 16) {
                                 ForEach(library.filteredRecentComics) { recent in
                                     ComicCard(url: recent.url, title: recent.title, readingProgress: recent.readingProgress)
-                                        .id(recent.url)
+                                        .id("recent:" + recent.url.absoluteString)
                                         .onTapGesture { Task { await library.load(url: recent.url) } }
                                         .contextMenu {
                                             Button("Open") { Task { await library.load(url: recent.url) } }
@@ -208,17 +208,25 @@ struct LibraryView: View {
         .onChange(of: library.openComic) { oldComic, newComic in
             // Only act when transitioning from reader back to library (non-nil → nil).
             guard oldComic != nil, newComic == nil, let url = library.lastOpenedURL else { return }
-            // Expand the gallery that contains this comic so the card is in the view tree.
+            // Determine whether the comic lives in a gallery or only in Recents.
             let inGallery = library.galleries.contains(where: { $0.comics.contains(url) })
+            // Expand the relevant section so the card is in the view tree.
             if inGallery {
                 for g in library.galleries where g.comics.contains(url) {
                     library.collapsedSections.remove(g.id.uuidString)
                 }
-            } else if library.recentComics.contains(where: { $0.url == url }) {
+            } else {
                 library.collapsedSections.remove("recent")
             }
-            // scrollPosition(id:) handles lazy materialisation automatically.
-            library.libraryScrollID = url
+            // Use namespaced IDs to avoid duplicate-ID ambiguity between Recents and gallery cards.
+            // Prefer the gallery card; fall back to the Recents card.
+            let scrollID = inGallery
+                ? "gallery:" + url.absoluteString
+                : "recent:" + url.absoluteString
+            // Delay by one run loop tick so scrollPosition(id:) is attached before the command fires.
+            Task { @MainActor in
+                library.libraryScrollID = scrollID
+            }
         }
         .onChange(of: library.galleries.count) {
             // Collapse any newly added gallery (only applies during the session).
@@ -338,7 +346,7 @@ struct DraggableComicGrid: View {
                     title: url.deletingPathExtension().lastPathComponent,
                     readingProgress: nil
                 )
-                .id(url)
+                .id("gallery:" + url.absoluteString)
                 .onTapGesture { Task { await library.load(url: url) } }
                 .contextMenu {
                     Button("Open") { Task { await library.load(url: url) } }
