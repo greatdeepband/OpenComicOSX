@@ -5,6 +5,22 @@ import SwiftUI
 
 private final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
+
+    /// NSStackView's default hitTest can route events to the wrong subview in horizontal
+    /// layouts. Override to do a proper frame-based hit-test across arranged subviews.
+    ///
+    /// NSView.hitTest(_:) contract: point is in the RECEIVER'S superview coordinate space.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // Convert from superview space to our own bounds space.
+        let localPt = convert(point, from: superview)
+        guard bounds.contains(localPt) else { return nil }
+        // For each arranged subview, pass the point in OUR coordinate space
+        // (which is the subview's superview space — exactly what hitTest expects).
+        for subview in arrangedSubviews.reversed() {
+            if let hit = subview.hitTest(localPt) { return hit }
+        }
+        return self
+    }
 }
 
 // MARK: - Loupe notification
@@ -44,9 +60,9 @@ private final class ComicPageView: NSView {
 
     private func postLoupe(event: NSEvent, name: Notification.Name) {
         guard let image = image else { return }
-        let localPt = convert(event.locationInWindow, from: nil)
+        let localPt  = convert(event.locationInWindow, from: nil)
         let windowPt = event.locationInWindow
-        let imgSize = image.size
+        let imgSize  = image.size
         guard imgSize.width > 0, imgSize.height > 0 else { return }
         let boundsAR = bounds.width / bounds.height
         let imgAR    = imgSize.width / imgSize.height
@@ -59,6 +75,25 @@ private final class ComicPageView: NSView {
         let ox = (bounds.width  - ivSize.width)  / 2
         let oy = (bounds.height - ivSize.height) / 2
         let cursorInIV = CGPoint(x: localPt.x - ox, y: localPt.y - oy)
+
+        // ── DEBUG LOUPE ──────────────────────────────────────────────────────
+        // Frame of this view in window coordinates (for diagnosing wrong-view hit-test)
+        let frameInWindow = convert(bounds, to: nil)
+        let debugLine = "[LOUPE-DEBUG] isFlipped=\(isFlipped) superFlipped=\(superview?.isFlipped ?? false)\n" +
+            "[LOUPE-DEBUG] frameInWindow=(\(frameInWindow.minX),\(frameInWindow.minY) \(frameInWindow.width)x\(frameInWindow.height))\n" +
+            "[LOUPE-DEBUG] bounds=(\(bounds.width)x\(bounds.height)) imgSize=(\(imgSize.width)x\(imgSize.height)) imgAR=\(String(format:"%.3f",imgAR)) boundsAR=\(String(format:"%.3f",boundsAR))\n" +
+            "[LOUPE-DEBUG] windowPt=(\(windowPt.x),\(windowPt.y)) localPt=(\(localPt.x),\(localPt.y))\n" +
+            "[LOUPE-DEBUG] ivSize=(\(ivSize.width)x\(ivSize.height)) offset=(\(ox),\(oy)) cursorInIV=(\(cursorInIV.x),\(cursorInIV.y))\n"
+        if let data = debugLine.data(using: .utf8) {
+            let url = URL(fileURLWithPath: "/tmp/loupe_debug.txt")
+            if let fh = try? FileHandle(forWritingTo: url) {
+                fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+            } else {
+                try? data.write(to: url)
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         let info = LoupeInfo(image: image,
                              cursorInImageView: cursorInIV,
                              imageViewSize: ivSize,
@@ -207,7 +242,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
             //   naturalHeight = pageWidth * (imageHeight / imageWidth)
             //   scaledHeight  = naturalHeight * scale
             for i in stride(from: 0, to: pages.count, by: 2) {
-                let row = NSStackView()
+                let row = FlippedStackView()   // Must be flipped so convert(from:nil) works correctly in child ComicPageViews
                 row.orientation = .horizontal
                 row.spacing = 2
                 row.alignment = .top

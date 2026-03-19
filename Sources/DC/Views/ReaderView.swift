@@ -137,16 +137,23 @@ struct ReaderView: View {
             GeometryReader { geo in
                 ZStack {
                     if let info = loupeInfo {
-                        // Convert AppKit window coords (bottom-left) to SwiftUI overlay coords (top-left).
-                        // geo.frame(in: .global) gives the overlay's frame in SwiftUI global space.
-                        // NSWindow content view height lets us flip Y.
-                        // AppKit window coords: origin bottom-left of content view.
-                        // SwiftUI global coords: origin top-left of content view.
-                        // overlayFrame is in SwiftUI global space (top-left origin).
                         let winH = NSApp.keyWindow?.contentView?.bounds.height ?? 800
                         let swiftUIX = info.positionInWindow.x - overlayFrame.minX
-                        // Flip Y: AppKit Y from bottom → SwiftUI Y from top, then subtract overlay top.
                         let swiftUIY = (winH - info.positionInWindow.y) - overlayFrame.minY
+                        // ── DEBUG LOUPE OVERLAY ─────────────────────────────────────────
+                        let _ = { () -> Bool in
+                            let line = "[LOUPE-OVERLAY] winH=\(winH) posInWindow=(\(info.positionInWindow.x),\(info.positionInWindow.y))\n" +
+                                "[LOUPE-OVERLAY] overlayFrame=(\(overlayFrame.minX),\(overlayFrame.minY) \(overlayFrame.width)x\(overlayFrame.height))\n" +
+                                "[LOUPE-OVERLAY] loupePos=(\(swiftUIX),\(swiftUIY))\n"
+                            if let data = line.data(using: .utf8) {
+                                let url = URL(fileURLWithPath: "/tmp/loupe_debug.txt")
+                                if let fh = try? FileHandle(forWritingTo: url) {
+                                    fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+                                } else { try? data.write(to: url) }
+                            }
+                            return true
+                        }()
+                        // ───────────────────────────────────────────────────────────────
                         MagnifierView(
                             image: info.image,
                             cursorInImageView: info.cursorInImageView,
