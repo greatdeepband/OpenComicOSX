@@ -7,64 +7,12 @@ private final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
 }
 
-// MARK: - Loupe notification
-
-struct LoupeInfo {
-    let image: NSImage
-    let cursorInImageView: CGPoint
-    let imageViewSize: CGSize
-    /// Cursor position in window coordinates (AppKit, bottom-left origin).
-    let positionInWindow: CGPoint
-}
-
-extension Notification.Name {
-    static let loupeBegan  = Notification.Name("VerticalLoupeBegan")
-    static let loupeMoved  = Notification.Name("VerticalLoupeMoved")
-    static let loupeEnded  = Notification.Name("VerticalLoupeEnded")
-}
-
 // MARK: - Page drawing view
+// Right-click loupe is no longer handled here — a single SwiftUI MouseCatcher
+// overlay on the scroll view handles all right-click events in one coordinate space.
 
 private final class ComicPageView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
-
-    // MARK: Right-click loupe
-
-    override func rightMouseDown(with event: NSEvent) {
-        NSCursor.hide()
-        postLoupe(event: event, name: .loupeBegan)
-    }
-    override func rightMouseDragged(with event: NSEvent) {
-        postLoupe(event: event, name: .loupeMoved)
-    }
-    override func rightMouseUp(with event: NSEvent) {
-        NSCursor.unhide()
-        NotificationCenter.default.post(name: .loupeEnded, object: nil)
-    }
-
-    private func postLoupe(event: NSEvent, name: Notification.Name) {
-        guard let image = image else { return }
-        let localPt = convert(event.locationInWindow, from: nil)
-        let windowPt = event.locationInWindow
-        let imgSize = image.size
-        guard imgSize.width > 0, imgSize.height > 0 else { return }
-        let boundsAR = bounds.width / bounds.height
-        let imgAR    = imgSize.width / imgSize.height
-        let ivSize: CGSize
-        if imgAR > boundsAR {
-            ivSize = CGSize(width: bounds.width, height: bounds.width / imgAR)
-        } else {
-            ivSize = CGSize(width: bounds.height * imgAR, height: bounds.height)
-        }
-        let ox = (bounds.width  - ivSize.width)  / 2
-        let oy = (bounds.height - ivSize.height) / 2
-        let cursorInIV = CGPoint(x: localPt.x - ox, y: localPt.y - oy)
-        let info = LoupeInfo(image: image,
-                             cursorInImageView: cursorInIV,
-                             imageViewSize: ivSize,
-                             positionInWindow: windowPt)
-        NotificationCenter.default.post(name: name, object: info)
-    }
 
     override var isFlipped: Bool { true }
 
@@ -98,6 +46,21 @@ private final class ComicPageView: NSView {
     }
 }
 
+// MARK: - Loupe hit-test result
+
+/// Returned by hitTestPage(at:) so the SwiftUI loupe overlay can position
+/// MagnifierView correctly without any AppKit coordinate conversions.
+struct PageHitResult {
+    /// The image to magnify.
+    let image: NSImage
+    /// Cursor position relative to the rendered image rect inside the page view,
+    /// in the page view's own coordinate space (top-left origin, already accounting
+    /// for aspect-fit letterboxing).
+    let cursorInImageView: CGPoint
+    /// The rendered (aspect-fit) size of the image inside the page view.
+    let imageViewSize: CGSize
+}
+
 // MARK: - NSViewRepresentable
 
 struct VerticalComicScrollView: NSViewRepresentable {
@@ -108,6 +71,10 @@ struct VerticalComicScrollView: NSViewRepresentable {
     let restoreOffset: Double?
     var onPageChanged: (Int) -> Void
     var onOffsetChanged: (Double) -> Void
+    /// Called once after makeNSView so the parent view can hold a reference to the
+    /// coordinator for hit-testing (loupe). The coordinator is stable for the lifetime
+    /// of the view — it is safe to capture and reuse.
+    var onCoordinatorReady: ((Coordinator) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onPageChanged: onPageChanged, onOffsetChanged: onOffsetChanged)
@@ -145,6 +112,9 @@ struct VerticalComicScrollView: NSViewRepresentable {
         context.coordinator.scrollView = scrollView
         buildPages(stack: stack, scrollView: scrollView, context: context)
 
+        // Notify the parent that the coordinator is ready for hit-testing.
+        DispatchQueue.main.async { onCoordinatorReady?(context.coordinator) }
+
         if let fraction = restoreOffset, fraction > 0 {
             context.coordinator.pendingRestoreOffset = fraction
             DispatchQueue.main.async { context.coordinator.applyPendingRestore() }
@@ -156,8 +126,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let stack = context.coordinator.stackView else { return }
 
-        // Full rebuild only when the column layout changes (pagesPerRow or containerWidth).
-        // Scale changes are handled by updating constraints in-place — no view recreation.
         let needsRebuild = context.coordinator.lastContainerWidth != containerWidth
             || context.coordinator.lastPagesPerRow != pagesPerRow
 
@@ -169,27 +137,74 @@ struct VerticalComicScrollView: NSViewRepresentable {
             return
         }
 
-        // Scale-only change: update existing constraints without touching the view hierarchy.
         if context.coordinator.lastScale != scale {
             context.coordinator.lastScale = scale
             applyScale(stack: stack, scrollView: scrollView, context: context)
         }
 
-        // Keep callbacks current.
         context.coordinator.onPageChanged = onPageChanged
         context.coordinator.onOffsetChanged = onOffsetChanged
     }
 
-    // MARK: - Full page build (called only on layout changes)
+    // MARK: - Page hit test (called by SwiftUI loupe overlay)
+
+    /// Given a cursor position in the scroll view's visible (clipped) coordinate space
+    /// (top-left origin, matching SwiftUI), returns loupe parameters for the page under
+    /// the cursor, or nil if no page is hit.
+    ///
+    /// This is the key function that makes Option 3 work: instead of each ComicPageView
+    /// posting AppKit notifications with raw window coordinates, the SwiftUI MouseCatcher
+    /// calls this once per drag event and gets back everything MagnifierView needs —
+    /// all in a consistent coordinate space with no manual Y-flip.
+    func hitTestPage(at pointInScrollView: CGPoint, coordinator: Coordinator) -> PageHitResult? {
+        guard let sv = coordinator.scrollView,
+              let doc = sv.documentView else { return nil }
+
+        // Convert from scroll view's visible (clip) coords to document coords.
+        // The clip view has top-left origin (flipped); the document view also has
+        // top-left origin because FlippedStackView.isFlipped = true.
+        let scrollOffset = sv.contentView.bounds.origin
+        let pointInDoc = CGPoint(
+            x: pointInScrollView.x + scrollOffset.x,
+            y: pointInScrollView.y + scrollOffset.y
+        )
+
+        for pc in coordinator.pageConstraints {
+            // Get the page view's frame in the document view's coordinate space.
+            let frameInDoc = pc.view.convert(pc.view.bounds, to: doc)
+
+            guard frameInDoc.contains(pointInDoc) else { continue }
+
+            // Cursor relative to this page view's top-left corner.
+            let localX = pointInDoc.x - frameInDoc.minX
+            let localY = pointInDoc.y - frameInDoc.minY
+            let pageSize = frameInDoc.size
+
+            // Compute the aspect-fit rendered image rect within the page view.
+            let imgSize = pc.image.size
+            guard imgSize.width > 0, imgSize.height > 0 else { continue }
+            let pageAR = pageSize.width / pageSize.height
+            let imgAR  = imgSize.width  / imgSize.height
+            let ivSize: CGSize = imgAR > pageAR
+                ? CGSize(width: pageSize.width,  height: pageSize.width  / imgAR)
+                : CGSize(width: pageSize.height * imgAR, height: pageSize.height)
+
+            let ox = (pageSize.width  - ivSize.width)  / 2
+            let oy = (pageSize.height - ivSize.height) / 2
+            let cursorInIV = CGPoint(x: localX - ox, y: localY - oy)
+
+            return PageHitResult(image: pc.image, cursorInImageView: cursorInIV, imageViewSize: ivSize)
+        }
+        return nil
+    }
+
+    // MARK: - Full page build
 
     private func buildPages(stack: NSStackView, scrollView: NSScrollView, context: Context) {
         stack.arrangedSubviews.forEach { stack.removeArrangedSubview($0); $0.removeFromSuperview() }
         context.coordinator.pageViews.removeAll()
         context.coordinator.pageConstraints.removeAll()
 
-        // Single-column: total width scales with zoom so pages grow wider.
-        // Double-column: total width is pinned to containerWidth (no horizontal scroll);
-        //   zoom only increases page height, making the column taller to scroll through.
         let totalWidth = pagesPerRow == 1 ? containerWidth * scale : containerWidth
 
         if pagesPerRow == 1 {
@@ -203,9 +218,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
             }
         } else {
             let pageWidth = (totalWidth - 2) / 2
-            // In double-column mode the height of each page is scaled:
-            //   naturalHeight = pageWidth * (imageHeight / imageWidth)
-            //   scaledHeight  = naturalHeight * scale
             for i in stride(from: 0, to: pages.count, by: 2) {
                 let row = NSStackView()
                 row.orientation = .horizontal
@@ -238,7 +250,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
             }
         }
 
-        // Stack-level width constraint.
         stack.constraints.filter { $0.firstAttribute == .width }.forEach { stack.removeConstraint($0) }
         let stackWC = stack.widthAnchor.constraint(equalToConstant: totalWidth)
         stackWC.isActive = true
@@ -247,14 +258,10 @@ struct VerticalComicScrollView: NSViewRepresentable {
         scrollView.layoutSubtreeIfNeeded()
     }
 
-    // MARK: - In-place scale update (no view recreation)
+    // MARK: - In-place scale update
 
-    /// Updates only the NSLayoutConstraint constants for all pages and the stack width.
-    /// This avoids tearing down and recreating any NSView, keeping memory flat and
-    /// eliminating the visible flash that the old buildPages()-on-zoom approach caused.
     private func applyScale(stack: NSStackView, scrollView: NSScrollView, context: Context) {
         if pagesPerRow == 1 {
-            // Single-column: width and height both scale.
             let totalWidth = containerWidth * scale
             for pc in context.coordinator.pageConstraints {
                 let ar = pc.image.size.height / max(pc.image.size.width, 1)
@@ -263,28 +270,18 @@ struct VerticalComicScrollView: NSViewRepresentable {
             }
             context.coordinator.stackWidthConstraint?.constant = totalWidth
         } else {
-            // Double-column: width is pinned to containerWidth; only height scales.
-            // This keeps both pages visible without horizontal scrolling.
             let totalWidth = containerWidth
             let pageWidth = (totalWidth - 2) / 2
             for pc in context.coordinator.pageConstraints {
                 let naturalH = pageWidth * (pc.image.size.height / max(pc.image.size.width, 1))
                 pc.heightConstraint.constant = max(naturalH * scale, 1)
-                // widthConstraint and rowConstraint are already correct (pinned to containerWidth).
             }
-            // Stack width stays at containerWidth — no update needed.
         }
-
         scrollView.layoutSubtreeIfNeeded()
     }
 
     // MARK: - Factory
 
-    /// Creates a ComicPageView and returns it together with its width and height constraints
-    /// so the coordinator can update them in-place later without a full rebuild.
-    /// `heightScale` is applied on top of the natural aspect-ratio height.
-    /// For single-column pages this is the same as the width scale (width already includes scale).
-    /// For double-column pages the width is fixed; only height is scaled.
     private func makePageView(image: NSImage, width: CGFloat, heightScale: CGFloat = 1.0) -> (ComicPageView, NSLayoutConstraint, NSLayoutConstraint) {
         let v = ComicPageView()
         v.image = image
@@ -300,15 +297,11 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
     // MARK: - Coordinator
 
-    /// Holds the live NSLayoutConstraints for each page so applyScale() can update
-    /// them without recreating any views.
     struct PageConstraints {
         let view: NSView
         let image: NSImage
         let widthConstraint: NSLayoutConstraint
         let heightConstraint: NSLayoutConstraint
-        /// The row NSStackView's width constraint (only set for the left page in each pair;
-        /// nil for right pages and all single-column pages).
         let rowConstraint: NSLayoutConstraint?
     }
 
@@ -316,9 +309,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
         var scrollView: NSScrollView?
         var stackView: NSStackView?
         var pageViews: [(pageIndex: Int, view: NSView)] = []
-        /// Per-page layout constraints for in-place scale updates.
         var pageConstraints: [PageConstraints] = []
-        /// The stack view's own width constraint.
         var stackWidthConstraint: NSLayoutConstraint?
         var lastScale: CGFloat = 0
         var lastContainerWidth: CGFloat = 0
