@@ -1,5 +1,15 @@
 import SwiftUI
 
+func appendScrollLog(_ s: String) {
+    let data = Data(s.utf8)
+    let path = "/tmp/scroll_debug.txt"
+    if let fh = FileHandle(forWritingAtPath: path) {
+        fh.seekToEndOfFile(); fh.write(data); fh.closeFile()
+    } else {
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
 // MARK: - Scroll offset tracking via GeometryReader + PreferenceKey
 
 struct ScrollOffsetKey: PreferenceKey {

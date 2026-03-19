@@ -204,19 +204,21 @@ struct LibraryView: View {
         .onPreferenceChange(ScrollOffsetKey.self) { value in
             // Save offset continuously as user scrolls.
             library.libraryScrollOffset = value
+            appendScrollLog("OFFSET-SAVE: value=\(value)\n")
         }
         .onAppear {
             // Restore scroll position when returning from reader.
+            appendScrollLog("RESTORE-APPEAR: libraryScrollOffset=\(library.libraryScrollOffset)\n")
             if library.libraryScrollOffset > 0 {
-                // Jump to top first (forces LazyVGrid to render from top),
-                // then scroll to saved offset via a sentinel + offset approach.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     proxy.scrollTo("__top__", anchor: .top)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        // Use NSScrollView directly via the window to set exact offset.
-                        if let sv = NSApp.keyWindow?.contentView?.firstScrollView {
+                        let sv = NSApp.keyWindow?.contentView?.firstScrollView
+                        appendScrollLog("RESTORE-APPLY: sv=\(sv != nil), offset=\(library.libraryScrollOffset)\n")
+                        if let sv {
                             sv.contentView.scroll(to: NSPoint(x: 0, y: library.libraryScrollOffset))
                             sv.reflectScrolledClipView(sv.contentView)
+                            appendScrollLog("RESTORE-DONE: actual y=\(sv.contentView.bounds.origin.y)\n")
                         }
                     }
                 }
