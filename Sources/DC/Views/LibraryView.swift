@@ -115,6 +115,30 @@ struct LibraryView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
 
+                    // Flat search results — shown instead of gallery sections when a query is active
+                    if !library.searchQuery.isEmpty {
+                        if library.searchResults.isEmpty {
+                            Text("No results for \"\(library.searchQuery)\"")
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.top, 60)
+                        } else {
+                            LazyVGrid(columns: columns, spacing: 16) {
+                                ForEach(library.searchResults, id: \.self) { url in
+                                    let title = url.deletingPathExtension().lastPathComponent
+                                    ComicCard(url: url, title: title, readingProgress: nil)
+                                        .id(url)
+                                        .onTapGesture { Task { await library.load(url: url) } }
+                                        .contextMenu {
+                                            Button("Open") { Task { await library.load(url: url) } }
+                                        }
+                                }
+                            }
+                            .padding(.horizontal)
+                            .padding(.vertical, 16)
+                        }
+                    } else {
+
                     // Recent section
                     if !library.filteredRecentComics.isEmpty {
                         GallerySectionHeader(
@@ -168,6 +192,8 @@ struct LibraryView: View {
                     if library.recentComics.isEmpty && library.galleries.isEmpty {
                         emptyState
                     }
+
+                    } // end else (no search query)
                 }
             }
             .onAppear {

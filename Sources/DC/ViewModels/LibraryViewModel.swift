@@ -69,6 +69,24 @@ final class LibraryViewModel: ObservableObject {
         return recentComics.filter { $0.title.localizedCaseInsensitiveContains(searchQuery) }
     }
 
+    /// Flat deduplicated list of all comics matching searchQuery across recents and all galleries.
+    var searchResults: [URL] {
+        guard !searchQuery.isEmpty else { return [] }
+        var seen = Set<URL>()
+        var results: [URL] = []
+        let allURLs = recentComics.map { $0.url }
+            + galleries.flatMap { $0.comics }
+        for url in allURLs {
+            guard !seen.contains(url) else { continue }
+            let title = url.deletingPathExtension().lastPathComponent
+            if title.localizedCaseInsensitiveContains(searchQuery) {
+                seen.insert(url)
+                results.append(url)
+            }
+        }
+        return results
+    }
+
     /// Galleries filtered by searchQuery — each gallery's comic list is also filtered.
     var filteredGalleries: [Gallery] {
         guard !searchQuery.isEmpty else { return galleries }
