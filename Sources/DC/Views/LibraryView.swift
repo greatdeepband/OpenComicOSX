@@ -111,12 +111,13 @@ struct LibraryView: View {
     // MARK: - Main content
 
     private var mainContent: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                // Invisible saver that tracks and restores the raw NSScrollView offset.
-                LibraryScrollSaver(offset: $library.libraryScrollOffset)
-                    .frame(width: 0, height: 0)
-                    .hidden()
+                // Sentinel at the very top — used as a scroll-to target for restore.
+                Color.clear.frame(height: 0).id("__top__")
+                // Tracks scroll offset via GeometryReader in the scroll coordinate space.
+                ScrollOffsetTracker()
 
                     // Flat search results — shown instead of gallery sections when a query is active
                     if !library.searchQuery.isEmpty {
@@ -199,6 +200,28 @@ struct LibraryView: View {
                     } // end else (no search query)
             }
         }
+        .coordinateSpace(name: "libraryScroll")
+        .onPreferenceChange(ScrollOffsetKey.self) { value in
+            // Save offset continuously as user scrolls.
+            library.libraryScrollOffset = value
+        }
+        .onAppear {
+            // Restore scroll position when returning from reader.
+            if library.libraryScrollOffset > 0 {
+                // Jump to top first (forces LazyVGrid to render from top),
+                // then scroll to saved offset via a sentinel + offset approach.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    proxy.scrollTo("__top__", anchor: .top)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        // Use NSScrollView directly via the window to set exact offset.
+                        if let sv = NSApp.keyWindow?.contentView?.firstScrollView {
+                            sv.contentView.scroll(to: NSPoint(x: 0, y: library.libraryScrollOffset))
+                            sv.reflectScrolledClipView(sv.contentView)
+                        }
+                    }
+                }
+            }
+        }
         .onAppear {
             if !library.hasLaunched {
                 // Cold launch: collapse all galleries, leave Recent open.
@@ -214,6 +237,7 @@ struct LibraryView: View {
                 library.collapsedSections.insert(g.id.uuidString)
             }
         }
+        } // end ScrollViewReader
     }
 
     // MARK: - Gallery context menu
