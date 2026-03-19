@@ -44,11 +44,8 @@ private final class ComicPageView: NSView {
 
     private func postLoupe(event: NSEvent, name: Notification.Name) {
         guard let image = image else { return }
-        // Cursor in this view's flipped coordinate space.
         let localPt = convert(event.locationInWindow, from: nil)
-        // Raw window coordinates (bottom-left origin) — SwiftUI overlay will convert.
         let windowPt = event.locationInWindow
-        // Compute image-view size (aspect-fit within this view's bounds).
         let imgSize = image.size
         guard imgSize.width > 0, imgSize.height > 0 else { return }
         let boundsAR = bounds.width / bounds.height
@@ -69,7 +66,6 @@ private final class ComicPageView: NSView {
         NotificationCenter.default.post(name: name, object: info)
     }
 
-    // Must match the container — top-left origin.
     override var isFlipped: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -79,7 +75,6 @@ private final class ComicPageView: NSView {
         let imgSize = image.size
         guard imgSize.width > 0, imgSize.height > 0 else { return }
 
-        // Aspect-fit: scale image to fill bounds width, centre vertically.
         let boundsAR = bounds.width / bounds.height
         let imgAR    = imgSize.width / imgSize.height
         let drawRect: NSRect
@@ -91,12 +86,8 @@ private final class ComicPageView: NSView {
             drawRect = NSRect(x: (bounds.width - w) / 2, y: 0, width: w, height: bounds.height)
         }
 
-        // When the view is flipped (isFlipped=true), NSGraphicsContext has a
-        // vertical flip transform applied. NSImage.draw(in:) is not flip-aware,
-        // so we must counter-rotate the context around the draw rect's centre.
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         ctx.saveGState()
-        // Translate to the centre of the draw rect, flip, translate back.
         let cx = drawRect.midX
         let cy = drawRect.midY
         ctx.translateBy(x: cx, y: cy)
@@ -164,29 +155,48 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let stack = context.coordinator.stackView else { return }
-        let needsRebuild = context.coordinator.lastScale != scale
-            || context.coordinator.lastContainerWidth != containerWidth
+
+        // Full rebuild only when the column layout changes (pagesPerRow or containerWidth).
+        // Scale changes are handled by updating constraints in-place — no view recreation.
+        let needsRebuild = context.coordinator.lastContainerWidth != containerWidth
             || context.coordinator.lastPagesPerRow != pagesPerRow
 
         if needsRebuild {
-            context.coordinator.lastScale = scale
             context.coordinator.lastContainerWidth = containerWidth
             context.coordinator.lastPagesPerRow = pagesPerRow
+            context.coordinator.lastScale = scale
             buildPages(stack: stack, scrollView: scrollView, context: context)
+            return
         }
+
+        // Scale-only change: update existing constraints without touching the view hierarchy.
+        if context.coordinator.lastScale != scale {
+            context.coordinator.lastScale = scale
+            applyScale(stack: stack, scrollView: scrollView, context: context)
+        }
+
+        // Keep callbacks current.
+        context.coordinator.onPageChanged = onPageChanged
+        context.coordinator.onOffsetChanged = onOffsetChanged
     }
+
+    // MARK: - Full page build (called only on layout changes)
 
     private func buildPages(stack: NSStackView, scrollView: NSScrollView, context: Context) {
         stack.arrangedSubviews.forEach { stack.removeArrangedSubview($0); $0.removeFromSuperview() }
         context.coordinator.pageViews.removeAll()
+        context.coordinator.pageConstraints.removeAll()
 
         let totalWidth = containerWidth * scale
 
         if pagesPerRow == 1 {
             for page in pages {
-                let v = makePageView(image: page.image, width: totalWidth)
+                let (v, wc, hc) = makePageView(image: page.image, width: totalWidth)
                 stack.addArrangedSubview(v)
                 context.coordinator.pageViews.append((pageIndex: page.id, view: v))
+                context.coordinator.pageConstraints.append(
+                    PageConstraints(view: v, image: page.image, widthConstraint: wc, heightConstraint: hc, rowConstraint: nil)
+                )
             }
         } else {
             let pageWidth = (totalWidth - 2) / 2
@@ -198,45 +208,106 @@ struct VerticalComicScrollView: NSViewRepresentable {
                 row.translatesAutoresizingMaskIntoConstraints = false
 
                 let leftPage = pages[i]
-                let leftV = makePageView(image: leftPage.image, width: pageWidth)
+                let (leftV, leftWC, leftHC) = makePageView(image: leftPage.image, width: pageWidth)
                 row.addArrangedSubview(leftV)
                 context.coordinator.pageViews.append((pageIndex: leftPage.id, view: leftV))
 
+                let rowWC = row.widthAnchor.constraint(equalToConstant: totalWidth)
+                rowWC.isActive = true
+
+                context.coordinator.pageConstraints.append(
+                    PageConstraints(view: leftV, image: leftPage.image, widthConstraint: leftWC, heightConstraint: leftHC, rowConstraint: rowWC)
+                )
+
                 if i + 1 < pages.count {
                     let rightPage = pages[i + 1]
-                    let rightV = makePageView(image: rightPage.image, width: pageWidth)
+                    let (rightV, rightWC, rightHC) = makePageView(image: rightPage.image, width: pageWidth)
                     row.addArrangedSubview(rightV)
+                    context.coordinator.pageConstraints.append(
+                        PageConstraints(view: rightV, image: rightPage.image, widthConstraint: rightWC, heightConstraint: rightHC, rowConstraint: nil)
+                    )
                 }
 
-                row.widthAnchor.constraint(equalToConstant: totalWidth).isActive = true
                 stack.addArrangedSubview(row)
             }
         }
 
-        // Remove old width constraints and add new one.
+        // Stack-level width constraint.
         stack.constraints.filter { $0.firstAttribute == .width }.forEach { stack.removeConstraint($0) }
-        stack.widthAnchor.constraint(equalToConstant: totalWidth).isActive = true
+        let stackWC = stack.widthAnchor.constraint(equalToConstant: totalWidth)
+        stackWC.isActive = true
+        context.coordinator.stackWidthConstraint = stackWC
 
         scrollView.layoutSubtreeIfNeeded()
     }
 
-    private func makePageView(image: NSImage, width: CGFloat) -> ComicPageView {
+    // MARK: - In-place scale update (no view recreation)
+
+    /// Updates only the NSLayoutConstraint constants for all pages and the stack width.
+    /// This avoids tearing down and recreating any NSView, keeping memory flat and
+    /// eliminating the visible flash that the old buildPages()-on-zoom approach caused.
+    private func applyScale(stack: NSStackView, scrollView: NSScrollView, context: Context) {
+        let totalWidth = containerWidth * scale
+
+        if pagesPerRow == 1 {
+            for pc in context.coordinator.pageConstraints {
+                let ar = pc.image.size.height / max(pc.image.size.width, 1)
+                pc.widthConstraint.constant  = totalWidth
+                pc.heightConstraint.constant = max(totalWidth * ar, 1)
+            }
+        } else {
+            let pageWidth = (totalWidth - 2) / 2
+            for pc in context.coordinator.pageConstraints {
+                let ar = pc.image.size.height / max(pc.image.size.width, 1)
+                pc.widthConstraint.constant  = pageWidth
+                pc.heightConstraint.constant = max(pageWidth * ar, 1)
+                pc.rowConstraint?.constant   = totalWidth   // only set on left-page entries
+            }
+        }
+
+        context.coordinator.stackWidthConstraint?.constant = totalWidth
+        scrollView.layoutSubtreeIfNeeded()
+    }
+
+    // MARK: - Factory
+
+    /// Creates a ComicPageView and returns it together with its width and height constraints
+    /// so the coordinator can update them in-place later without a full rebuild.
+    private func makePageView(image: NSImage, width: CGFloat) -> (ComicPageView, NSLayoutConstraint, NSLayoutConstraint) {
         let v = ComicPageView()
         v.image = image
         v.translatesAutoresizingMaskIntoConstraints = false
         let ar = image.size.height / max(image.size.width, 1)
         let h = max(width * ar, 1)
-        v.widthAnchor.constraint(equalToConstant: width).isActive = true
-        v.heightAnchor.constraint(equalToConstant: h).isActive = true
-        return v
+        let wc = v.widthAnchor.constraint(equalToConstant: width)
+        let hc = v.heightAnchor.constraint(equalToConstant: h)
+        wc.isActive = true
+        hc.isActive = true
+        return (v, wc, hc)
     }
 
     // MARK: - Coordinator
+
+    /// Holds the live NSLayoutConstraints for each page so applyScale() can update
+    /// them without recreating any views.
+    struct PageConstraints {
+        let view: NSView
+        let image: NSImage
+        let widthConstraint: NSLayoutConstraint
+        let heightConstraint: NSLayoutConstraint
+        /// The row NSStackView's width constraint (only set for the left page in each pair;
+        /// nil for right pages and all single-column pages).
+        let rowConstraint: NSLayoutConstraint?
+    }
 
     final class Coordinator: NSObject {
         var scrollView: NSScrollView?
         var stackView: NSStackView?
         var pageViews: [(pageIndex: Int, view: NSView)] = []
+        /// Per-page layout constraints for in-place scale updates.
+        var pageConstraints: [PageConstraints] = []
+        /// The stack view's own width constraint.
+        var stackWidthConstraint: NSLayoutConstraint?
         var lastScale: CGFloat = 0
         var lastContainerWidth: CGFloat = 0
         var lastPagesPerRow: Int = 0
