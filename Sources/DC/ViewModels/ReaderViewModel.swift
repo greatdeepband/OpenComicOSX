@@ -120,6 +120,14 @@ final class ReaderViewModel: ObservableObject {
         scale = newScale.clamped(to: minScale...maxScale)
     }
 
+    /// Called by VerticalComicScrollView when the user pinches to zoom.
+    /// Updates the published scale (so the toolbar percentage stays in sync)
+    /// without triggering a page rebuild — the scroll view already applied the
+    /// magnification natively, so we only need to record the new value.
+    func setScaleFromScrollView(_ newScale: CGFloat) {
+        scale = newScale.clamped(to: minScale...maxScale)
+    }
+
     func resetZoom() {
         withAnimation(.easeOut(duration: 0.2)) {
             scale = 1.0
@@ -127,8 +135,28 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
-    /// Scales so the image width fills the container width exactly.
+    /// Scales so the content fills the container width exactly.
     func fitToWidth(containerWidth: CGFloat) {
+        // In Double Page mode the spread always fills the container width at scale = 1.0
+        // (each page is exactly half the container). "Fit to Width" therefore means
+        // resetting to scale = 1.0, which avoids the left-page-only bias of the old
+        // single-image calculation.
+        if readingMode == .doublePage {
+            withAnimation(.easeOut(duration: 0.2)) {
+                scale = 1.0
+                offset = .zero
+            }
+            return
+        }
+        // For vertical modes, "Fit to Width" also means scale = 1.0 because pages
+        // are built at containerWidth and NSScrollView.magnification handles zoom.
+        if readingMode == .verticalScroll || readingMode == .verticalDouble {
+            withAnimation(.easeOut(duration: 0.2)) {
+                scale = 1.0
+            }
+            return
+        }
+        // Single Page: compute the scale that makes the image fill the container width.
         guard let img = currentImage, img.size.width > 0 else { return }
         let imgAR = img.size.width / img.size.height
         let conAR = containerWidth / containerSize.height

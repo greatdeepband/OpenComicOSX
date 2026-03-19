@@ -117,9 +117,16 @@ struct VerticalComicScrollView: NSViewRepresentable {
     let restoreOffset: Double?
     var onPageChanged: (Int) -> Void
     var onOffsetChanged: (Double) -> Void
+    /// Called when the user pinches to zoom (NSScrollView magnification changed).
+    /// The new magnification value should be pushed back to vm.scale.
+    var onMagnificationChanged: (CGFloat) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onPageChanged: onPageChanged, onOffsetChanged: onOffsetChanged)
+        Coordinator(
+            onPageChanged: onPageChanged,
+            onOffsetChanged: onOffsetChanged,
+            onMagnificationChanged: onMagnificationChanged
+        )
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -130,6 +137,17 @@ struct VerticalComicScrollView: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.contentView.drawsBackground = false
 
+        // ── Native magnification ──────────────────────────────────────────────
+        // Delegating zoom to NSScrollView means:
+        // 1. The entire document view scales as one unit — no per-page rebuild.
+        // 2. Scroll-wheel zoom works naturally (AppKit distinguishes scroll from
+        //    magnify at the event level, so the scroll view's own vertical
+        //    scrolling is never confused with zoom).
+        scrollView.allowsMagnification = true
+        scrollView.minMagnification = 0.1
+        scrollView.maxMagnification = 8.0
+        scrollView.magnification = scale
+
         let stack = FlippedStackView()
         stack.orientation = .vertical
         stack.spacing = 4
@@ -138,6 +156,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
         context.coordinator.stackView = stack
         scrollView.documentView = stack
 
+        // Scroll position tracking.
         NotificationCenter.default.addObserver(
             context.coordinator,
             selector: #selector(Coordinator.scrollDidChange(_:)),
@@ -148,6 +167,14 @@ struct VerticalComicScrollView: NSViewRepresentable {
             context.coordinator,
             selector: #selector(Coordinator.scrollDidChange(_:)),
             name: NSScrollView.didEndLiveScrollNotification,
+            object: scrollView
+        )
+
+        // Magnification tracking — push new scale back to the view model.
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.magnificationDidChange(_:)),
+            name: NSScrollView.didEndLiveMagnifyNotification,
             object: scrollView
         )
 
@@ -164,23 +191,39 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let stack = context.coordinator.stackView else { return }
-        let needsRebuild = context.coordinator.lastScale != scale
-            || context.coordinator.lastContainerWidth != containerWidth
+
+        // Only rebuild the page layout when the container width or column count
+        // changes. Scale is no longer part of the rebuild condition — the scroll
+        // view handles it natively.
+        let needsRebuild = context.coordinator.lastContainerWidth != containerWidth
             || context.coordinator.lastPagesPerRow != pagesPerRow
 
         if needsRebuild {
-            context.coordinator.lastScale = scale
             context.coordinator.lastContainerWidth = containerWidth
             context.coordinator.lastPagesPerRow = pagesPerRow
             buildPages(stack: stack, scrollView: scrollView, context: context)
         }
+
+        // Sync magnification from the view model (toolbar buttons, keyboard shortcuts)
+        // without triggering a rebuild. Guard against tiny floating-point drift to
+        // avoid a feedback loop with magnificationDidChange.
+        if abs(scrollView.magnification - scale) > 0.001 {
+            scrollView.magnification = scale
+        }
+
+        // Keep callbacks current.
+        context.coordinator.onPageChanged = onPageChanged
+        context.coordinator.onOffsetChanged = onOffsetChanged
+        context.coordinator.onMagnificationChanged = onMagnificationChanged
     }
 
     private func buildPages(stack: NSStackView, scrollView: NSScrollView, context: Context) {
         stack.arrangedSubviews.forEach { stack.removeArrangedSubview($0); $0.removeFromSuperview() }
         context.coordinator.pageViews.removeAll()
 
-        let totalWidth = containerWidth * scale
+        // Pages are always built at scale = 1.0.
+        // NSScrollView.magnification handles all zoom rendering.
+        let totalWidth = containerWidth
 
         if pagesPerRow == 1 {
             for page in pages {
@@ -237,7 +280,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
         var scrollView: NSScrollView?
         var stackView: NSStackView?
         var pageViews: [(pageIndex: Int, view: NSView)] = []
-        var lastScale: CGFloat = 0
         var lastContainerWidth: CGFloat = 0
         var lastPagesPerRow: Int = 0
         var pendingRestoreOffset: Double? = nil
@@ -245,10 +287,16 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
         var onPageChanged: (Int) -> Void
         var onOffsetChanged: (Double) -> Void
+        var onMagnificationChanged: (CGFloat) -> Void
 
-        init(onPageChanged: @escaping (Int) -> Void, onOffsetChanged: @escaping (Double) -> Void) {
+        init(
+            onPageChanged: @escaping (Int) -> Void,
+            onOffsetChanged: @escaping (Double) -> Void,
+            onMagnificationChanged: @escaping (CGFloat) -> Void
+        ) {
             self.onPageChanged = onPageChanged
             self.onOffsetChanged = onOffsetChanged
+            self.onMagnificationChanged = onMagnificationChanged
         }
 
         func applyPendingRestore() {
@@ -293,6 +341,14 @@ struct VerticalComicScrollView: NSViewRepresentable {
                 }
             }
             onPageChanged(bestPage)
+        }
+
+        /// Called when the user finishes a pinch-to-zoom gesture on the scroll view.
+        /// Pushes the new magnification back to the SwiftUI view model so the toolbar
+        /// percentage display stays in sync.
+        @objc func magnificationDidChange(_ notification: Notification) {
+            guard let sv = scrollView else { return }
+            onMagnificationChanged(sv.magnification)
         }
     }
 }
