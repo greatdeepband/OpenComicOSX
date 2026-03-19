@@ -121,59 +121,7 @@ struct ReaderView: View {
                 vm.scale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
             }
 
-            // Loupe overlay — listens for notifications from ComicPageView.
-            VerticalLoupeOverlay()
-                .allowsHitTesting(false)
-        }
-    }
-
-    // MARK: - Loupe overlay for vertical modes
-
-    private struct VerticalLoupeOverlay: View {
-        @State private var loupeInfo: LoupeInfo? = nil
-        @State private var overlayFrame: CGRect = .zero
-
-        var body: some View {
-            GeometryReader { geo in
-                ZStack {
-                    if let info = loupeInfo {
-                        let winH = NSApp.keyWindow?.contentView?.bounds.height ?? 800
-                        let swiftUIX = info.positionInWindow.x - overlayFrame.minX
-                        let swiftUIY = (winH - info.positionInWindow.y) - overlayFrame.minY
-                        // ── DEBUG LOUPE OVERLAY ─────────────────────────────────────────
-                        let _ = { () -> Bool in
-                            let line = "[LOUPE-OVERLAY] winH=\(winH) posInWindow=(\(info.positionInWindow.x),\(info.positionInWindow.y))\n" +
-                                "[LOUPE-OVERLAY] overlayFrame=(\(overlayFrame.minX),\(overlayFrame.minY) \(overlayFrame.width)x\(overlayFrame.height))\n" +
-                                "[LOUPE-OVERLAY] loupePos=(\(swiftUIX),\(swiftUIY))\n"
-                            if let data = line.data(using: .utf8) {
-                                let url = URL(fileURLWithPath: "/tmp/loupe_debug.txt")
-                                if let fh = try? FileHandle(forWritingTo: url) {
-                                    fh.seekToEndOfFile(); fh.write(data); try? fh.close()
-                                } else { try? data.write(to: url) }
-                            }
-                            return true
-                        }()
-                        // ───────────────────────────────────────────────────────────────
-                        MagnifierView(
-                            image: info.image,
-                            cursorInImageView: info.cursorInImageView,
-                            imageViewSize: info.imageViewSize
-                        )
-                        .position(x: swiftUIX, y: swiftUIY)
-                    }
-                }
-                .onAppear { overlayFrame = geo.frame(in: .global) }
-                .onChange(of: geo.frame(in: .global)) { _, f in overlayFrame = f }
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .loupeBegan)) { n in
-                loupeInfo = n.object as? LoupeInfo
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .loupeMoved)) { n in
-                loupeInfo = n.object as? LoupeInfo
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .loupeEnded)) { _ in
-                loupeInfo = nil
-            }
+            // Loupe is handled by VerticalLoupeOverlayView (native NSView sibling).
         }
     }
 

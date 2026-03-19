@@ -6,16 +6,13 @@ import SwiftUI
 private final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
 
-    /// NSStackView's default hitTest can route events to the wrong subview in horizontal
+    /// NSStackView's default hitTest routes events to the wrong subview in horizontal
     /// layouts. Override to do a proper frame-based hit-test across arranged subviews.
     ///
     /// NSView.hitTest(_:) contract: point is in the RECEIVER'S superview coordinate space.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // Convert from superview space to our own bounds space.
         let localPt = convert(point, from: superview)
         guard bounds.contains(localPt) else { return nil }
-        // For each arranged subview, pass the point in OUR coordinate space
-        // (which is the subview's superview space — exactly what hitTest expects).
         for subview in arrangedSubviews.reversed() {
             if let hit = subview.hitTest(localPt) { return hit }
         }
@@ -23,83 +20,10 @@ private final class FlippedStackView: NSStackView {
     }
 }
 
-// MARK: - Loupe notification
-
-struct LoupeInfo {
-    let image: NSImage
-    let cursorInImageView: CGPoint
-    let imageViewSize: CGSize
-    /// Cursor position in window coordinates (AppKit, bottom-left origin).
-    let positionInWindow: CGPoint
-}
-
-extension Notification.Name {
-    static let loupeBegan  = Notification.Name("VerticalLoupeBegan")
-    static let loupeMoved  = Notification.Name("VerticalLoupeMoved")
-    static let loupeEnded  = Notification.Name("VerticalLoupeEnded")
-}
-
 // MARK: - Page drawing view
 
 private final class ComicPageView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
-
-    // MARK: Right-click loupe
-
-    override func rightMouseDown(with event: NSEvent) {
-        NSCursor.hide()
-        postLoupe(event: event, name: .loupeBegan)
-    }
-    override func rightMouseDragged(with event: NSEvent) {
-        postLoupe(event: event, name: .loupeMoved)
-    }
-    override func rightMouseUp(with event: NSEvent) {
-        NSCursor.unhide()
-        NotificationCenter.default.post(name: .loupeEnded, object: nil)
-    }
-
-    private func postLoupe(event: NSEvent, name: Notification.Name) {
-        guard let image = image else { return }
-        let localPt  = convert(event.locationInWindow, from: nil)
-        let windowPt = event.locationInWindow
-        let imgSize  = image.size
-        guard imgSize.width > 0, imgSize.height > 0 else { return }
-        let boundsAR = bounds.width / bounds.height
-        let imgAR    = imgSize.width / imgSize.height
-        let ivSize: CGSize
-        if imgAR > boundsAR {
-            ivSize = CGSize(width: bounds.width, height: bounds.width / imgAR)
-        } else {
-            ivSize = CGSize(width: bounds.height * imgAR, height: bounds.height)
-        }
-        let ox = (bounds.width  - ivSize.width)  / 2
-        let oy = (bounds.height - ivSize.height) / 2
-        let cursorInIV = CGPoint(x: localPt.x - ox, y: localPt.y - oy)
-
-        // ── DEBUG LOUPE ──────────────────────────────────────────────────────
-        // Frame of this view in window coordinates (for diagnosing wrong-view hit-test)
-        let frameInWindow = convert(bounds, to: nil)
-        let debugLine = "[LOUPE-DEBUG] isFlipped=\(isFlipped) superFlipped=\(superview?.isFlipped ?? false)\n" +
-            "[LOUPE-DEBUG] frameInWindow=(\(frameInWindow.minX),\(frameInWindow.minY) \(frameInWindow.width)x\(frameInWindow.height))\n" +
-            "[LOUPE-DEBUG] bounds=(\(bounds.width)x\(bounds.height)) imgSize=(\(imgSize.width)x\(imgSize.height)) imgAR=\(String(format:"%.3f",imgAR)) boundsAR=\(String(format:"%.3f",boundsAR))\n" +
-            "[LOUPE-DEBUG] windowPt=(\(windowPt.x),\(windowPt.y)) localPt=(\(localPt.x),\(localPt.y))\n" +
-            "[LOUPE-DEBUG] ivSize=(\(ivSize.width)x\(ivSize.height)) offset=(\(ox),\(oy)) cursorInIV=(\(cursorInIV.x),\(cursorInIV.y))\n"
-        if let data = debugLine.data(using: .utf8) {
-            let url = URL(fileURLWithPath: "/tmp/loupe_debug.txt")
-            if let fh = try? FileHandle(forWritingTo: url) {
-                fh.seekToEndOfFile(); fh.write(data); try? fh.close()
-            } else {
-                try? data.write(to: url)
-            }
-        }
-        // ─────────────────────────────────────────────────────────────────────
-
-        let info = LoupeInfo(image: image,
-                             cursorInImageView: cursorInIV,
-                             imageViewSize: ivSize,
-                             positionInWindow: windowPt)
-        NotificationCenter.default.post(name: name, object: info)
-    }
 
     override var isFlipped: Bool { true }
 
@@ -130,6 +54,99 @@ private final class ComicPageView: NSView {
         ctx.translateBy(x: -cx, y: -cy)
         image.draw(in: drawRect, from: .zero, operation: .copy, fraction: 1.0)
         ctx.restoreGState()
+    }
+}
+
+// MARK: - Native loupe overlay NSView
+
+/// A transparent NSView that sits as a direct sibling of the NSScrollView inside
+/// the NSViewRepresentable's host view. It captures right-click events across the
+/// entire scroll area — including cross-page drags — without interfering with the
+/// scroll view's native scroll/pan handling.
+///
+/// Key design decisions:
+/// - Added as a sibling of NSScrollView (not a SwiftUI overlay), so it adds zero
+///   backing store and does not intercept scroll events.
+/// - hitTest returns self for all points so it receives the full right-click sequence
+///   even when the cursor moves between pages mid-drag (AppKit mouse capture).
+/// - Loupe rendering is done by a SwiftUI MagnifierView hosted in a child NSHostingView
+///   that is added/removed dynamically. This avoids reimplementing the loupe renderer.
+final class VerticalLoupeOverlayView: NSView {
+    /// Called with (image, cursorInImageView, imageViewSize, positionInOverlay) on each event.
+    var onLoupeUpdate: ((NSImage, CGPoint, CGSize, CGPoint) -> Void)?
+    var onLoupeEnd: (() -> Void)?
+
+    /// Weak reference to the scroll view so we can hit-test pages.
+    weak var scrollView: NSScrollView?
+    /// Page data for hit-testing: (pageView, image) pairs.
+    var pageData: [(view: NSView, image: NSImage)] = []
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // Accept all points within our bounds so we capture the full drag sequence.
+        return bounds.contains(convert(point, from: superview)) ? self : nil
+    }
+    override var acceptsFirstResponder: Bool { false }
+
+    override func rightMouseDown(with event: NSEvent) {
+        NSCursor.hide()
+        postLoupe(event: event)
+    }
+    override func rightMouseDragged(with event: NSEvent) {
+        postLoupe(event: event)
+    }
+    override func rightMouseUp(with event: NSEvent) {
+        NSCursor.unhide()
+        onLoupeEnd?()
+    }
+
+    private func postLoupe(event: NSEvent) {
+        guard let sv = scrollView else { return }
+
+        // Cursor in our own coordinate space (top-left origin, Y down).
+        let overlayPt = convert(event.locationInWindow, from: nil)
+
+        // Convert to scroll view document coordinates by adding the scroll offset.
+        // The overlay is a sibling of the scroll view and shares the same superview,
+        // so their origins are the same. We just need to add the content view's scroll offset.
+        let scrollOffset = sv.contentView.bounds.origin
+        // overlayPt is in the overlay's flipped space (Y down from top).
+        // The scroll view's content view is also flipped, so Y directions match.
+        let docPt = NSPoint(x: overlayPt.x + scrollOffset.x,
+                            y: overlayPt.y + scrollOffset.y)
+
+        // Find which page contains docPt.
+        guard let (pageView, image) = hitTestPage(docPt: docPt, in: sv) else { return }
+
+        // Cursor relative to the page view's top-left corner in document space.
+        let pageFrameInDoc = pageView.convert(pageView.bounds, to: sv.documentView)
+        let localX = docPt.x - pageFrameInDoc.minX
+        let localY = docPt.y - pageFrameInDoc.minY
+
+        // Compute rendered image rect inside the page (scaledToFit / aspect-fit).
+        let imgSize = image.size
+        guard imgSize.width > 0, imgSize.height > 0 else { return }
+        let pageW = pageFrameInDoc.width
+        let pageH = pageFrameInDoc.height
+        let imgAR = imgSize.width / imgSize.height
+        let conAR = pageW / pageH
+        let ivSize: CGSize = imgAR > conAR
+            ? CGSize(width: pageW, height: pageW / imgAR)
+            : CGSize(width: pageH * imgAR, height: pageH)
+        let ox = (pageW - ivSize.width)  / 2
+        let oy = (pageH - ivSize.height) / 2
+        let cursorInIV = CGPoint(x: localX - ox, y: localY - oy)
+
+        onLoupeUpdate?(image, cursorInIV, ivSize, overlayPt)
+    }
+
+    /// Finds the page view whose frame (in document coordinates) contains docPt.
+    private func hitTestPage(docPt: NSPoint, in sv: NSScrollView) -> (NSView, NSImage)? {
+        for (pageView, image) in pageData {
+            let frameInDoc = pageView.convert(pageView.bounds, to: sv.documentView)
+            if frameInDoc.contains(docPt) { return (pageView, image) }
+        }
+        return nil
     }
 }
 
@@ -192,7 +209,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
         guard let stack = context.coordinator.stackView else { return }
 
         // Full rebuild only when the column layout changes (pagesPerRow or containerWidth).
-        // Scale changes are handled by updating constraints in-place — no view recreation.
         let needsRebuild = context.coordinator.lastContainerWidth != containerWidth
             || context.coordinator.lastPagesPerRow != pagesPerRow
 
@@ -213,6 +229,41 @@ struct VerticalComicScrollView: NSViewRepresentable {
         // Keep callbacks current.
         context.coordinator.onPageChanged = onPageChanged
         context.coordinator.onOffsetChanged = onOffsetChanged
+
+        // Keep the loupe overlay sized to match the scroll view.
+        if let overlay = context.coordinator.loupeOverlay {
+            overlay.frame = scrollView.bounds
+        }
+    }
+
+    // MARK: - Loupe overlay setup
+
+    /// Adds the native loupe overlay as a sibling of the scroll view inside the
+    /// NSViewRepresentable host view. Called once after the host view is ready.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        nil // Use default sizing.
+    }
+
+    // We use a trick: add the overlay inside makeNSView by deferring to the next runloop
+    // tick when the scroll view has been added to its superview.
+    private func addLoupeOverlay(to scrollView: NSScrollView, context: Context) {
+        guard context.coordinator.loupeOverlay == nil else { return }
+        let overlay = VerticalLoupeOverlayView()
+        overlay.frame = scrollView.bounds
+        overlay.autoresizingMask = [.width, .height]
+        overlay.scrollView = scrollView
+        overlay.pageData = context.coordinator.pageConstraints.map { ($0.view, $0.image) }
+
+        let coordinator = context.coordinator
+        overlay.onLoupeUpdate = { [weak coordinator] image, cursorInIV, ivSize, pos in
+            coordinator?.showLoupe(image: image, cursorInIV: cursorInIV, ivSize: ivSize, pos: pos)
+        }
+        overlay.onLoupeEnd = { [weak coordinator] in
+            coordinator?.hideLoupe()
+        }
+
+        scrollView.superview?.addSubview(overlay)
+        context.coordinator.loupeOverlay = overlay
     }
 
     // MARK: - Full page build (called only on layout changes)
@@ -222,9 +273,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
         context.coordinator.pageViews.removeAll()
         context.coordinator.pageConstraints.removeAll()
 
-        // Single-column: total width scales with zoom so pages grow wider.
-        // Double-column: total width is pinned to containerWidth (no horizontal scroll);
-        //   zoom only increases page height, making the column taller to scroll through.
         let totalWidth = pagesPerRow == 1 ? containerWidth * scale : containerWidth
 
         if pagesPerRow == 1 {
@@ -238,11 +286,8 @@ struct VerticalComicScrollView: NSViewRepresentable {
             }
         } else {
             let pageWidth = (totalWidth - 2) / 2
-            // In double-column mode the height of each page is scaled:
-            //   naturalHeight = pageWidth * (imageHeight / imageWidth)
-            //   scaledHeight  = naturalHeight * scale
             for i in stride(from: 0, to: pages.count, by: 2) {
-                let row = FlippedStackView()   // Must be flipped so convert(from:nil) works correctly in child ComicPageViews
+                let row = FlippedStackView()
                 row.orientation = .horizontal
                 row.spacing = 2
                 row.alignment = .top
@@ -280,16 +325,18 @@ struct VerticalComicScrollView: NSViewRepresentable {
         context.coordinator.stackWidthConstraint = stackWC
 
         scrollView.layoutSubtreeIfNeeded()
+
+        // Update overlay page data after rebuild.
+        context.coordinator.loupeOverlay?.pageData = context.coordinator.pageConstraints.map { ($0.view, $0.image) }
+
+        // Add the loupe overlay once the scroll view is in the hierarchy.
+        DispatchQueue.main.async { self.addLoupeOverlay(to: scrollView, context: context) }
     }
 
     // MARK: - In-place scale update (no view recreation)
 
-    /// Updates only the NSLayoutConstraint constants for all pages and the stack width.
-    /// This avoids tearing down and recreating any NSView, keeping memory flat and
-    /// eliminating the visible flash that the old buildPages()-on-zoom approach caused.
     private func applyScale(stack: NSStackView, scrollView: NSScrollView, context: Context) {
         if pagesPerRow == 1 {
-            // Single-column: width and height both scale.
             let totalWidth = containerWidth * scale
             for pc in context.coordinator.pageConstraints {
                 let ar = pc.image.size.height / max(pc.image.size.width, 1)
@@ -298,16 +345,11 @@ struct VerticalComicScrollView: NSViewRepresentable {
             }
             context.coordinator.stackWidthConstraint?.constant = totalWidth
         } else {
-            // Double-column: width is pinned to containerWidth; only height scales.
-            // This keeps both pages visible without horizontal scrolling.
-            let totalWidth = containerWidth
-            let pageWidth = (totalWidth - 2) / 2
+            let pageWidth = (containerWidth - 2) / 2
             for pc in context.coordinator.pageConstraints {
                 let naturalH = pageWidth * (pc.image.size.height / max(pc.image.size.width, 1))
                 pc.heightConstraint.constant = max(naturalH * scale, 1)
-                // widthConstraint and rowConstraint are already correct (pinned to containerWidth).
             }
-            // Stack width stays at containerWidth — no update needed.
         }
 
         scrollView.layoutSubtreeIfNeeded()
@@ -315,11 +357,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
     // MARK: - Factory
 
-    /// Creates a ComicPageView and returns it together with its width and height constraints
-    /// so the coordinator can update them in-place later without a full rebuild.
-    /// `heightScale` is applied on top of the natural aspect-ratio height.
-    /// For single-column pages this is the same as the width scale (width already includes scale).
-    /// For double-column pages the width is fixed; only height is scaled.
     private func makePageView(image: NSImage, width: CGFloat, heightScale: CGFloat = 1.0) -> (ComicPageView, NSLayoutConstraint, NSLayoutConstraint) {
         let v = ComicPageView()
         v.image = image
@@ -335,15 +372,11 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
     // MARK: - Coordinator
 
-    /// Holds the live NSLayoutConstraints for each page so applyScale() can update
-    /// them without recreating any views.
     struct PageConstraints {
         let view: NSView
         let image: NSImage
         let widthConstraint: NSLayoutConstraint
         let heightConstraint: NSLayoutConstraint
-        /// The row NSStackView's width constraint (only set for the left page in each pair;
-        /// nil for right pages and all single-column pages).
         let rowConstraint: NSLayoutConstraint?
     }
 
@@ -351,9 +384,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
         var scrollView: NSScrollView?
         var stackView: NSStackView?
         var pageViews: [(pageIndex: Int, view: NSView)] = []
-        /// Per-page layout constraints for in-place scale updates.
         var pageConstraints: [PageConstraints] = []
-        /// The stack view's own width constraint.
         var stackWidthConstraint: NSLayoutConstraint?
         var lastScale: CGFloat = 0
         var lastContainerWidth: CGFloat = 0
@@ -364,9 +395,38 @@ struct VerticalComicScrollView: NSViewRepresentable {
         var onPageChanged: (Int) -> Void
         var onOffsetChanged: (Double) -> Void
 
+        /// The native loupe overlay view (sibling of the scroll view).
+        var loupeOverlay: VerticalLoupeOverlayView?
+        /// The SwiftUI hosting view that renders MagnifierView.
+        var loupeHostingView: NSHostingView<AnyView>?
+
         init(onPageChanged: @escaping (Int) -> Void, onOffsetChanged: @escaping (Double) -> Void) {
             self.onPageChanged = onPageChanged
             self.onOffsetChanged = onOffsetChanged
+        }
+
+        func showLoupe(image: NSImage, cursorInIV: CGPoint, ivSize: CGSize, pos: CGPoint) {
+            let loupeView = MagnifierView(image: image, cursorInImageView: cursorInIV, imageViewSize: ivSize)
+            let radius: CGFloat = 270
+            let frame = NSRect(x: pos.x - radius, y: pos.y - radius, width: radius * 2, height: radius * 2)
+
+            if let hv = loupeHostingView {
+                // Update existing hosting view.
+                hv.rootView = AnyView(loupeView)
+                hv.frame = frame
+            } else if let overlay = loupeOverlay {
+                // Create hosting view on first show.
+                let hv = NSHostingView(rootView: AnyView(loupeView))
+                hv.frame = frame
+
+                overlay.addSubview(hv)
+                loupeHostingView = hv
+            }
+        }
+
+        func hideLoupe() {
+            loupeHostingView?.removeFromSuperview()
+            loupeHostingView = nil
         }
 
         func applyPendingRestore() {
