@@ -72,7 +72,9 @@ struct ReaderView: View {
                 else { vm.fitToWidth(containerWidth: containerSize.width) }
             })
         } else {
-            Text("No pages found").foregroundStyle(.secondary)
+            ProgressView()
+                .progressViewStyle(.circular)
+                .onAppear { vm.triggerPrefetch() }
         }
     }
 
@@ -84,7 +86,7 @@ struct ReaderView: View {
         let rightImage: NSImage? = {
             let next = vm.currentPage + 1
             guard next < vm.pageCount else { return nil }
-            return vm.comic.pages[next].image
+            return vm.image(for: next)
         }()
 
         SpreadView(
@@ -113,6 +115,8 @@ struct ReaderView: View {
                 scale: vm.scale,
                 containerWidth: containerSize.width,
                 restoreOffset: vm.savedScrollOffset,
+                imageCache: vm.imageCache,
+                cacheVersion: vm.cacheVersion,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
                 onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction }
             )

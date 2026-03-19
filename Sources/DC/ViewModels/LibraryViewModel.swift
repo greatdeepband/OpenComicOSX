@@ -208,7 +208,7 @@ final class LibraryViewModel: ObservableObject {
                 guard let self else { return }
                 let thumbURL = LibraryViewModel.thumbnailURL(for: url)
                 if !FileManager.default.fileExists(atPath: thumbURL.path),
-                   let cover = comic.pages.first?.image {
+                   let cover = ComicLoader.loadCover(url: url) {
                     await MainActor.run { self.saveThumbnailAndCache(cover, for: url) }
                 }
             }

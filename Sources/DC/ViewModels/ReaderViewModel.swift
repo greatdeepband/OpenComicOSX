@@ -1,6 +1,73 @@
 import Foundation
 import SwiftUI
 
+// MARK: - Page Image Cache
+
+/// Thread-safe sliding-window image cache for the reader.
+/// Holds at most `countLimit` decoded pages. NSCache evicts automatically under memory pressure.
+final class PageImageCache {
+    private let cache = NSCache<NSNumber, NSImage>()
+    private let windowSize: Int
+
+    /// Tracks which pages are currently being decoded to avoid duplicate work.
+    private var inFlight = Set<Int>()
+    private let lock = NSLock()
+
+    init(windowSize: Int = 10) {
+        self.windowSize = windowSize
+        cache.countLimit = windowSize * 2   // a bit of headroom
+    }
+
+    /// Returns the cached image for a page index, or nil if not yet decoded.
+    func image(for index: Int) -> NSImage? {
+        cache.object(forKey: NSNumber(value: index))
+    }
+
+    /// Inserts a decoded image into the cache.
+    func insert(_ image: NSImage, for index: Int) {
+        cache.setObject(image, forKey: NSNumber(value: index))
+        lock.lock()
+        inFlight.remove(index)
+        lock.unlock()
+    }
+
+    /// Asynchronously decodes pages in the window [center-half ... center+half].
+    /// Calls `onReady(index)` on the main thread when a page becomes available.
+    func prefetch(around center: Int, pages: [ComicPage], onReady: @escaping (Int) -> Void) {
+        let half = windowSize / 2
+        let lo = max(0, center - half)
+        let hi = min(pages.count - 1, center + half)
+
+        for i in lo...hi {
+            guard cache.object(forKey: NSNumber(value: i)) == nil else { continue }
+            lock.lock()
+            let alreadyFetching = inFlight.contains(i)
+            if !alreadyFetching { inFlight.insert(i) }
+            lock.unlock()
+            guard !alreadyFetching else { continue }
+
+            let source = pages[i].source
+            let idx = i
+            Task.detached(priority: .userInitiated) {
+                guard let image = source.decode() else { return }
+                await MainActor.run {
+                    self.insert(image, for: idx)
+                    onReady(idx)
+                }
+            }
+        }
+    }
+
+    func removeAll() {
+        cache.removeAllObjects()
+        lock.lock()
+        inFlight.removeAll()
+        lock.unlock()
+    }
+}
+
+// MARK: - ReaderViewModel
+
 @MainActor
 final class ReaderViewModel: ObservableObject {
     @Published var currentPage: Int = 0
@@ -9,49 +76,59 @@ final class ReaderViewModel: ObservableObject {
     @Published var readingMode: ReadingMode = .verticalScroll
     /// Updated by ReaderView via GeometryReader so toolbar actions have the real size.
     @Published var containerSize: CGSize = CGSize(width: 900, height: 600)
+    /// Fires when a page image becomes available in the cache (triggers view refresh).
+    @Published var cacheVersion: Int = 0
 
     let comic: Comic
+    let imageCache = PageImageCache(windowSize: 10)
 
     var pageCount: Int { comic.pages.count }
+
+    /// Returns the cached image for the current page (may be nil while decoding).
     var currentImage: NSImage? {
-        guard currentPage < comic.pages.count else { return nil }
-        return comic.pages[currentPage].image
+        imageCache.image(for: currentPage)
+    }
+
+    /// Returns the cached image for a given page index (may be nil while decoding).
+    func image(for index: Int) -> NSImage? {
+        imageCache.image(for: index)
+    }
+
+    /// Natural size for a page — used for layout before the image is decoded.
+    func naturalSize(for index: Int) -> CGSize {
+        guard index < comic.pages.count else { return CGSize(width: 1, height: 1) }
+        return comic.pages[index].naturalSize
     }
 
     let minScale: CGFloat = 0.1
     let maxScale: CGFloat = 8.0
 
-    /// True during the initial scroll-to-saved-position phase.
-    /// Blocks preference key updates so the LazyVStack reporting page 0
-    /// can't overwrite the restored page before the scroll lands.
     var isRestoringPosition: Bool = false
-
-    /// Fractional scroll offset (0.0 = top, 1.0 = bottom) for vertical modes.
-    /// Updated continuously while scrolling; saved on close.
     var scrollOffsetFraction: Double = 0.0
-
-    /// Total scrollable content height, set by the scroll view.
     var scrollContentHeight: CGFloat = 0.0
-
-    /// Saved fractional offset to restore on open (nil = not set).
     private(set) var savedScrollOffset: Double? = nil
 
     init(comic: Comic) {
         self.comic = comic
-        // Persist page count for stats.
         ReadingPositionStore.save(pageCount: comic.pages.count, for: comic.url)
-        // Restore last reading position.
         let saved = ReadingPositionStore.page(for: comic.url)
         if saved > 0 && saved < comic.pages.count {
             self.currentPage = saved
             self.isRestoringPosition = true
         }
-        // Restore scroll offset for vertical modes.
         self.savedScrollOffset = ReadingPositionStore.scrollOffset(for: comic.url)
-        // Restore last reading mode.
         if let savedMode = ReadingPositionStore.mode(for: comic.url),
            let mode = ReadingMode(rawValue: savedMode) {
             self.readingMode = mode
+        }
+        // Kick off initial prefetch.
+        triggerPrefetch()
+    }
+
+    /// Called whenever the visible page changes — triggers prefetch of the surrounding window.
+    func triggerPrefetch() {
+        imageCache.prefetch(around: currentPage, pages: comic.pages) { [weak self] _ in
+            self?.cacheVersion += 1
         }
     }
 
@@ -63,6 +140,7 @@ final class ReaderViewModel: ObservableObject {
         currentPage = min(currentPage + step, pageCount - 1)
         savePosition()
         resetZoom()
+        triggerPrefetch()
     }
 
     func previousPage() {
@@ -71,6 +149,7 @@ final class ReaderViewModel: ObservableObject {
         currentPage = max(currentPage - step, 0)
         savePosition()
         resetZoom()
+        triggerPrefetch()
     }
 
     func goTo(page: Int) {
@@ -78,6 +157,7 @@ final class ReaderViewModel: ObservableObject {
         currentPage = page
         savePosition()
         resetZoom()
+        triggerPrefetch()
     }
 
     private func savePosition() {
@@ -88,19 +168,17 @@ final class ReaderViewModel: ObservableObject {
         ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
     }
 
-    /// Called by the vertical scroll view as pages scroll into view.
     func updateCurrentPage(_ page: Int) {
         if isRestoringPosition {
-            // Once the scroll view reports the target page, we know the scroll landed.
-            if page == currentPage {
-                isRestoringPosition = false
-            }
+            if page == currentPage { isRestoringPosition = false }
             return
         }
-        currentPage = page
+        if page != currentPage {
+            currentPage = page
+            triggerPrefetch()
+        }
     }
 
-    /// Persists the current page, scroll offset, and mode. Called when the reader is dismissed.
     func persistCurrentPosition() {
         ReadingPositionStore.save(page: currentPage, for: comic.url)
         ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
@@ -127,14 +205,12 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
-    /// Scales so the image width fills the container width exactly.
     func fitToWidth(containerWidth: CGFloat) {
-        guard let img = currentImage, img.size.width > 0 else { return }
-        let imgAR = img.size.width / img.size.height
+        let size = naturalSize(for: currentPage)
+        guard size.width > 0 else { return }
+        let imgAR = size.width / size.height
         let conAR = containerWidth / containerSize.height
-        let fittedWidth: CGFloat = imgAR > conAR
-            ? containerWidth
-            : containerSize.height * imgAR
+        let fittedWidth: CGFloat = imgAR > conAR ? containerWidth : containerSize.height * imgAR
         let targetScale = containerWidth / fittedWidth
         withAnimation(.easeOut(duration: 0.2)) {
             scale = targetScale.clamped(to: minScale...maxScale)
@@ -142,15 +218,13 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
-    /// 1 image pixel = 1 screen point.
     func zoomToActualSize() {
-        guard let img = currentImage, img.size.width > 0 else { return }
-        let imgAR = img.size.width / img.size.height
+        let size = naturalSize(for: currentPage)
+        guard size.width > 0 else { return }
+        let imgAR = size.width / size.height
         let conAR = containerSize.width / containerSize.height
-        let fittedWidth: CGFloat = imgAR > conAR
-            ? containerSize.width
-            : containerSize.height * imgAR
-        let actualScale = img.size.width / fittedWidth
+        let fittedWidth: CGFloat = imgAR > conAR ? containerSize.width : containerSize.height * imgAR
+        let actualScale = size.width / fittedWidth
         withAnimation(.easeOut(duration: 0.2)) {
             scale = actualScale.clamped(to: minScale...maxScale)
             offset = .zero
