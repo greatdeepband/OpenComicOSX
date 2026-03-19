@@ -114,14 +114,12 @@ struct ReaderView: View {
                 containerWidth: containerSize.width,
                 restoreOffset: vm.savedScrollOffset,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
-                onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction },
-                // NSScrollView applies magnification natively; push the result back
-                // to the view model so the toolbar percentage stays in sync.
-                onMagnificationChanged: { newScale in vm.setScaleFromScrollView(newScale) }
+                onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction }
             )
-            // Note: the old .onScrollWheel modifier has been removed.
-            // NSScrollView.allowsMagnification = true now handles scroll-wheel zoom
-            // natively, correctly distinguishing it from vertical scrolling.
+            .onScrollWheel { event in
+                let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
+                vm.scale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
+            }
 
             // Loupe overlay — listens for notifications from ComicPageView.
             VerticalLoupeOverlay()
