@@ -63,8 +63,8 @@ final class LibraryViewModel: ObservableObject {
     /// Current search query — empty string means no filter.
     @Published var searchQuery: String = ""
 
-    /// Bound to ScrollView.scrollPosition(id:) — set to namespaced card ID on reader close to restore position.
-    @Published var libraryScrollID: String? = nil
+    /// Saved vertical scroll offset for the library ScrollView — updated continuously, restored on reader close.
+    @Published var libraryScrollOffset: CGFloat = 0
 
     /// Recent comics filtered by searchQuery (case-insensitive substring match on title).
     var filteredRecentComics: [RecentComic] {
@@ -264,20 +264,6 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func closeComic() {
-        // Set scroll target before openComic goes nil so LibraryView reads it on first render.
-        if let url = lastOpenedURL {
-            let inGallery = galleries.contains(where: { $0.comics.contains(url) })
-            if inGallery {
-                for g in galleries where g.comics.contains(url) {
-                    collapsedSections.remove(g.id.uuidString)
-                }
-            } else {
-                collapsedSections.remove("recent")
-            }
-            libraryScrollID = inGallery
-                ? "gallery:" + url.absoluteString
-                : "recent:" + url.absoluteString
-        }
         openComic = nil
     }
 

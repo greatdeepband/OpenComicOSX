@@ -113,6 +113,10 @@ struct LibraryView: View {
     private var mainContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                // Invisible saver that tracks and restores the raw NSScrollView offset.
+                LibraryScrollSaver(offset: $library.libraryScrollOffset)
+                    .frame(width: 0, height: 0)
+                    .hidden()
 
                     // Flat search results — shown instead of gallery sections when a query is active
                     if !library.searchQuery.isEmpty {
@@ -195,7 +199,6 @@ struct LibraryView: View {
                     } // end else (no search query)
             }
         }
-        .scrollPosition(id: $library.libraryScrollID, anchor: .center)
         .onAppear {
             if !library.hasLaunched {
                 // Cold launch: collapse all galleries, leave Recent open.
