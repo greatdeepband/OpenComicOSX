@@ -264,6 +264,20 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func closeComic() {
+        // Set scroll target before openComic goes nil so LibraryView reads it on first render.
+        if let url = lastOpenedURL {
+            let inGallery = galleries.contains(where: { $0.comics.contains(url) })
+            if inGallery {
+                for g in galleries where g.comics.contains(url) {
+                    collapsedSections.remove(g.id.uuidString)
+                }
+            } else {
+                collapsedSections.remove("recent")
+            }
+            libraryScrollID = inGallery
+                ? "gallery:" + url.absoluteString
+                : "recent:" + url.absoluteString
+        }
         openComic = nil
     }
 

@@ -205,29 +205,6 @@ struct LibraryView: View {
                 library.hasLaunched = true
             }
         }
-        .onChange(of: library.openComic) { oldComic, newComic in
-            // Only act when transitioning from reader back to library (non-nil → nil).
-            guard oldComic != nil, newComic == nil, let url = library.lastOpenedURL else { return }
-            // Determine whether the comic lives in a gallery or only in Recents.
-            let inGallery = library.galleries.contains(where: { $0.comics.contains(url) })
-            // Expand the relevant section so the card is in the view tree.
-            if inGallery {
-                for g in library.galleries where g.comics.contains(url) {
-                    library.collapsedSections.remove(g.id.uuidString)
-                }
-            } else {
-                library.collapsedSections.remove("recent")
-            }
-            // Use namespaced IDs to avoid duplicate-ID ambiguity between Recents and gallery cards.
-            // Prefer the gallery card; fall back to the Recents card.
-            let scrollID = inGallery
-                ? "gallery:" + url.absoluteString
-                : "recent:" + url.absoluteString
-            // Delay by one run loop tick so scrollPosition(id:) is attached before the command fires.
-            Task { @MainActor in
-                library.libraryScrollID = scrollID
-            }
-        }
         .onChange(of: library.galleries.count) {
             // Collapse any newly added gallery (only applies during the session).
             for g in library.galleries where !library.collapsedSections.contains(g.id.uuidString) {
