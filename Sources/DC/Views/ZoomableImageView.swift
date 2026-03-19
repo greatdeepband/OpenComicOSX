@@ -175,9 +175,15 @@ final class _MouseCatcherView: NSView {
     }
 
     // Right click — loupe
-    override func rightMouseDown(with event: NSEvent)    { onRightBegan?(swiftPt(event)) }
+    override func rightMouseDown(with event: NSEvent) {
+        NSCursor.hide()
+        onRightBegan?(swiftPt(event))
+    }
     override func rightMouseDragged(with event: NSEvent) { onRightMoved?(swiftPt(event)) }
-    override func rightMouseUp(with event: NSEvent)      { onRightEnded?() }
+    override func rightMouseUp(with event: NSEvent) {
+        NSCursor.unhide()
+        onRightEnded?()
+    }
 
     /// Convert NSEvent window coords → SwiftUI view coords (Y flipped).
     private func swiftPt(_ event: NSEvent) -> CGPoint {

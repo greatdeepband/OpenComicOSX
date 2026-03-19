@@ -60,6 +60,30 @@ final class LibraryViewModel: ObservableObject {
     /// Incremented whenever a thumbnail is saved or loaded — cards observe this to reload.
     @Published var thumbnailGeneration: Int = 0
 
+    /// Current search query — empty string means no filter.
+    @Published var searchQuery: String = ""
+
+    /// Recent comics filtered by searchQuery (case-insensitive substring match on title).
+    var filteredRecentComics: [RecentComic] {
+        guard !searchQuery.isEmpty else { return recentComics }
+        return recentComics.filter { $0.title.localizedCaseInsensitiveContains(searchQuery) }
+    }
+
+    /// Galleries filtered by searchQuery — each gallery's comic list is also filtered.
+    var filteredGalleries: [Gallery] {
+        guard !searchQuery.isEmpty else { return galleries }
+        return galleries.compactMap { gallery in
+            let filtered = gallery.comics.filter {
+                $0.deletingPathExtension().lastPathComponent.localizedCaseInsensitiveContains(searchQuery)
+            }
+            // Only include the gallery if it has matching comics.
+            guard !filtered.isEmpty else { return nil }
+            var copy = gallery
+            copy.comics = filtered
+            return copy
+        }
+    }
+
     /// Total number of unique comics across all galleries.
     var totalComics: Int {
         Set(galleries.flatMap { $0.comics }).count

@@ -68,7 +68,32 @@ struct LibraryView: View {
                         .foregroundStyle(.primary)
                 }
             }
+
             Spacer()
+
+            // Centered search bar
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13))
+                TextField("Search comics", text: $library.searchQuery)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .frame(width: 220)
+                if !library.searchQuery.isEmpty {
+                    Button(action: { library.searchQuery = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+
+            Spacer()
+
             Button(action: { showCreateGallery = true }) {
                 Text("Create Gallery")
             }
@@ -91,7 +116,7 @@ struct LibraryView: View {
                 VStack(alignment: .leading, spacing: 0) {
 
                     // Recent section
-                    if !library.recentComics.isEmpty {
+                    if !library.filteredRecentComics.isEmpty {
                         GallerySectionHeader(
                             title: "Recent",
                             key: "recent",
@@ -100,7 +125,7 @@ struct LibraryView: View {
                         .id("header:recent")
                         if !library.collapsedSections.contains("recent") {
                             LazyVGrid(columns: columns, spacing: 16) {
-                                ForEach(library.recentComics) { recent in
+                                ForEach(library.filteredRecentComics) { recent in
                                     ComicCard(url: recent.url, title: recent.title, readingProgress: recent.readingProgress)
                                         .id(recent.url)
                                         .onTapGesture { Task { await library.load(url: recent.url) } }
@@ -119,7 +144,7 @@ struct LibraryView: View {
                     }
 
                     // Gallery sections
-                    ForEach(library.galleries) { gallery in
+                    ForEach(library.filteredGalleries) { gallery in
                         GallerySectionHeader(
                             title: gallery.name,
                             key: gallery.id.uuidString,
