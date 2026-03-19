@@ -432,10 +432,22 @@ struct ComicCard: View {
     }
 
     private func loadThumb() {
+        // Fast path: NSCache hit — no disk I/O.
         if let img = library.cachedThumbnail(for: url) {
             thumbnail = img
-        } else if let img = LibraryViewModel.loadThumbnail(for: url) {
-            thumbnail = img
+            return
+        }
+        // Slow path: NSCache miss (evicted or not yet loaded).
+        // Load from disk on a background thread so the main thread isn't blocked,
+        // then re-insert into NSCache so subsequent scrolls are instant.
+        let comicURL = url
+        Task.detached(priority: .utility) {
+            guard let img = LibraryViewModel.loadThumbnail(for: comicURL) else { return }
+            await MainActor.run { [weak library] in
+                // Re-populate the cache so the next scroll past this card is free.
+                library?.insertIntoCache(img, for: comicURL)
+                self.thumbnail = img
+            }
         }
     }
 
