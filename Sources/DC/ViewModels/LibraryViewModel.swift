@@ -1,6 +1,18 @@
 import Foundation
 import AppKit
 import SwiftUI
+private func navLog(_ msg: String) {
+    let line = msg + "\n"
+    let path = "/tmp/nav_debug.txt"
+    if let data = line.data(using: .utf8) {
+        if FileManager.default.fileExists(atPath: path),
+           let fh = FileHandle(forWritingAtPath: path) {
+            fh.seekToEndOfFile(); fh.write(data); fh.closeFile()
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+}
 
 // MARK: - Gallery model
 
@@ -276,15 +288,30 @@ final class LibraryViewModel: ObservableObject {
     /// Returns the URL of the comic before (-1) or after (+1) the current one
     /// in the first gallery that contains it. Returns nil if not found or at boundary.
     func adjacentComicURL(offset: Int) -> URL? {
-        guard let url = lastOpenedURL else { return nil }
+        guard let url = lastOpenedURL else {
+            navLog("adjacentComicURL: lastOpenedURL is nil")
+            return nil
+        }
         let normalizedTarget = url.standardizedFileURL.path
+        navLog("adjacentComicURL: looking for \(normalizedTarget) offset=\(offset)")
+        navLog("adjacentComicURL: galleries.count=\(self.galleries.count)")
         for gallery in galleries {
+            navLog("adjacentComicURL: checking gallery '\(gallery.name)' comics.count=\(gallery.comics.count)")
+            if gallery.comics.count > 0 {
+                navLog("adjacentComicURL: first comic in gallery=\(gallery.comics[0].standardizedFileURL.path)")
+            }
             if let idx = gallery.comics.firstIndex(where: { $0.standardizedFileURL.path == normalizedTarget }) {
                 let next = idx + offset
-                guard next >= 0 && next < gallery.comics.count else { return nil }
+                navLog("adjacentComicURL: found at idx=\(idx), next=\(next), count=\(gallery.comics.count)")
+                guard next >= 0 && next < gallery.comics.count else {
+                    navLog("adjacentComicURL: at boundary, returning nil")
+                    return nil
+                }
+                navLog("adjacentComicURL: returning \(gallery.comics[next].lastPathComponent)")
                 return gallery.comics[next]
             }
         }
+        navLog("adjacentComicURL: comic not found in any gallery")
         return nil
     }
 

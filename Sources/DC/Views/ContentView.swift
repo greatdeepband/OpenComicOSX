@@ -13,6 +13,7 @@ struct ContentView: View {
 
             if let comic = library.openComic {
                 ReaderView(comic: comic)
+                    .id(comic.url)
             }
         }
         .frame(minWidth: 900, minHeight: 600)
