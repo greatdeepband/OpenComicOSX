@@ -144,6 +144,16 @@ struct ReaderView: View {
 
         ToolbarItemGroup(placement: .principal) {
             let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble
+
+            Button(action: {
+                vm.persistCurrentPosition()
+                library.openAdjacentComic(offset: -1)
+            }) {
+                Image(systemName: "chevron.left.2")
+            }
+            .disabled(library.adjacentComicURL(offset: -1) == nil)
+            .help("Previous comic in gallery")
+
             Button(action: { vm.previousPage() }) {
                 Image(systemName: "chevron.left")
             }
@@ -157,6 +167,15 @@ struct ReaderView: View {
                 Image(systemName: "chevron.right")
             }
             .disabled(vm.currentPage >= vm.pageCount - 1 || isVertical)
+
+            Button(action: {
+                vm.persistCurrentPosition()
+                library.openAdjacentComic(offset: +1)
+            }) {
+                Image(systemName: "chevron.right.2")
+            }
+            .disabled(library.adjacentComicURL(offset: +1) == nil)
+            .help("Next comic in gallery")
         }
 
         ToolbarItemGroup(placement: .primaryAction) {

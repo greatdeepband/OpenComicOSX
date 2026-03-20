@@ -271,6 +271,30 @@ final class LibraryViewModel: ObservableObject {
         openComic = nil
     }
 
+    // MARK: - Adjacent gallery navigation
+
+    /// Returns the URL of the comic before (-1) or after (+1) the current one
+    /// in the first gallery that contains it. Returns nil if not found or at boundary.
+    func adjacentComicURL(offset: Int) -> URL? {
+        guard let url = lastOpenedURL else { return nil }
+        for gallery in galleries {
+            if let idx = gallery.comics.firstIndex(of: url) {
+                let next = idx + offset
+                guard next >= 0 && next < gallery.comics.count else { return nil }
+                return gallery.comics[next]
+            }
+        }
+        return nil
+    }
+
+    /// Persists recents for the current comic, then opens the adjacent one.
+    func openAdjacentComic(offset: Int) {
+        guard let nextURL = adjacentComicURL(offset: offset) else { return }
+        // Add current comic to recents before moving on.
+        if let url = lastOpenedURL { addRecent(url: url) }
+        Task { await load(url: nextURL) }
+    }
+
     func removeRecent(_ recent: RecentComic) {
         recentComics.removeAll { $0.id == recent.id }
         saveRecents()
