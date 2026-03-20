@@ -277,8 +277,9 @@ final class LibraryViewModel: ObservableObject {
     /// in the first gallery that contains it. Returns nil if not found or at boundary.
     func adjacentComicURL(offset: Int) -> URL? {
         guard let url = lastOpenedURL else { return nil }
+        let normalizedTarget = url.standardizedFileURL.path
         for gallery in galleries {
-            if let idx = gallery.comics.firstIndex(of: url) {
+            if let idx = gallery.comics.firstIndex(where: { $0.standardizedFileURL.path == normalizedTarget }) {
                 let next = idx + offset
                 guard next >= 0 && next < gallery.comics.count else { return nil }
                 return gallery.comics[next]
