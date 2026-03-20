@@ -505,6 +505,17 @@ struct ComicCard: View {
                         progressBadge(progress)
                     }
                 }
+                .overlay(alignment: .topLeading) {
+                    let fav = library.isFavorite(url: url)
+                    Button(action: { library.toggleFavorite(url: url) }) {
+                        Image(systemName: fav ? "heart.fill" : "heart")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(fav ? Color.red : Color.white)
+                            .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                            .padding(7)
+                    }
+                    .buttonStyle(.plain)
+                }
 
             Text(title)
                 .font(.caption)
