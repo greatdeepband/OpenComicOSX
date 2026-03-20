@@ -75,6 +75,9 @@ final class LibraryViewModel: ObservableObject {
     /// Current search query — empty string means no filter.
     @Published var searchQuery: String = ""
 
+    /// Ordered list of favorited comic URLs (most recently favorited first).
+    @Published var favoriteURLs: [URL] = []
+
     /// Recent comics filtered by searchQuery (case-insensitive substring match on title).
     var filteredRecentComics: [RecentComic] {
         guard !searchQuery.isEmpty else { return recentComics }
@@ -141,6 +144,7 @@ final class LibraryViewModel: ObservableObject {
 
     private let recentsKey = "recentComics"
     private let galleriesKey = "galleries_v1"
+    private let favoritesKey = "favoriteURLs_v1"
 
     /// Disk cache directory for cover thumbnails.
     static let thumbnailCacheDir: URL = {
@@ -153,6 +157,7 @@ final class LibraryViewModel: ObservableObject {
     init() {
         loadRecents()
         loadGalleries()
+        loadFavorites()
         // Preload thumbnails for the current library, then generate any that are missing.
         Task.detached(priority: .utility) { [weak self] in
             await self?.preloadThumbnailCache()
@@ -332,6 +337,34 @@ final class LibraryViewModel: ObservableObject {
     func removeRecent(_ recent: RecentComic) {
         recentComics.removeAll { $0.id == recent.id }
         saveRecents()
+    }
+
+    // MARK: - Favorites
+
+    func isFavorite(url: URL) -> Bool {
+        favoriteURLs.contains(url)
+    }
+
+    func toggleFavorite(url: URL) {
+        if isFavorite(url: url) {
+            favoriteURLs.removeAll { $0 == url }
+        } else {
+            favoriteURLs.insert(url, at: 0)
+        }
+        saveFavorites()
+    }
+
+    private func loadFavorites() {
+        guard let data = UserDefaults.standard.data(forKey: favoritesKey),
+              let paths = try? JSONDecoder().decode([String].self, from: data)
+        else { return }
+        favoriteURLs = paths.compactMap { URL(string: $0) }
+    }
+
+    private func saveFavorites() {
+        let paths = favoriteURLs.map { $0.absoluteString }
+        guard let data = try? JSONEncoder().encode(paths) else { return }
+        UserDefaults.standard.set(data, forKey: favoritesKey)
     }
 
     // MARK: - Recents

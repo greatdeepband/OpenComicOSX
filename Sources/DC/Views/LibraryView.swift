@@ -139,6 +139,35 @@ struct LibraryView: View {
                         }
                     } else {
 
+                    // Favorites section
+                    if !library.favoriteURLs.isEmpty {
+                        GallerySectionHeader(
+                            title: "Favorites",
+                            key: "favorites",
+                            collapsed: $library.collapsedSections
+                        )
+                        .id("header:favorites")
+                        if !library.collapsedSections.contains("favorites") {
+                            LazyVGrid(columns: columns, spacing: 16) {
+                                ForEach(library.favoriteURLs, id: \.self) { url in
+                                    let title = url.deletingPathExtension().lastPathComponent
+                                    ComicCard(url: url, title: title, readingProgress: nil)
+                                        .id(url)
+                                        .onTapGesture { Task { await library.load(url: url) } }
+                                        .contextMenu {
+                                            Button("Open") { Task { await library.load(url: url) } }
+                                            Divider()
+                                            Button("Remove from Favorites", role: .destructive) {
+                                                library.toggleFavorite(url: url)
+                                            }
+                                        }
+                                }
+                            }
+                            .padding(.horizontal)
+                            .padding(.bottom, 20)
+                        }
+                    }
+
                     // Recent section
                     if !library.filteredRecentComics.isEmpty {
                         GallerySectionHeader(
@@ -210,10 +239,13 @@ struct LibraryView: View {
                 guard oldComic != nil, newComic == nil, let url = library.lastOpenedURL else { return }
                 // Expand the gallery that contains this comic so the card is in the view tree.
                 let inGallery = library.galleries.contains(where: { $0.comics.contains(url) })
+                let inFavorites = library.favoriteURLs.contains(url)
                 if inGallery {
                     for g in library.galleries where g.comics.contains(url) {
                         library.collapsedSections.remove(g.id.uuidString)
                     }
+                } else if inFavorites {
+                    library.collapsedSections.remove("favorites")
                 } else if library.recentComics.contains(where: { $0.url == url }) {
                     library.collapsedSections.remove("recent")
                 }
@@ -222,6 +254,8 @@ struct LibraryView: View {
                 if inGallery,
                    let g = library.galleries.first(where: { $0.comics.contains(url) }) {
                     scrollTarget = "header:" + g.id.uuidString
+                } else if inFavorites {
+                    scrollTarget = "header:favorites"
                 } else {
                     scrollTarget = "header:recent"
                 }

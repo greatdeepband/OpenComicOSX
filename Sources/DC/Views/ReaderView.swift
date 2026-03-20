@@ -179,6 +179,16 @@ struct ReaderView: View {
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
+            // Favorite toggle
+            if let url = library.lastOpenedURL {
+                let fav = library.isFavorite(url: url)
+                Button(action: { library.toggleFavorite(url: url) }) {
+                    Image(systemName: fav ? "heart.fill" : "heart")
+                        .foregroundStyle(fav ? Color.red : Color.primary)
+                }
+                .help(fav ? "Remove from Favorites" : "Add to Favorites")
+            }
+
             Button(action: { vm.zoomOut() }) {
                 Image(systemName: "minus.magnifyingglass")
             }
