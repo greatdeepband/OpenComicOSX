@@ -500,12 +500,12 @@ struct ComicCard: View {
                 .aspectRatio(0.7, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
-                .overlay(alignment: .bottomTrailing) {
+                .overlay(alignment: .bottomLeading) {
                     if let progress = readingProgress, progress > 0.02 {
                         progressBadge(progress)
                     }
                 }
-                .overlay(alignment: .topLeading) {
+                .overlay(alignment: .bottomTrailing) {
                     let fav = library.isFavorite(url: url)
                     Button(action: { library.toggleFavorite(url: url) }) {
                         Image(systemName: fav ? "heart.fill" : "heart")
