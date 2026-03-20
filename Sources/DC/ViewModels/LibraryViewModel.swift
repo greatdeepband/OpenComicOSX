@@ -316,10 +316,16 @@ final class LibraryViewModel: ObservableObject {
     }
 
     /// Persists recents for the current comic, then opens the adjacent one.
-    func openAdjacentComic(offset: Int) {
+    /// currentMode: the reading mode active in the reader right now — inherited by the next comic
+    /// if it has no previously saved mode of its own.
+    func openAdjacentComic(offset: Int, currentMode: String) {
         guard let nextURL = adjacentComicURL(offset: offset) else { return }
         // Add current comic to recents before moving on.
         if let url = lastOpenedURL { addRecent(url: url) }
+        // Seed the next comic's mode only if it has never been opened before.
+        if ReadingPositionStore.mode(for: nextURL) == nil {
+            ReadingPositionStore.save(mode: currentMode, for: nextURL)
+        }
         Task { await load(url: nextURL) }
     }
 

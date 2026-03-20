@@ -147,7 +147,7 @@ struct ReaderView: View {
 
             Button(action: {
                 vm.persistCurrentPosition()
-                library.openAdjacentComic(offset: -1)
+                library.openAdjacentComic(offset: -1, currentMode: vm.readingMode.rawValue)
             }) {
                 Image(systemName: "chevron.left.2")
             }
@@ -170,7 +170,7 @@ struct ReaderView: View {
 
             Button(action: {
                 vm.persistCurrentPosition()
-                library.openAdjacentComic(offset: +1)
+                library.openAdjacentComic(offset: +1, currentMode: vm.readingMode.rawValue)
             }) {
                 Image(systemName: "chevron.right.2")
             }
