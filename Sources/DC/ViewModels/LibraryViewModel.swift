@@ -244,7 +244,9 @@ final class LibraryViewModel: ObservableObject {
             }.value
             openComic = comic
             lastOpenedURL = url
-            addRecent(url: url)
+            // addRecent is called in closeComic() to avoid mutating recentComics
+            // while LibraryView is alive in the ZStack — that mutation triggers a
+            // re-render which resets the scroll position before the reader even appears.
             // Generate thumbnail in background if not already cached.
             Task.detached(priority: .background) { [weak self] in
                 guard let self else { return }
@@ -261,6 +263,11 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func closeComic() {
+        // Add to recents now (on close) rather than on open, so the recentComics
+        // mutation doesn't trigger a LibraryView re-render while the reader is open.
+        if let url = lastOpenedURL {
+            addRecent(url: url)
+        }
         openComic = nil
     }
 
