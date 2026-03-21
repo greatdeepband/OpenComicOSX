@@ -33,14 +33,28 @@ enum PageSource {
     func decode() -> NSImage? {
         switch self {
         case .file(let url):
-            guard let image = NSImage(contentsOf: url) else { return nil }
+            let label = url.lastPathComponent
+            DCLogger.shared.log("DECODE START  file:\(label)")
+            guard let image = NSImage(contentsOf: url) else {
+                DCLogger.shared.log("DECODE FAIL   file:\(label) — NSImage(contentsOf:) returned nil")
+                // Extra diagnostics: does the file exist?
+                let exists = FileManager.default.fileExists(atPath: url.path)
+                let size   = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? -1
+                DCLogger.shared.log("              exists=\(exists) size=\(size)B path=\(url.path)")
+                return nil
+            }
             // Force bitmap decode so the image is ready to draw immediately.
             image.lockFocus()
             image.unlockFocus()
+            DCLogger.shared.log("DECODE OK     file:\(label) size=\(image.size.width)x\(image.size.height)")
             return image
 
         case .pdf(let doc, let pageIndex):
-            guard let page = doc.page(at: pageIndex) else { return nil }
+            DCLogger.shared.log("DECODE START  pdf:page\(pageIndex)")
+            guard let page = doc.page(at: pageIndex) else {
+                DCLogger.shared.log("DECODE FAIL   pdf:page\(pageIndex) — doc.page(at:) returned nil")
+                return nil
+            }
             let bounds = page.bounds(for: .mediaBox)
             let scale: CGFloat = 2.0
             let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
@@ -51,6 +65,7 @@ enum PageSource {
                 page.draw(with: .mediaBox, to: ctx)
             }
             image.unlockFocus()
+            DCLogger.shared.log("DECODE OK     pdf:page\(pageIndex) size=\(size.width)x\(size.height)")
             return image
         }
     }
@@ -67,6 +82,8 @@ enum PageSource {
                w > 0, h > 0 {
                 return CGSize(width: w, height: h)
             }
+            // Metadata read failed — page will get 1×1 placeholder size.
+            DCLogger.shared.log("NATURAL_SIZE FAIL  file:\(url.lastPathComponent) — CGImageSource metadata unavailable, falling back to 1×1")
             return CGSize(width: 1, height: 1)
         case .pdf(let doc, let pageIndex):
             guard let page = doc.page(at: pageIndex) else { return CGSize(width: 1, height: 1) }

@@ -38,20 +38,37 @@ final class PageImageCache {
         let lo = max(0, center - half)
         let hi = min(pages.count - 1, center + half)
 
+        DCLogger.shared.log("PREFETCH window [\(lo)...\(hi)] around page \(center)")
+
         for i in lo...hi {
-            guard cache.object(forKey: NSNumber(value: i)) == nil else { continue }
+            if cache.object(forKey: NSNumber(value: i)) != nil {
+                // Already cached — skip silently (too noisy to log every hit).
+                continue
+            }
             lock.lock()
             let alreadyFetching = inFlight.contains(i)
             if !alreadyFetching { inFlight.insert(i) }
             lock.unlock()
-            guard !alreadyFetching else { continue }
+            if alreadyFetching {
+                DCLogger.shared.log("PREFETCH SKIP  page \(i) already in-flight")
+                continue
+            }
 
+            DCLogger.shared.log("PREFETCH QUEUE page \(i)")
             let source = pages[i].source
             let idx = i
             Task.detached(priority: .userInitiated) {
-                guard let image = source.decode() else { return }
+                guard let image = source.decode() else {
+                    DCLogger.shared.log("PREFETCH DONE  page \(idx) — decode returned nil, NOT inserting into cache")
+                    // Remove from inFlight so a retry is possible.
+                    self.lock.lock()
+                    self.inFlight.remove(idx)
+                    self.lock.unlock()
+                    return
+                }
                 await MainActor.run {
                     self.insert(image, for: idx)
+                    DCLogger.shared.log("PREFETCH DONE  page \(idx) — inserted into cache, notifying view")
                     onReady(idx)
                 }
             }

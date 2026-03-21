@@ -348,11 +348,24 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
     private func refreshImages(context: Context) {
         guard let cache = imageCache else { return }
+        var updated = 0
+        var stillMissing: [Int] = []
         for pc in context.coordinator.pageConstraints {
             guard let v = pc.view as? ComicPageView else { continue }
-            if v.image == nil, let img = cache.image(for: pc.pageIndex) {
-                v.image = img
+            if v.image == nil {
+                if let img = cache.image(for: pc.pageIndex) {
+                    v.image = img
+                    updated += 1
+                } else {
+                    stillMissing.append(pc.pageIndex)
+                }
             }
+        }
+        if updated > 0 {
+            DCLogger.shared.log("REFRESH pushed \(updated) image(s) into page views")
+        }
+        if !stillMissing.isEmpty {
+            DCLogger.shared.log("REFRESH still nil pages: \(stillMissing)")
         }
     }
 
