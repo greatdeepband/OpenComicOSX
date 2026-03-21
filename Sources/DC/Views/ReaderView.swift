@@ -27,11 +27,14 @@ struct ReaderView: View {
     private func handleKey(_ key: MonitoredKey) {
         let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble
         switch key {
-        case .leftArrow:   if !isVertical { vm.previousPage() }
-        case .rightArrow:  if !isVertical { vm.nextPage() }
-        case .upArrow:     vm.zoomIn()
-        case .downArrow:   vm.zoomOut()
-        case .cmdF:        toggleFullscreen()
+        case .leftArrow, .keyA:   if !isVertical { vm.previousPage() }
+        case .rightArrow, .keyD:  if !isVertical { vm.nextPage() }
+        case .upArrow, .keyW:     if !isVertical { vm.zoomIn() }
+        case .downArrow, .keyS:   if !isVertical { vm.zoomOut() }
+        case .keyQ:               library.openAdjacentComic(offset: -1, currentMode: vm.readingMode.rawValue)
+        case .keyE:               library.openAdjacentComic(offset:  1, currentMode: vm.readingMode.rawValue)
+        case .backspace:          library.closeComic()
+        case .cmdF:               toggleFullscreen()
         }
     }
 
@@ -378,7 +381,7 @@ struct SpreadView: View {
 
 // MARK: - Global key monitor (singleton)
 
-enum MonitoredKey { case leftArrow, rightArrow, upArrow, downArrow, cmdF }
+enum MonitoredKey { case leftArrow, rightArrow, upArrow, downArrow, keyA, keyD, keyW, keyS, keyQ, keyE, backspace, cmdF }
 
 final class KeyMonitor {
     static let shared = KeyMonitor()
@@ -391,14 +394,22 @@ final class KeyMonitor {
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let handler = self.handler else { return event }
-            let cmd = event.modifierFlags.contains(.command)
-            switch (event.keyCode, cmd) {
-            case (123, false): handler(.leftArrow);  return nil
-            case (124, false): handler(.rightArrow); return nil
-            case (125, false): handler(.downArrow);  return nil
-            case (126, false): handler(.upArrow);    return nil
-            case (3,   true):  handler(.cmdF);       return nil
-            default:           return event
+            let cmd  = event.modifierFlags.contains(.command)
+            let none = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
+            switch (event.keyCode, cmd, none) {
+            case (123, _, true): handler(.leftArrow);  return nil  // ←
+            case (124, _, true): handler(.rightArrow); return nil  // →
+            case (125, _, true): handler(.downArrow);  return nil  // ↓
+            case (126, _, true): handler(.upArrow);    return nil  // ↑
+            case (0,  _, true):  handler(.keyA);       return nil  // A
+            case (2,  _, true):  handler(.keyD);       return nil  // D
+            case (13, _, true):  handler(.keyW);       return nil  // W
+            case (1,  _, true):  handler(.keyS);       return nil  // S
+            case (12, _, true):  handler(.keyQ);       return nil  // Q
+            case (14, _, true):  handler(.keyE);       return nil  // E
+            case (51, _, true):  handler(.backspace);  return nil  // ⌫
+            case (3, true, _):   handler(.cmdF);       return nil  // Cmd+F
+            default:             return event
             }
         }
     }
