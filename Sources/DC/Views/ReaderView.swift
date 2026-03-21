@@ -21,7 +21,7 @@ struct ReaderView: View {
         .toolbar { toolbarContent }
         .navigationTitle(vm.comic.title)
         .onAppear  { KeyMonitor.shared.start(handler: handleKey) }
-        .onDisappear { KeyMonitor.shared.stop() }
+        .onDisappear { if library.openComic == nil { KeyMonitor.shared.stop() } }
     }
 
     private func handleKey(_ key: MonitoredKey) {
