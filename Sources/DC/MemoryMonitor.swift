@@ -38,11 +38,25 @@ final class MemoryMonitor: ObservableObject {
 
     private init() {}
 
+    var memoryStatus: String {
+        let mb = Double(residentBytes) / (1024 * 1024)
+        if mb < 50 {
+            return "Clean"
+        } else if mb < 200 {
+            return "Moderate"
+        } else if mb < 500 {
+            return "High"
+        } else {
+            return "Critical"
+        }
+    }
+
     // MARK: - Control
 
     func start(library: LibraryViewModel, interval: TimeInterval = 5) {
         self.library = library
         sample()   // immediate first sample
+        print("Memory status: \(memoryStatus)")
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.sample() }
         }
@@ -52,6 +66,11 @@ final class MemoryMonitor: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        DCLogger.shared.log("MEMORY_MONITOR stopped")
+    }
+
+    deinit {
+        timer?.invalidate()
         DCLogger.shared.log("MEMORY_MONITOR stopped")
     }
 
