@@ -51,6 +51,19 @@ final class MemoryMonitor: ObservableObject {
         }
     }
 
+    var memoryPressure: String {
+        let mb = Double(residentBytes) / (1024 * 1024)
+        if mb < 100 {
+            return "nominal"
+        } else if mb < 400 {
+            return "elevated"
+        } else if mb < 700 {
+            return "warning"
+        } else {
+            return "critical"
+        }
+    }
+
     // MARK: - Control
 
     func start(library: LibraryViewModel, interval: TimeInterval = 5) {
