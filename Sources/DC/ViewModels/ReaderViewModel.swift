@@ -3,22 +3,32 @@ import SwiftUI
 
 // MARK: - Page Image Cache
 
-/// Thread-safe asymmetric sliding-window image cache for the reader.
+/// Thread-safe asymmetric sliding-window image cache for the reader, using Swift actor isolation.
 ///
 /// The window is biased forward: [center - 1 ... center + 3].
 /// Pages outside the window are explicitly evicted — we never rely on NSCache's
 /// opaque eviction policy. This hard-caps the decoded page count at 5 at any time.
-final class PageImageCache {
+///
+/// ## Threading notes
+/// - `image(for:)` is nonisolated because NSCache is thread-safe.
+/// - `prefetch` methods are nonisolated and return immediately (fire-and-forget).
+/// - Completion callbacks (`onPageReady`, `onPageReadySwiftUI`) fire on `@MainActor`.
+actor PageImageCache {
     private let cache = NSCache<NSNumber, NSImage>()
 
     /// Tracks which pages are currently being decoded to avoid duplicate work.
+    /// Actor-isolated — access is serialized by the actor.
     private var inFlight = Set<Int>()
-    private let lock = NSLock()
 
     /// Primary callback — used by VerticalComicScrollView coordinator for direct NSView injection.
-    var onPageReady: ((Int, NSImage) -> Void)?
+    /// Marked nonisolated(unsafe) so it can be set from @MainActor and called from
+    /// MainActor.run blocks without cross-actor isolation errors.
+    nonisolated(unsafe) var onPageReady: ((Int, NSImage) -> Void)?
+
     /// Secondary callback — used by ReaderViewModel to bump cacheVersion for SwiftUI re-render.
-    var onPageReadySwiftUI: ((Int, NSImage) -> Void)?
+    /// Marked nonisolated(unsafe) so it can be set from @MainActor and called from
+    /// MainActor.run blocks without cross-actor isolation errors.
+    nonisolated(unsafe) var onPageReadySwiftUI: ((Int, NSImage) -> Void)?
 
     /// Window shape: how many pages to keep behind and ahead of the current page.
     private let lookBehind = 1
@@ -30,56 +40,62 @@ final class PageImageCache {
     }
 
     /// Returns the cached image for a page index, or nil if not yet decoded.
-    func image(for index: Int) -> NSImage? {
+    /// nonisolated: NSCache is thread-safe.
+    nonisolated func image(for index: Int) -> NSImage? {
         cache.object(forKey: NSNumber(value: index))
     }
 
     /// Inserts a decoded image into the cache.
-    private func insert(_ image: NSImage, for index: Int) {
-        cache.setObject(image, forKey: NSNumber(value: index))
-        lock.lock()
+    private func insert(image: NSImage?, for index: Int) {
+        if let image {
+            cache.setObject(image, forKey: NSNumber(value: index))
+        }
         inFlight.remove(index)
-        lock.unlock()
     }
 
     /// Viewport-aware prefetch for vertical scroll modes.
+    /// nonisolated so it can be called without await from any context.
     ///
     /// `visible` is the exact range of pages currently on screen (computed by the
     /// scroll view from its viewport rect and pre-computed Y offsets).
     /// `lookahead` pages beyond the visible range are also decoded proactively.
     /// Only pages outside (visible.lowerBound - 1 ... visible.upperBound + lookahead)
     /// are evicted — pages on screen are never removed.
-    func prefetch(visible: ClosedRange<Int>, lookahead: Int, pages: [ComicPage]) {
+    nonisolated func prefetch(visible: ClosedRange<Int>, lookahead: Int, pages: [ComicPage]) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self._prefetchVisible(visible: visible, lookahead: lookahead, pages: pages)
+        }
+    }
+
+    /// Internal async implementation of viewport-aware prefetch.
+    private func _prefetchVisible(visible: ClosedRange<Int>, lookahead: Int, pages: [ComicPage]) async {
         let lo = max(0, visible.lowerBound - 1)
         let hi = min(pages.count - 1, visible.upperBound + lookahead)
 
-        DCLogger.shared.log("PREFETCH viewport [\(visible.lowerBound)...\(visible.upperBound)] window [\(lo)...\(hi)]")
+        await DCLogger.shared.log("PREFETCH viewport [\(visible.lowerBound)...\(visible.upperBound)] window [\(lo)...\(hi)]")
 
-        evictOutside(lo: lo, hi: hi)
+        await evictOutside(lo: lo, hi: hi)
 
         for i in lo...hi {
             if cache.object(forKey: NSNumber(value: i)) != nil { continue }
-            lock.lock()
-            let alreadyFetching = inFlight.contains(i)
-            if !alreadyFetching { inFlight.insert(i) }
-            lock.unlock()
-            if alreadyFetching { continue }
+            if inFlight.contains(i) { continue }
 
-            DCLogger.shared.log("PREFETCH QUEUE page \(i)")
+            inFlight.insert(i)
+
+            await DCLogger.shared.log("PREFETCH QUEUE page \(i)")
             let source = pages[i].source
             let idx = i
-            Task.detached(priority: .userInitiated) { [weak self] in
-                guard let self else { return }
-                guard let image = source.decode() else {
-                    DCLogger.shared.log("PREFETCH FAIL  page \(idx) — decode returned nil")
-                    self.lock.lock(); self.inFlight.remove(idx); self.lock.unlock()
+            Task(priority: .userInitiated) { [weak self] in
+                guard let decodedImage = source.decode() else {
+                    await DCLogger.shared.log("PREFETCH FAIL  page \(idx) — decode returned nil")
+                    await self?.insert(image: nil, for: idx)
                     return
                 }
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    self.insert(image, for: idx)
-                    self.onPageReady?(idx, image)
-                    self.onPageReadySwiftUI?(idx, image)
+                await self?.insert(image: decodedImage, for: idx)
+                await MainActor.run {
+                    self?.onPageReady?(idx, decodedImage)
+                    self?.onPageReadySwiftUI?(idx, decodedImage)
                 }
             }
         }
@@ -87,45 +103,48 @@ final class PageImageCache {
 
     /// Schedules decoding for pages in [center - lookBehind ... center + lookAhead],
     /// then explicitly evicts everything outside that window.
-    func prefetch(around center: Int, pages: [ComicPage]) {
+    /// nonisolated so it can be called without await from any context.
+    nonisolated func prefetch(around center: Int, pages: [ComicPage]) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self._prefetchAround(center: center, pages: pages)
+        }
+    }
+
+    /// Internal async implementation of prefetch around center.
+    private func _prefetchAround(center: Int, pages: [ComicPage]) async {
         let lo = max(0, center - lookBehind)
         let hi = min(pages.count - 1, center + lookAhead)
 
-        DCLogger.shared.log("PREFETCH window [\(lo)...\(hi)] around page \(center)")
+        await DCLogger.shared.log("PREFETCH window [\(lo)...\(hi)] around page \(center)")
 
         // Evict pages that have fallen outside the window.
-        evictOutside(lo: lo, hi: hi)
+        await evictOutside(lo: lo, hi: hi)
 
         for i in lo...hi {
             if cache.object(forKey: NSNumber(value: i)) != nil { continue }
-            lock.lock()
-            let alreadyFetching = inFlight.contains(i)
-            if !alreadyFetching { inFlight.insert(i) }
-            lock.unlock()
-            if alreadyFetching {
-                DCLogger.shared.log("PREFETCH SKIP  page \(i) already in-flight")
+            if inFlight.contains(i) {
+                await DCLogger.shared.log("PREFETCH SKIP  page \(i) already in-flight")
                 continue
             }
 
-            DCLogger.shared.log("PREFETCH QUEUE page \(i)")
+            inFlight.insert(i)
+
+            await DCLogger.shared.log("PREFETCH QUEUE page \(i)")
             let source = pages[i].source
             let idx = i
-            Task.detached(priority: .userInitiated) { [weak self] in
-                guard let self else { return }
-                guard let image = source.decode() else {
-                    DCLogger.shared.log("PREFETCH FAIL  page \(idx) — decode returned nil")
-                    self.lock.lock()
-                    self.inFlight.remove(idx)
-                    self.lock.unlock()
+            Task(priority: .userInitiated) { [weak self] in
+                guard let decodedImage = source.decode() else {
+                    await DCLogger.shared.log("PREFETCH FAIL  page \(idx) — decode returned nil")
+                    await self?.insert(image: nil, for: idx)
                     return
                 }
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    self.insert(image, for: idx)
-                    DCLogger.shared.log("PREFETCH DONE  page \(idx) — inserted into cache")
-                    self.onPageReady?(idx, image)
-                    self.onPageReadySwiftUI?(idx, image)
+                await self?.insert(image: decodedImage, for: idx)
+                await MainActor.run {
+                    self?.onPageReady?(idx, decodedImage)
+                    self?.onPageReadySwiftUI?(idx, decodedImage)
                 }
+                await DCLogger.shared.log("PREFETCH DONE  page \(idx) — inserted into cache")
             }
         }
     }
@@ -133,7 +152,7 @@ final class PageImageCache {
     /// Explicitly removes decoded images for pages outside [lo...hi].
     /// This is the key difference from the old model: we do not wait for NSCache
     /// to decide when to evict — we evict proactively on every page turn.
-    private func evictOutside(lo: Int, hi: Int) {
+    private func evictOutside(lo: Int, hi: Int) async {
         // We track which pages are in-flight; evict any cached page outside the window.
         // NSCache doesn't expose its keys, so we rely on the inFlight set + a small
         // scan of the window boundaries to remove recently-evicted candidates.
@@ -152,20 +171,22 @@ final class PageImageCache {
             cache.removeObject(forKey: NSNumber(value: i))
         }
         // Cancel in-flight decodes for pages now outside the window.
-        lock.lock()
         let stale = inFlight.filter { $0 < lo || $0 > hi }
         inFlight.subtract(stale)
-        lock.unlock()
         if !stale.isEmpty {
-            DCLogger.shared.log("PREFETCH CANCEL in-flight pages outside window: \(stale.sorted())")
+            await DCLogger.shared.log("PREFETCH CANCEL in-flight pages outside window: \(stale.sorted())")
         }
     }
 
-    func removeAll() {
+    nonisolated func removeAll() {
+        Task { [weak self] in
+            await self?.removeAllInternal()
+        }
+    }
+
+    private func removeAllInternal() {
         cache.removeAllObjects()
-        lock.lock()
         inFlight.removeAll()
-        lock.unlock()
     }
 }
 

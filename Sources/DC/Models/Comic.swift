@@ -41,7 +41,7 @@ enum PageSource {
         switch self {
         case .file(let url):
             let label = url.lastPathComponent
-            DCLogger.shared.log("DECODE START  file:\(label)")
+            Task { await DCLogger.shared.log("DECODE START  file:\(label)") }
 
             // Screen-resolution decode: max 2048px on the long axis covers all
             // current Mac displays at full window width without quality loss.
@@ -55,28 +55,28 @@ enum PageSource {
             if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
                let cgImg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) {
                 let image = NSImage(cgImage: cgImg, size: .zero)
-                DCLogger.shared.log("DECODE OK     file:\(label) size=\(image.size.width)x\(image.size.height)")
+                Task { await DCLogger.shared.log("DECODE OK     file:\(label) size=\(image.size.width)x\(image.size.height)") }
                 return image
             }
 
             // Fallback for formats CGImageSource cannot thumbnail (rare).
-            DCLogger.shared.log("DECODE FALLBACK file:\(label) — CGImageSource failed, using NSImage")
+            Task { await DCLogger.shared.log("DECODE FALLBACK file:\(label) — CGImageSource failed, using NSImage") }
             guard let image = NSImage(contentsOf: url) else {
-                DCLogger.shared.log("DECODE FAIL   file:\(label) — NSImage(contentsOf:) also returned nil")
+                Task { await DCLogger.shared.log("DECODE FAIL   file:\(label) — NSImage(contentsOf:) also returned nil") }
                 let exists = FileManager.default.fileExists(atPath: url.path)
                 let size   = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? -1
-                DCLogger.shared.log("              exists=\(exists) size=\(size)B path=\(url.path)")
+                Task { await DCLogger.shared.log("              exists=\(exists) size=\(size)B path=\(url.path)") }
                 return nil
             }
             image.lockFocus()
             image.unlockFocus()
-            DCLogger.shared.log("DECODE OK     file:\(label) size=\(image.size.width)x\(image.size.height)")
+            Task { await DCLogger.shared.log("DECODE OK     file:\(label) size=\(image.size.width)x\(image.size.height)") }
             return image
 
         case .pdf(let doc, let pageIndex):
-            DCLogger.shared.log("DECODE START  pdf:page\(pageIndex)")
+            Task { await DCLogger.shared.log("DECODE START  pdf:page\(pageIndex)") }
             guard let page = doc.page(at: pageIndex) else {
-                DCLogger.shared.log("DECODE FAIL   pdf:page\(pageIndex) — doc.page(at:) returned nil")
+                Task { await DCLogger.shared.log("DECODE FAIL   pdf:page\(pageIndex) — doc.page(at:) returned nil") }
                 return nil
             }
             let bounds = page.bounds(for: .mediaBox)
@@ -89,14 +89,14 @@ enum PageSource {
                 page.draw(with: .mediaBox, to: ctx)
             }
             image.unlockFocus()
-            DCLogger.shared.log("DECODE OK     pdf:page\(pageIndex) size=\(size.width)x\(size.height)")
+            Task { await DCLogger.shared.log("DECODE OK     pdf:page\(pageIndex) size=\(size.width)x\(size.height)") }
             return image
         case .zip(let archiveURL, let entryPath):
             let label = (entryPath as NSString).lastPathComponent
-            DCLogger.shared.log("DECODE START  zip:\(label)")
+            Task { await DCLogger.shared.log("DECODE START  zip:\(label)") }
             guard let archive = try? Archive(url: archiveURL, accessMode: .read),
                   let entry = archive[entryPath] else {
-                DCLogger.shared.log("DECODE FAIL   zip:\(label) — entry not found")
+                Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — entry not found") }
                 return nil
             }
             let imageSource = CGImageSourceCreateIncremental(nil)
@@ -108,7 +108,7 @@ enum PageSource {
                 }
                 CGImageSourceUpdateData(imageSource, accumulated as CFData, true)
             } catch {
-                DCLogger.shared.log("DECODE FAIL   zip:\(label) — extract error: \(error)")
+                Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — extract error: \(error)") }
                 return nil
             }
             let maxPx = 2048
@@ -119,11 +119,11 @@ enum PageSource {
                 kCGImageSourceShouldCacheImmediately: true
             ]
             guard let cgImg = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
-                DCLogger.shared.log("DECODE FAIL   zip:\(label) — CGImageSource thumbnail failed")
+                Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — CGImageSource thumbnail failed") }
                 return nil
             }
             let image = NSImage(cgImage: cgImg, size: .zero)
-            DCLogger.shared.log("DECODE OK     zip:\(label) size=\(image.size.width)x\(image.size.height)")
+            Task { await DCLogger.shared.log("DECODE OK     zip:\(label) size=\(image.size.width)x\(image.size.height)") }
             return image
         }
     }
@@ -141,7 +141,7 @@ enum PageSource {
                 return CGSize(width: w, height: h)
             }
             // Metadata read failed — page will get 1×1 placeholder size.
-            DCLogger.shared.log("NATURAL_SIZE FAIL  file:\(url.lastPathComponent) — CGImageSource metadata unavailable, falling back to 1×1")
+            Task { await DCLogger.shared.log("NATURAL_SIZE FAIL  file:\(url.lastPathComponent) — CGImageSource metadata unavailable, falling back to 1×1") }
             return CGSize(width: 1, height: 1)
         case .pdf(let doc, let pageIndex):
             guard let page = doc.page(at: pageIndex) else { return CGSize(width: 1, height: 1) }

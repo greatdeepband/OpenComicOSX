@@ -180,7 +180,7 @@ enum ComicLoader {
             CGImageSourceUpdateData(imageSource, lastData as CFData, true)
             success = true
         } catch {
-            DCLogger.shared.log("CBZ stream extract failed for \(url.lastPathComponent): \(error)")
+            print("CBZ stream extract failed for \(url.lastPathComponent): \(error)")
         }
 
         guard success else { return nil }
@@ -384,6 +384,10 @@ enum ComicLoader {
         let pages = try pagesFromDirectory(cacheDir)
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
         let comic = Comic(url: url, format: .cbt, pages: pages)
+        // Write cache manifest for content-based staleness check on next open.
+        if let meta = tarArchiveMetadata(url: url) {
+            saveManifest(for: cacheDir, entryCount: meta.entryCount, totalUncompressedSize: meta.totalUncompressedSize, sourceURL: url)
+        }
         Task.detached(priority: .background) { prunePageCache(keepCount: 5) }
         return comic
     }
@@ -414,6 +418,10 @@ enum ComicLoader {
         let pages = try pagesFromDirectory(cacheDir)
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
         let comic = Comic(url: url, format: ComicFormat.from(url: url)!, pages: pages)
+        // Write cache manifest for content-based staleness check on next open.
+        if let meta = unrarArchiveMetadata(url: url) {
+            saveManifest(for: cacheDir, entryCount: meta.entryCount, totalUncompressedSize: meta.totalUncompressedSize, sourceURL: url)
+        }
         // Prune old cache entries — keep only the 5 most recently opened.
         Task.detached(priority: .background) { prunePageCache(keepCount: 5) }
         return comic
@@ -456,14 +464,130 @@ enum ComicLoader {
         }
     }
 
-    /// Returns true if the cache doesn't exist or the source file is newer than the cache.
+    // MARK: - Cache manifest (content-based staleness)
+
+    /// Content-based cache validation — avoids fragile mtime comparison.
+    struct CacheManifest: Codable {
+        let entryCount: Int
+        let totalUncompressedSize: Int64
+        let sourcePath: String
+        let sourceMtime: Double
+    }
+
+    /// Path to the manifest file inside a cache directory.
+    private static func manifestURL(for cacheDir: URL) -> URL {
+        cacheDir.appendingPathComponent(".dc_cache_manifest.json")
+    }
+
+    /// Loads the cache manifest if it exists.
+    private static func loadManifest(for cacheDir: URL) -> CacheManifest? {
+        let url = manifestURL(for: cacheDir)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(CacheManifest.self, from: data)
+    }
+
+    /// Saves a cache manifest after successful extraction.
+    private static func saveManifest(for cacheDir: URL, entryCount: Int, totalUncompressedSize: Int64, sourceURL: URL) {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: sourceURL.path)
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let manifest = CacheManifest(
+            entryCount: entryCount,
+            totalUncompressedSize: totalUncompressedSize,
+            sourcePath: sourceURL.path,
+            sourceMtime: mtime
+        )
+        guard let data = try? JSONEncoder().encode(manifest) else { return }
+        try? data.write(to: manifestURL(for: cacheDir))
+    }
+
+    /// Returns true if the cache doesn't exist, the manifest is missing, or the content
+    /// doesn't match the source (entry count or total size changed).
     private static func isCacheStale(cacheDir: URL, sourceURL: URL) -> Bool {
         guard FileManager.default.fileExists(atPath: cacheDir.path) else { return true }
-        let attrs = try? FileManager.default.attributesOfItem(atPath: sourceURL.path)
-        let cacheAttrs = try? FileManager.default.attributesOfItem(atPath: cacheDir.path)
-        guard let srcMod = attrs?[.modificationDate] as? Date,
-              let cacheMod = cacheAttrs?[.modificationDate] as? Date else { return true }
-        return srcMod > cacheMod
+        guard let manifest = loadManifest(for: cacheDir) else { return true }
+        // Source path must match.
+        guard manifest.sourcePath == sourceURL.path else { return true }
+        // Get current archive metadata.
+        let format = ComicFormat.from(url: sourceURL)
+        let metadata = archiveMetadata(for: sourceURL, format: format)
+        guard let meta = metadata else { return true }
+        // Entry count must match.
+        guard meta.entryCount == manifest.entryCount else { return true }
+        // For formats that report total size, compare it.
+        if manifest.totalUncompressedSize > 0,
+           meta.totalUncompressedSize != manifest.totalUncompressedSize {
+            return true
+        }
+        return false
+    }
+
+    /// Archive metadata for content-based cache validation.
+    private struct ArchiveMetadata {
+        let entryCount: Int
+        let totalUncompressedSize: Int64
+    }
+
+    /// Reads archive metadata without full decompression.
+    private static func archiveMetadata(for url: URL, format: ComicFormat?) -> ArchiveMetadata? {
+        guard let format else { return nil }
+        switch format {
+        case .cbz:  return cbzArchiveMetadata(url: url)
+        case .cbr, .cb7: return unrarArchiveMetadata(url: url)
+        case .cbt:  return tarArchiveMetadata(url: url)
+        case .pdf, .epub: return nil
+        }
+    }
+
+    /// Reads ZIP central directory to get entry count and total uncompressed size.
+    private static func cbzArchiveMetadata(url: URL) -> ArchiveMetadata? {
+        guard let archive = try? Archive(url: url, accessMode: .read) else { return nil }
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif"])
+        var count = 0
+        var totalSize: Int64 = 0
+        for entry in archive {
+            let ext = (entry.path as NSString).pathExtension.lowercased()
+            guard imageExtensions.contains(ext), !entry.path.contains("__MACOSX") else { continue }
+            count += 1
+            totalSize += Int64(entry.uncompressedSize)
+        }
+        return ArchiveMetadata(entryCount: count, totalUncompressedSize: totalSize)
+    }
+
+    /// Parses lsar -j JSON output to get image entry count and total XADFileSize.
+    private static func unrarArchiveMetadata(url: URL) -> ArchiveMetadata? {
+        let lsarPath = bundledToolPath("lsar")
+        guard let jsonStr = shellOutputFull(lsarPath, args: ["-j", url.path]),
+              let jsonData = jsonStr.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let contents = root["lsarContents"] as? [[String: Any]]
+        else { return nil }
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
+        var count = 0
+        var totalSize: Int64 = 0
+        for entry in contents {
+            guard let name = entry["XADFileName"] as? String else { continue }
+            let ext = (name as NSString).pathExtension.lowercased()
+            guard imageExtensions.contains(ext), !name.contains("__MACOSX") else { continue }
+            count += 1
+            if let size = entry["XADFileSize"] as? Int64 {
+                totalSize += size
+            }
+        }
+        return ArchiveMetadata(entryCount: count, totalUncompressedSize: totalSize)
+    }
+
+    /// Uses tar -tf to get image entry count (size not available from tar listing).
+    private static func tarArchiveMetadata(url: URL) -> ArchiveMetadata? {
+        guard let listing = shellOutput("tar", args: ["-tf", url.path]) else { return nil }
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
+        let count = listing
+            .components(separatedBy: "\n")
+            .filter { line in
+                let ext = (line as NSString).pathExtension.lowercased()
+                return imageExtensions.contains(ext) && !line.contains("__MACOSX")
+            }
+            .count
+        return ArchiveMetadata(entryCount: count, totalUncompressedSize: 0)
     }
 
     /// Builds ComicPage array from image files in a directory (no decoding).

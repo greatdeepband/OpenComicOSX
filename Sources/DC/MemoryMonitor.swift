@@ -68,28 +68,28 @@ final class MemoryMonitor: ObservableObject {
 
     func start(library: LibraryViewModel, interval: TimeInterval = 5) {
         self.library = library
-        sample()   // immediate first sample
+        Task { await sample() }  // immediate first sample
         print("Memory status: \(memoryStatus)")
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.sample() }
+            Task { @MainActor [weak self] in await self?.sample() }
         }
-        DCLogger.shared.log("MEMORY_MONITOR started (interval=\(Int(interval))s)")
+        Task { await DCLogger.shared.log("MEMORY_MONITOR started (interval=\(Int(interval))s)") }
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
-        DCLogger.shared.log("MEMORY_MONITOR stopped")
+        Task { await DCLogger.shared.log("MEMORY_MONITOR stopped") }
     }
 
     deinit {
         timer?.invalidate()
-        DCLogger.shared.log("MEMORY_MONITOR stopped")
+        Task { await DCLogger.shared.log("MEMORY_MONITOR stopped") }
     }
 
     // MARK: - Sampling
 
-    private func sample() {
+    private func sample() async {
         let resident = currentResidentBytes()
         let count    = library?.thumbnailCacheCount ?? 0
         let disk     = diskThumbnailCount()
@@ -101,7 +101,7 @@ final class MemoryMonitor: ObservableObject {
         lastSampleTime    = Date()
 
         let ts = Self.timestamp()
-        DCLogger.shared.log(
+        await DCLogger.shared.log(
             "MEM [\(ts)]  resident=\(residentFormatted)  cache=\(count) imgs  disk=\(disk) files"
         )
     }

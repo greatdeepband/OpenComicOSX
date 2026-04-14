@@ -480,7 +480,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
             context.coordinator.rebuildYOffsets()
         }
         if updated > 0 {
-            DCLogger.shared.log("SYNC pushed \(updated) cached image(s) into page views on layout")
+            Task { await DCLogger.shared.log("SYNC pushed \(updated) cached image(s) into page views on layout") }
         }
     }
 
@@ -612,7 +612,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
                     }
                 }
             }
-            DCLogger.shared.log("INJECT page \(pageIndex) — image set directly on NSView")
+            Task { await DCLogger.shared.log("INJECT page \(pageIndex) — image set directly on NSView") }
         }
 
         func showLoupe(image: NSImage, cursorInIV: CGPoint, ivSize: CGSize, pos: CGPoint) {

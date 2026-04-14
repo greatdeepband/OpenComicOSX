@@ -173,7 +173,7 @@ final class LibraryViewModel: ObservableObject {
             let dir = LibraryViewModel.thumbnailCacheDir
             if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
                 for file in files { try? FileManager.default.removeItem(at: file) }
-                DCLogger.shared.log("[THUMB] Migration: cleared \(files.count) old hashValue thumbnail(s).")
+                Task { await DCLogger.shared.log("[THUMB] Migration: cleared \(files.count) old hashValue thumbnail(s).") }
             }
             UserDefaults.standard.set(true, forKey: migrationKey)
         }
@@ -213,7 +213,7 @@ final class LibraryViewModel: ObservableObject {
             }
         }
         if deleted > 0 {
-            DCLogger.shared.log("[THUMB] Purged \(deleted) orphaned thumbnail(s) from disk.")
+            Task { await DCLogger.shared.log("[THUMB] Purged \(deleted) orphaned thumbnail(s) from disk.") }
         }
     }
 
@@ -395,29 +395,29 @@ final class LibraryViewModel: ObservableObject {
     /// in the first gallery that contains it. Returns nil if not found or at boundary.
     func adjacentComicURL(offset: Int) -> URL? {
         guard let url = lastOpenedURL else {
-            DCLogger.shared.log("[NAV] adjacentComicURL: lastOpenedURL is nil")
+            Task { await DCLogger.shared.log("[NAV] adjacentComicURL: lastOpenedURL is nil") }
             return nil
         }
         let normalizedTarget = url.standardizedFileURL.path
-        DCLogger.shared.log("[NAV] adjacentComicURL: looking for \(normalizedTarget) offset=\(offset)")
-        DCLogger.shared.log("[NAV] adjacentComicURL: galleries.count=\(self.galleries.count)")
+        Task { await DCLogger.shared.log("[NAV] adjacentComicURL: looking for \(normalizedTarget) offset=\(offset)") }
+        Task { await DCLogger.shared.log("[NAV] adjacentComicURL: galleries.count=\(self.galleries.count)") }
         for gallery in galleries {
-            DCLogger.shared.log("[NAV] adjacentComicURL: checking gallery '\(gallery.name)' comics.count=\(gallery.comics.count)")
+            Task { await DCLogger.shared.log("[NAV] adjacentComicURL: checking gallery '\(gallery.name)' comics.count=\(gallery.comics.count)") }
             if gallery.comics.count > 0 {
-                DCLogger.shared.log("[NAV] adjacentComicURL: first comic in gallery=\(gallery.comics[0].standardizedFileURL.path)")
+                Task { await DCLogger.shared.log("[NAV] adjacentComicURL: first comic in gallery=\(gallery.comics[0].standardizedFileURL.path)") }
             }
             if let idx = gallery.comics.firstIndex(where: { $0.standardizedFileURL.path == normalizedTarget }) {
                 let next = idx + offset
-                DCLogger.shared.log("[NAV] adjacentComicURL: found at idx=\(idx), next=\(next), count=\(gallery.comics.count)")
+                Task { await DCLogger.shared.log("[NAV] adjacentComicURL: found at idx=\(idx), next=\(next), count=\(gallery.comics.count)") }
                 guard next >= 0 && next < gallery.comics.count else {
-                    DCLogger.shared.log("[NAV] adjacentComicURL: at boundary, returning nil")
+                    Task { await DCLogger.shared.log("[NAV] adjacentComicURL: at boundary, returning nil") }
                     return nil
                 }
-                DCLogger.shared.log("[NAV] adjacentComicURL: returning \(gallery.comics[next].lastPathComponent)")
+                Task { await DCLogger.shared.log("[NAV] adjacentComicURL: returning \(gallery.comics[next].lastPathComponent)") }
                 return gallery.comics[next]
             }
         }
-        DCLogger.shared.log("[NAV] adjacentComicURL: comic not found in any gallery")
+        Task { await DCLogger.shared.log("[NAV] adjacentComicURL: comic not found in any gallery") }
         return nil
     }
 
@@ -699,13 +699,13 @@ final class LibraryViewModel: ObservableObject {
         let pagesDir = ComicLoader.pageCacheDir
         if let files = try? FileManager.default.contentsOfDirectory(at: pagesDir, includingPropertiesForKeys: nil) {
             files.forEach { try? FileManager.default.removeItem(at: $0) }
-            DCLogger.shared.log("[CACHE] Cleared \(files.count) extracted page cache(s).")
+            Task { await DCLogger.shared.log("[CACHE] Cleared \(files.count) extracted page cache(s).") }
         }
         // 2. Disk: thumbnails
         let thumbDir = LibraryViewModel.thumbnailCacheDir
         if let files = try? FileManager.default.contentsOfDirectory(at: thumbDir, includingPropertiesForKeys: nil) {
             files.forEach { try? FileManager.default.removeItem(at: $0) }
-            DCLogger.shared.log("[CACHE] Cleared \(files.count) thumbnail(s).")
+            Task { await DCLogger.shared.log("[CACHE] Cleared \(files.count) thumbnail(s).") }
         }
         // 3. In-memory thumbnail NSCache
         thumbnailCache.removeAllObjects()
@@ -720,7 +720,7 @@ final class LibraryViewModel: ObservableObject {
         Task.detached(priority: .utility) { [weak self] in
             await self?.generateMissingThumbnails()
         }
-        DCLogger.shared.log("[CACHE] Full cache clear complete.")
+        Task { await DCLogger.shared.log("[CACHE] Full cache clear complete.") }
     }
 
     /// Called at the end of generateThumbnailsParallel to ensure the last batch is shown.

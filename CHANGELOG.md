@@ -1,5 +1,23 @@
 # DC Reader — Changelog
 
+## v0.2.0 — 2026-04-14
+
+### Changes
+
+**1. DCLogger: DispatchQueue → Swift actor**
+`DCLogger` converted from a class with `DispatchQueue` to a Swift `actor`. All call sites updated from `DCLogger.shared.log(...)` to `Task { await DCLogger.shared.log(...) }` or `await DCLogger.shared.log(...)` in async contexts. Write failures now print to console instead of crashing silently.
+
+**2. PageImageCache: NSLock → Swift actor**
+`PageImageCache` (in `ReaderViewModel`) converted from `final class` with `NSLock`-guarded `inFlight` set to a Swift `actor`. Actor-isolated state, async decode methods, `nonisolated` NSCache reads for zero-cost fast path.
+
+**3. Cache staleness: mtime → content-based manifest**
+Cache validation for CBR/CB7/CBT now uses a `CacheManifest.json` file storing `entryCount` and `totalUncompressedSize` (from ZIP central directory, lsar JSON, or tar listing). On next open, manifest is loaded and compared against current archive metadata — avoids false positives from clock skew or cross-volume copies. CBZ uses streaming incremental decode and is not cached to disk.
+
+**4. Homebrew packaging**
+`unar` and `lsar` are now bundled inside the app at `Contents/Resources/bin/`. The app falls back to Homebrew paths if the bundled versions are unavailable.
+
+---
+
 ## Memory Architecture Refactor — 2026-03-21
 
 **Backup:** `DC_backup_20260321_220316` (full copy of pre-refactor source)
