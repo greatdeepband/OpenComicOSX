@@ -18,10 +18,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
-            path: "Sources/DC",
-            resources: [
-                .process("Resources")
-            ]
+            path: "Sources/DC"
         )
     ]
 )

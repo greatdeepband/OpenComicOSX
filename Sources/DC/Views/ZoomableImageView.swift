@@ -17,8 +17,6 @@ struct ZoomableImageView: View {
     @State private var showLoupe: Bool = false
     @State private var loupePosition: CGPoint = .zero   // container coords
 
-    private let loupeRadius: CGFloat = 180
-
     var body: some View {
         GeometryReader { geo in
             ZStack {
@@ -156,12 +154,25 @@ final class _MouseCatcherView: NSView {
     override var acceptsFirstResponder: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { self }
 
-    // Left drag — pan
+    // Left click/drag → loupe (routes to onRight* callbacks — intentional button swap)
     override func mouseDown(with event: NSEvent) {
+        NSCursor.hide()
+        onRightBegan?(swiftPt(event))
+    }
+    override func mouseDragged(with event: NSEvent) {
+        onRightMoved?(swiftPt(event))
+    }
+    override func mouseUp(with event: NSEvent) {
+        NSCursor.unhide()
+        onRightEnded?()
+    }
+
+    // Right click/drag → pan (routes to onLeft* callbacks — intentional button swap)
+    override func rightMouseDown(with event: NSEvent) {
         lastDragLocation = event.locationInWindow
         onLeftDragBegan?(swiftPt(event))
     }
-    override func mouseDragged(with event: NSEvent) {
+    override func rightMouseDragged(with event: NSEvent) {
         let current = event.locationInWindow
         let delta = CGSize(
             width:  current.x - lastDragLocation.x,
@@ -170,19 +181,8 @@ final class _MouseCatcherView: NSView {
         lastDragLocation = current
         onLeftDragMoved?(delta)
     }
-    override func mouseUp(with event: NSEvent) {
-        onLeftDragEnded?(swiftPt(event))
-    }
-
-    // Right click — loupe
-    override func rightMouseDown(with event: NSEvent) {
-        NSCursor.hide()
-        onRightBegan?(swiftPt(event))
-    }
-    override func rightMouseDragged(with event: NSEvent) { onRightMoved?(swiftPt(event)) }
     override func rightMouseUp(with event: NSEvent) {
-        NSCursor.unhide()
-        onRightEnded?()
+        onLeftDragEnded?(swiftPt(event))
     }
 
     /// Convert NSEvent window coords → SwiftUI view coords (Y flipped).

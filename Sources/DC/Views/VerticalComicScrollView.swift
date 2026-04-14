@@ -21,7 +21,7 @@ private final class FlippedStackView: NSStackView {
 
 // MARK: - Page drawing view
 
-private final class ComicPageView: NSView {
+final class ComicPageView: NSView {
     var image: NSImage? { didSet { needsDisplay = true } }
     /// Natural aspect ratio (height/width) used for layout before image is decoded.
     var naturalAR: CGFloat = 1.4
@@ -85,14 +85,14 @@ final class VerticalLoupeOverlayView: NSView {
     }
     override var acceptsFirstResponder: Bool { false }
 
-    override func rightMouseDown(with event: NSEvent) {
+    override func mouseDown(with event: NSEvent) {
         NSCursor.hide()
         postLoupe(event: event)
     }
-    override func rightMouseDragged(with event: NSEvent) {
+    override func mouseDragged(with event: NSEvent) {
         postLoupe(event: event)
     }
-    override func rightMouseUp(with event: NSEvent) {
+    override func mouseUp(with event: NSEvent) {
         NSCursor.unhide()
         onLoupeEnd?()
     }
@@ -145,16 +145,23 @@ struct VerticalComicScrollView: NSViewRepresentable {
     let scale: CGFloat
     let containerWidth: CGFloat
     let restoreOffset: Double?
-    /// Cache reference — used to pull decoded images and update page views when images arrive.
+    /// Cache reference — used to pull decoded images during layout builds.
     weak var imageCache: PageImageCache?
-    /// Incremented by ReaderViewModel each time a new page is decoded into the cache.
-    /// Causes SwiftUI to call updateNSView, which calls refreshImages().
-    let cacheVersion: Int
     var onPageChanged: (Int) -> Void
     var onOffsetChanged: (Double) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onPageChanged: onPageChanged, onOffsetChanged: onOffsetChanged)
+    }
+
+    /// Wires the cache's onPageReady callback to the coordinator's O(1) injection.
+    /// Called once after makeNSView and again after every full rebuild.
+    private func wireCache(context: Context) {
+        guard let cache = imageCache else { return }
+        let coordinator = context.coordinator
+        cache.onPageReady = { [weak coordinator] pageIndex, image in
+            coordinator?.injectImage(image, for: pageIndex)
+        }
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -187,6 +194,11 @@ struct VerticalComicScrollView: NSViewRepresentable {
         )
 
         context.coordinator.scrollView = scrollView
+        context.coordinator.pages = pages
+        context.coordinator.imageCache = imageCache
+
+        // Wire onPageReady BEFORE buildPages so no decode completions are missed.
+        wireCache(context: context)
         buildPages(stack: stack, scrollView: scrollView, context: context)
 
         if let fraction = restoreOffset, fraction > 0 {
@@ -201,14 +213,36 @@ struct VerticalComicScrollView: NSViewRepresentable {
         guard let stack = context.coordinator.stackView else { return }
 
         // Full rebuild only when the column layout changes.
-        let needsRebuild = context.coordinator.lastContainerWidth != containerWidth
+        let needsRebuild = abs(context.coordinator.lastContainerWidth - containerWidth) > 1
             || context.coordinator.lastPagesPerRow != pagesPerRow
 
         if needsRebuild {
+            // Capture current scroll fraction before tearing down the layout.
+            let priorFraction: Double
+            let docH0 = scrollView.documentView?.bounds.height ?? 0
+            let visH0 = scrollView.contentView.bounds.height
+            let maxOff0 = docH0 - visH0
+            if maxOff0 > 0 {
+                priorFraction = Double(scrollView.contentView.bounds.origin.y / maxOff0).clamped(to: 0...1)
+            } else {
+                priorFraction = 0
+            }
             context.coordinator.lastContainerWidth = containerWidth
             context.coordinator.lastPagesPerRow = pagesPerRow
             context.coordinator.lastScale = scale
+            context.coordinator.pages = pages
+            context.coordinator.imageCache = imageCache
+            wireCache(context: context)
             buildPages(stack: stack, scrollView: scrollView, context: context)
+            // Restore scroll position after rebuild.
+            let docH1 = scrollView.documentView?.bounds.height ?? 0
+            let visH1 = scrollView.contentView.bounds.height
+            let maxOff1 = docH1 - visH1
+            if maxOff1 > 0 {
+                let targetY = CGFloat(priorFraction) * maxOff1
+                scrollView.documentView?.scroll(CGPoint(x: 0, y: targetY))
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
             return
         }
 
@@ -218,8 +252,8 @@ struct VerticalComicScrollView: NSViewRepresentable {
             applyScale(stack: stack, scrollView: scrollView, context: context)
         }
 
-        // Push any newly decoded images into their page views.
-        refreshImages(context: context)
+        // Sync any images that arrived before the cache callback was wired (e.g. on restore).
+        syncInitialImages(context: context)
 
         context.coordinator.onPageChanged = onPageChanged
         context.coordinator.onOffsetChanged = onOffsetChanged
@@ -263,13 +297,11 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
     // MARK: - Full page build (called only on layout changes)
 
-    private func buildPages(stack: NSStackView, scrollView: NSScrollView, context: Context) {
+     private func buildPages(stack: NSStackView, scrollView: NSScrollView, context: Context) {
         stack.arrangedSubviews.forEach { stack.removeArrangedSubview($0); $0.removeFromSuperview() }
         context.coordinator.pageViews.removeAll()
         context.coordinator.pageConstraints.removeAll()
-
         let totalWidth = pagesPerRow == 1 ? containerWidth * scale : containerWidth
-
         if pagesPerRow == 1 {
             for page in pages {
                 let cachedImage = imageCache?.image(for: page.id)
@@ -283,50 +315,84 @@ struct VerticalComicScrollView: NSViewRepresentable {
                 context.coordinator.pageViews.append((pageIndex: page.id, view: v))
                 context.coordinator.pageConstraints.append(
                     PageConstraints(view: v, pageIndex: page.id, naturalAR: ar,
-                                    widthConstraint: wc, heightConstraint: hc, rowConstraint: nil)
+                                    widthConstraint: wc, heightConstraint: hc, rowConstraint: nil, isSpread: false)
                 )
             }
         } else {
             let pageWidth = (totalWidth - 2) / 2
-            for i in stride(from: 0, to: pages.count, by: 2) {
-                let row = FlippedStackView()
-                row.orientation = .horizontal
-                row.spacing = 2
-                row.alignment = .top
-                row.translatesAutoresizingMaskIntoConstraints = false
-
+            var i = 0
+            while i < pages.count {
                 let leftPage = pages[i]
                 let leftAR = leftPage.naturalSize.height / max(leftPage.naturalSize.width, 1)
                 let leftImage = imageCache?.image(for: leftPage.id)
-                let (leftV, leftWC, leftHC) = makePageView(
-                    image: leftImage, naturalAR: leftAR, width: pageWidth, heightScale: scale
-                )
-                row.addArrangedSubview(leftV)
-                context.coordinator.pageViews.append((pageIndex: leftPage.id, view: leftV))
 
-                let rowWC = row.widthAnchor.constraint(equalToConstant: totalWidth)
-                rowWC.isActive = true
+                if leftPage.isSpread {
+                    // Double-scan spread: render full-width in its own row, consume only this page.
+                    let row = FlippedStackView()
+                    row.orientation = .horizontal
+                    row.spacing = 0
+                    row.alignment = .top
+                    row.translatesAutoresizingMaskIntoConstraints = false
 
-                context.coordinator.pageConstraints.append(
-                    PageConstraints(view: leftV, pageIndex: leftPage.id, naturalAR: leftAR,
-                                    widthConstraint: leftWC, heightConstraint: leftHC, rowConstraint: rowWC)
-                )
-
-                if i + 1 < pages.count {
-                    let rightPage = pages[i + 1]
-                    let rightAR = rightPage.naturalSize.height / max(rightPage.naturalSize.width, 1)
-                    let rightImage = imageCache?.image(for: rightPage.id)
-                    let (rightV, rightWC, rightHC) = makePageView(
-                        image: rightImage, naturalAR: rightAR, width: pageWidth, heightScale: scale
+                    let (spreadV, spreadWC, spreadHC) = makePageView(
+                        image: leftImage, naturalAR: leftAR, width: totalWidth, heightScale: scale
                     )
-                    row.addArrangedSubview(rightV)
+                    row.addArrangedSubview(spreadV)
+                    context.coordinator.pageViews.append((pageIndex: leftPage.id, view: spreadV))
+
+                    let rowWC = row.widthAnchor.constraint(equalToConstant: totalWidth)
+                    rowWC.isActive = true
+
                     context.coordinator.pageConstraints.append(
-                        PageConstraints(view: rightV, pageIndex: rightPage.id, naturalAR: rightAR,
-                                        widthConstraint: rightWC, heightConstraint: rightHC, rowConstraint: nil)
+                        PageConstraints(view: spreadV, pageIndex: leftPage.id, naturalAR: leftAR,
+                                        widthConstraint: spreadWC, heightConstraint: spreadHC,
+                                        rowConstraint: rowWC, isSpread: true)
                     )
-                }
+                    stack.addArrangedSubview(row)
+                    i += 1  // spread occupies one page slot
+                } else {
+                    // Normal pair row.
+                    let row = FlippedStackView()
+                    row.orientation = .horizontal
+                    row.spacing = 2
+                    row.alignment = .top
+                    row.translatesAutoresizingMaskIntoConstraints = false
 
-                stack.addArrangedSubview(row)
+                    let (leftV, leftWC, leftHC) = makePageView(
+                        image: leftImage, naturalAR: leftAR, width: pageWidth, heightScale: scale
+                    )
+                    row.addArrangedSubview(leftV)
+                    context.coordinator.pageViews.append((pageIndex: leftPage.id, view: leftV))
+
+                    let rowWC = row.widthAnchor.constraint(equalToConstant: totalWidth)
+                    rowWC.isActive = true
+
+                    context.coordinator.pageConstraints.append(
+                        PageConstraints(view: leftV, pageIndex: leftPage.id, naturalAR: leftAR,
+                                        widthConstraint: leftWC, heightConstraint: leftHC,
+                                        rowConstraint: rowWC, isSpread: false)
+                    )
+
+                    // Right page — only if it exists and is not itself a spread.
+                    if i + 1 < pages.count && !pages[i + 1].isSpread {
+                        let rightPage = pages[i + 1]
+                        let rightAR = rightPage.naturalSize.height / max(rightPage.naturalSize.width, 1)
+                        let rightImage = imageCache?.image(for: rightPage.id)
+                        let (rightV, rightWC, rightHC) = makePageView(
+                            image: rightImage, naturalAR: rightAR, width: pageWidth, heightScale: scale
+                        )
+                        row.addArrangedSubview(rightV)
+                        context.coordinator.pageConstraints.append(
+                            PageConstraints(view: rightV, pageIndex: rightPage.id, naturalAR: rightAR,
+                                            widthConstraint: rightWC, heightConstraint: rightHC,
+                                            rowConstraint: nil, isSpread: false)
+                        )
+                        i += 2  // consumed both pages
+                    } else {
+                        i += 1  // right slot is a spread or end-of-comic — leave it for next iteration
+                    }
+                    stack.addArrangedSubview(row)
+                }
             }
         }
 
@@ -337,6 +403,45 @@ struct VerticalComicScrollView: NSViewRepresentable {
 
         scrollView.layoutSubtreeIfNeeded()
 
+        // Build the O(1) page-view lookup dictionary and O(log n) Y-offset table.
+        // In vertical double mode, each row contains two pages (left + right) at the
+        // same Y position. We only advance Y when we encounter a left-page (one with
+        // a rowConstraint), otherwise we'd double-count every row's height.
+        context.coordinator.pageViewsByIndex.removeAll(keepingCapacity: true)
+        var yOffsets: [CGFloat] = []
+        yOffsets.reserveCapacity(pages.count)
+        var y: CGFloat = 0
+        for pc in context.coordinator.pageConstraints {
+            guard let v = pc.view as? ComicPageView else { continue }
+            context.coordinator.pageViewsByIndex[pc.pageIndex] = v
+            yOffsets.append(y)
+            // Only advance Y for left-pages (rowConstraint != nil) or single-column pages.
+            // Right-pages share the same row Y — do not increment.
+            if pagesPerRow == 1 || pc.rowConstraint != nil {
+                y += pc.heightConstraint.constant + 4  // 4pt stack spacing
+            }
+        }
+        context.coordinator.pageYOffsets = yOffsets
+
+        // Correct heights for pages already in cache — cache hits won't fire onPageReady
+        // so injectImage would never run for them. Same correction, applied once here.
+        var anyHeightChanged = false
+        for idx in context.coordinator.pageConstraints.indices {
+            let pc = context.coordinator.pageConstraints[idx]
+            guard let img = imageCache?.image(for: pc.pageIndex) else { continue }
+            let imgAR = img.size.height / max(img.size.width, 1)
+            let correctedH = pc.widthConstraint.constant * imgAR
+            if abs(correctedH - pc.heightConstraint.constant) > 1 {
+                context.coordinator.pageConstraints[idx].heightConstraint.constant = correctedH
+                context.coordinator.pageConstraints[idx].naturalAR = imgAR
+                anyHeightChanged = true
+            }
+        }
+        if anyHeightChanged {
+            context.coordinator.rebuildYOffsets()
+            scrollView.layoutSubtreeIfNeeded()
+        }
+
         context.coordinator.loupeOverlay?.pageData = context.coordinator.pageConstraints.map {
             ($0.view, imageCache?.image(for: $0.pageIndex))
         }
@@ -344,28 +449,38 @@ struct VerticalComicScrollView: NSViewRepresentable {
         DispatchQueue.main.async { self.addLoupeOverlay(to: scrollView, context: context) }
     }
 
-    // MARK: - Push decoded images into existing page views (no rebuild)
+    // MARK: - One-time sync on layout build (not on every cache update)
 
-    private func refreshImages(context: Context) {
+    /// Pushes any images already in the cache into their page views.
+    /// Called only during layout builds and on the first updateNSView after open.
+    /// Ongoing updates are handled by the O(1) onPageReady callback.
+    /// Note: the v.image == nil guard has been intentionally removed so that stale
+    /// images are always replaced when the cache has a fresher copy.
+    private func syncInitialImages(context: Context) {
         guard let cache = imageCache else { return }
         var updated = 0
-        var stillMissing: [Int] = []
-        for pc in context.coordinator.pageConstraints {
+        var anyHeightChanged = false
+        for idx in context.coordinator.pageConstraints.indices {
+            let pc = context.coordinator.pageConstraints[idx]
             guard let v = pc.view as? ComicPageView else { continue }
-            if v.image == nil {
-                if let img = cache.image(for: pc.pageIndex) {
-                    v.image = img
-                    updated += 1
-                } else {
-                    stillMissing.append(pc.pageIndex)
-                }
+            guard let img = cache.image(for: pc.pageIndex) else { continue }
+            v.image = img
+            updated += 1
+            // Apply the same AR correction as injectImage — SYNC is the path that runs
+            // after spurious rebuilds where injectImage won't fire again (cache hit).
+            let imgAR = img.size.height / max(img.size.width, 1)
+            let correctedH = pc.widthConstraint.constant * imgAR
+            if abs(correctedH - pc.heightConstraint.constant) > 1 {
+                context.coordinator.pageConstraints[idx].heightConstraint.constant = correctedH
+                context.coordinator.pageConstraints[idx].naturalAR = imgAR
+                anyHeightChanged = true
             }
         }
-        if updated > 0 {
-            DCLogger.shared.log("REFRESH pushed \(updated) image(s) into page views")
+        if anyHeightChanged {
+            context.coordinator.rebuildYOffsets()
         }
-        if !stillMissing.isEmpty {
-            DCLogger.shared.log("REFRESH still nil pages: \(stillMissing)")
+        if updated > 0 {
+            DCLogger.shared.log("SYNC pushed \(updated) cached image(s) into page views on layout")
         }
     }
 
@@ -382,8 +497,11 @@ struct VerticalComicScrollView: NSViewRepresentable {
         } else {
             let pageWidth = (containerWidth - 2) / 2
             for pc in context.coordinator.pageConstraints {
-                let naturalH = pageWidth * pc.naturalAR
-                pc.heightConstraint.constant = max(naturalH * scale, 1)
+                // Spread pages use full container width; normal pages use half width.
+                let w = pc.isSpread ? containerWidth : pageWidth
+                pc.widthConstraint.constant  = w
+                pc.heightConstraint.constant = max(w * pc.naturalAR * scale, 1)
+                pc.rowConstraint?.constant   = containerWidth
             }
         }
         scrollView.layoutSubtreeIfNeeded()
@@ -409,10 +527,12 @@ struct VerticalComicScrollView: NSViewRepresentable {
     struct PageConstraints {
         let view: NSView
         let pageIndex: Int
-        let naturalAR: CGFloat
+        var naturalAR: CGFloat
         let widthConstraint: NSLayoutConstraint
         let heightConstraint: NSLayoutConstraint
         let rowConstraint: NSLayoutConstraint?
+        /// True when this page is a double-scan spread occupying a full-width row.
+        let isSpread: Bool
     }
 
     final class Coordinator: NSObject {
@@ -427,6 +547,17 @@ struct VerticalComicScrollView: NSViewRepresentable {
         var pendingRestoreOffset: Double? = nil
         var hasRestoredOnce = false
 
+        /// Kept in sync with the SwiftUI struct so scrollDidChange can call viewport prefetch.
+        var pages: [ComicPage] = []
+        weak var imageCache: PageImageCache?
+
+        /// O(1) lookup: page index → its ComicPageView. Rebuilt on every layout change.
+        var pageViewsByIndex: [Int: ComicPageView] = [:]
+
+        /// Sorted cumulative Y-offsets for each page (in page-constraint order).
+        /// Used for O(log n) binary search in scrollDidChange.
+        var pageYOffsets: [CGFloat] = []
+
         var onPageChanged: (Int) -> Void
         var onOffsetChanged: (Double) -> Void
 
@@ -436,6 +567,52 @@ struct VerticalComicScrollView: NSViewRepresentable {
         init(onPageChanged: @escaping (Int) -> Void, onOffsetChanged: @escaping (Double) -> Void) {
             self.onPageChanged = onPageChanged
             self.onOffsetChanged = onOffsetChanged
+        }
+
+        /// Recomputes the cumulative Y-offset table from current constraint heights.
+        /// Must be called whenever any heightConstraint.constant changes so that
+        /// scroll-position tracking and viewport-prefetch stay accurate.
+        func rebuildYOffsets() {
+            var offsets: [CGFloat] = []
+            offsets.reserveCapacity(pageConstraints.count)
+            var y: CGFloat = 0
+            for pc in pageConstraints {
+                offsets.append(y)
+                if lastPagesPerRow == 1 || pc.rowConstraint != nil {
+                    y += pc.heightConstraint.constant + 4
+                }
+            }
+            pageYOffsets = offsets
+        }
+        /// O(1) image injection — called by the cache's onPageReady callback.
+        /// Looks up the NSView directly and sets its image without any loop or SwiftUI re-render.
+        func injectImage(_ image: NSImage, for pageIndex: Int) {
+            pageViewsByIndex[pageIndex]?.image = image
+            // Correct the height constraint to match the decoded image's actual AR.
+            // naturalSize from metadata may differ slightly from the real decoded dimensions
+            // (e.g. WebP pages with variable heights). This eliminates letterbox artefacts.
+            if let idx = pageConstraints.firstIndex(where: { $0.pageIndex == pageIndex }) {
+                let imgAR = image.size.height / max(image.size.width, 1)
+                let correctedH = pageConstraints[idx].widthConstraint.constant * imgAR
+                if abs(correctedH - pageConstraints[idx].heightConstraint.constant) > 1 {
+                    pageConstraints[idx].heightConstraint.constant = correctedH
+                    // Persist the real AR so applyScale() never reverts to the metadata value.
+                    pageConstraints[idx].naturalAR = imgAR
+                    stackView?.layoutSubtreeIfNeeded()
+                    // Keep the Y-offset table consistent with the corrected height.
+                    rebuildYOffsets()
+                }
+            }
+            // Keep loupe data current.
+            if let overlay = loupeOverlay {
+                for i in 0..<overlay.pageData.count {
+                    if overlay.pageData[i].view === pageViewsByIndex[pageIndex] {
+                        overlay.pageData[i] = (overlay.pageData[i].view, image)
+                        break
+                    }
+                }
+            }
+            DCLogger.shared.log("INJECT page \(pageIndex) — image set directly on NSView")
         }
 
         func showLoupe(image: NSImage, cursorInIV: CGPoint, ivSize: CGSize, pos: CGPoint) {
@@ -490,23 +667,42 @@ struct VerticalComicScrollView: NSViewRepresentable {
             let fraction = Double(currentY / maxOffset).clamped(to: 0...1)
             onOffsetChanged(fraction)
 
-            var bestPage = 0
-            var bestDist = CGFloat.greatestFiniteMagnitude
-            for entry in pageViews {
-                let frameInDoc = entry.view.convert(entry.view.bounds, to: doc)
-                let dist = abs(frameInDoc.minY - currentY)
-                if dist < bestDist {
-                    bestDist = dist
-                    bestPage = entry.pageIndex
-                }
+            let offsets = pageYOffsets
+            guard !offsets.isEmpty else { return }
+
+            // O(log n): find first visible page (top edge <= currentY).
+            var lo = 0, hi = offsets.count - 1
+            while lo < hi {
+                let mid = (lo + hi + 1) / 2
+                if offsets[mid] <= currentY { lo = mid } else { hi = mid - 1 }
             }
+            let firstVisible = lo
+
+            // Find last visible page (top edge < currentY + visH).
+            let bottomY = currentY + visH
+            var lo2 = firstVisible, hi2 = offsets.count - 1
+            while lo2 < hi2 {
+                let mid = (lo2 + hi2 + 1) / 2
+                if offsets[mid] < bottomY { lo2 = mid } else { hi2 = mid - 1 }
+            }
+            let lastVisible = lo2
+
+            // Report the topmost visible page for toolbar display.
+            let bestPage = pageConstraints.indices.contains(firstVisible)
+                ? pageConstraints[firstVisible].pageIndex : 0
             onPageChanged(bestPage)
+
+            // Viewport-aware prefetch: decode exactly what's visible + 3 pages ahead.
+            // Pages on screen are never evicted.
+            if !pages.isEmpty, let cache = imageCache {
+                let firstIdx = pageConstraints.indices.contains(firstVisible)
+                    ? pageConstraints[firstVisible].pageIndex : 0
+                let lastIdx  = pageConstraints.indices.contains(lastVisible)
+                    ? pageConstraints[lastVisible].pageIndex : firstIdx
+                let visibleRange = min(firstIdx, lastIdx)...max(firstIdx, lastIdx)
+                cache.prefetch(visible: visibleRange, lookahead: 3, pages: pages)
+            }
         }
     }
 }
 
-extension Double {
-    func clamped(to range: ClosedRange<Double>) -> Double {
-        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
-    }
-}

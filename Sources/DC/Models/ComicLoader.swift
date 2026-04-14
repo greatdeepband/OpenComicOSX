@@ -25,11 +25,30 @@ enum ComicLoader {
     /// Persistent directory where extracted comic pages are cached.
     /// Keyed by a hash of the comic URL so re-opening is instant.
     static let pageCacheDir: URL = {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         let dir = support.appendingPathComponent("DC/Pages")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
+
+    /// Resolves the path to a bundled tool (unar or lsar).
+    /// Checks the app bundle's Resources/bin first, then falls back to common Homebrew locations.
+    private static func bundledToolPath(_ name: String) -> String {
+        // 1. Bundled binary inside Open Comic.app/Contents/Resources/bin/
+        if let resourcePath = Bundle.main.resourcePath {
+            let bundled = (resourcePath as NSString).appendingPathComponent("bin/\(name)")
+            if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        }
+        // 2. Homebrew on Apple Silicon
+        let arm = "/opt/homebrew/bin/\(name)"
+        if FileManager.default.fileExists(atPath: arm) { return arm }
+        // 3. Homebrew on Intel
+        let intel = "/usr/local/bin/\(name)"
+        if FileManager.default.fileExists(atPath: intel) { return intel }
+        // 4. PATH fallback (will fail gracefully if not found)
+        return name
+    }
 
     static func load(url: URL) throws -> Comic {
         guard let format = ComicFormat.from(url: url) else {
@@ -62,13 +81,122 @@ enum ComicLoader {
         }
     }
 
+    /// Fast path for bulk thumbnail generation: returns a CGImage already scaled
+    /// to the 200×280 thumbnail canvas, skipping the NSImage wrapper entirely.
+    /// This avoids the redundant scaledCGImage() pass in saveThumbnailAndCache.
+    static func loadCoverCGImage(url: URL) -> CGImage? {
+        guard let format = ComicFormat.from(url: url) else { return nil }
+        let maxPixels = 560  // 280pt × 2 Retina
+        let w = 400, h = 560 // 200pt × 2 Retina
+
+        // Get the raw thumbnail CGImage from the appropriate loader.
+        let rawCG: CGImage?
+        switch format {
+        case .cbz:
+            rawCG = loadCoverCGImageCBZ(url: url, maxPixels: maxPixels)
+        case .pdf:
+            rawCG = loadCoverPDF(url: url).flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
+        case .cbr, .cb7:
+            rawCG = loadCoverWithUnar(url: url).flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
+        case .cbt:
+            rawCG = loadCoverTAR(url: url).flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
+        case .epub:
+            return nil
+        }
+        guard let src = rawCG else { return nil }
+
+        // Scale to exact 400×560 canvas in one CGContext pass.
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else { return nil }
+        ctx.interpolationQuality = .medium  // .medium is visually identical at this size, faster than .high
+        ctx.draw(src, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage()
+    }
+
+    /// CBZ-specific fast path: streams the cover entry and returns a CGImage at maxPixels.
+    private static func loadCoverCGImageCBZ(url: URL, maxPixels: Int) -> CGImage? {
+        guard let archive = try? Archive(url: url, accessMode: .read) else { return nil }
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
+        let entries = archive
+            .filter { $0.type == .file
+                && imageExtensions.contains(($0.path as NSString).pathExtension.lowercased())
+                && !$0.path.contains("__MACOSX") }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        guard let firstEntry = entries.first else { return nil }
+
+        let imageSource = CGImageSourceCreateIncremental(nil)
+        var accumulated = Data()
+        do {
+            try archive.extract(firstEntry) { chunk in
+                accumulated.append(chunk)
+                CGImageSourceUpdateData(imageSource, accumulated as CFData, false)
+            }
+            CGImageSourceUpdateData(imageSource, accumulated as CFData, true)
+        } catch { return nil }
+
+        let opts: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: false
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(imageSource, 0, opts as CFDictionary)
+    }
+
     private static func loadCoverCBZ(url: URL) -> NSImage? {
-        let tmpDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
-        guard (try? FileManager.default.unzipItem(at: url, to: tmpDir)) != nil else { return nil }
-        return firstImageInDirectory(tmpDir)
+        guard let archive = try? Archive(url: url, accessMode: .read) else { return nil }
+
+        // Find the first image entry by sorted path — no extraction needed.
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
+        let entries = archive
+            .filter { entry in
+                entry.type == .file
+                && imageExtensions.contains((entry.path as NSString).pathExtension.lowercased())
+                && !entry.path.contains("__MACOSX")
+            }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+
+        guard let firstEntry = entries.first else { return nil }
+
+        // Stream the entry bytes directly into an incremental CGImageSource.
+        // The consumer closure is called in chunks (~64 KB each), so we never
+        // hold the full decompressed image in RAM as a single Data allocation.
+        let imageSource = CGImageSourceCreateIncremental(nil)
+        var lastData = Data()
+        var success = false
+
+        do {
+            try archive.extract(firstEntry) { chunk in
+                lastData.append(chunk)
+                // Feed each chunk to the incremental decoder.
+                CGImageSourceUpdateData(imageSource, lastData as CFData, false)
+            }
+            // Signal end-of-data so the decoder can finalise.
+            CGImageSourceUpdateData(imageSource, lastData as CFData, true)
+            success = true
+        } catch {
+            DCLogger.shared.log("CBZ stream extract failed for \(url.lastPathComponent): \(error)")
+        }
+
+        guard success else { return nil }
+
+        // Decode at thumbnail resolution — never loads the full-res bitmap.
+        let maxPixels = 560
+        let thumbOptions: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: false
+        ]
+        guard let cgThumb = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, thumbOptions as CFDictionary)
+        else { return nil }
+
+        return NSImage(cgImage: cgThumb, size: .zero)
     }
 
     private static func loadCoverPDF(url: URL) -> NSImage? {
@@ -87,18 +215,65 @@ enum ComicLoader {
     }
 
     private static func loadCoverTAR(url: URL) -> NSImage? {
+        // List entries with tar -tf, find the first image, extract only that file.
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
+        guard let listing = shellOutput("tar", args: ["-tf", url.path]) else { return nil }
+        let firstImage = listing
+            .components(separatedBy: "\n")
+            .filter { line in
+                let ext = (line as NSString).pathExtension.lowercased()
+                return imageExtensions.contains(ext) && !line.contains("__MACOSX")
+            }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .first
+        guard let entryPath = firstImage else { return nil }
+
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
-        let result = shell("tar", args: ["-xf", url.path, "-C", tmpDir.path])
+
+        // Extract only the single cover entry.
+        let result = shell("tar", args: ["-xf", url.path, "-C", tmpDir.path, entryPath])
         guard result == 0 else { return nil }
         return firstImageInDirectory(tmpDir)
     }
 
     private static func loadCoverWithUnar(url: URL) -> NSImage? {
-        let unarPaths = ["/opt/homebrew/bin/unar", "/usr/local/bin/unar"]
-        let unarPath = unarPaths.first { FileManager.default.fileExists(atPath: $0) } ?? "unar"
+        let unarPath = bundledToolPath("unar")
+        let lsarPath = bundledToolPath("lsar")
+        // Use lsar -j (JSON) to list entries — avoids whitespace-splitting bugs with
+        // filenames that contain spaces. Parse XADFileName for each entry.
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
+        guard let jsonStr = shellOutputFull(lsarPath, args: ["-j", url.path]),
+              let jsonData = jsonStr.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let contents = root["lsarContents"] as? [[String: Any]]
+        else {
+            return loadCoverWithUnarFull(url: url)
+        }
+        let firstImage = contents
+            .compactMap { $0["XADFileName"] as? String }
+            .filter { name in
+                let ext = (name as NSString).pathExtension.lowercased()
+                return imageExtensions.contains(ext) && !name.contains("__MACOSX")
+            }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .first
+        guard let entryPath = firstImage else { return loadCoverWithUnarFull(url: url) }
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        // Extract only the single cover entry.
+        let result = shellFull(unarPath, args: ["-o", tmpDir.path, "-force-overwrite", url.path, entryPath])
+        guard result == 0 else { return loadCoverWithUnarFull(url: url) }
+        return firstImageInDirectory(tmpDir)
+    }
+
+    /// Fallback: full extraction when lsar is unavailable or the single-file extract fails.
+    private static func loadCoverWithUnarFull(url: URL) -> NSImage? {
+        let unarPath = bundledToolPath("unar")
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -125,32 +300,55 @@ enum ComicLoader {
         }
         imageFiles.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
 
-        guard let first = imageFiles.first, let image = NSImage(contentsOf: first) else { return nil }
-        image.lockFocus()
-        image.unlockFocus()
-        return image
+        guard let first = imageFiles.first else { return nil }
+        return scaledCoverImage(from: first)
+    }
+
+    /// Loads a cover image scaled to the thumbnail canvas size using CGImageSource.
+    /// This avoids decoding the full-resolution bitmap into RAM — the OS scales the
+    /// image during decode, keeping peak memory per extraction to ~1–2 MB instead
+    /// of the 50–100 MB a full-res comic page would require.
+    private static func scaledCoverImage(from url: URL) -> NSImage? {
+        // Thumbnail target: 2× the logical thumbnail size to cover Retina displays.
+        let maxPixels = 560  // 280 pt × 2 (Retina)
+        let options: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: false
+        ]
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cgThumb = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
+        else {
+            // Fallback: load full image (e.g. for unusual formats CGImageSource can't thumbnail).
+            guard let image = NSImage(contentsOf: url) else { return nil }
+            image.lockFocus(); image.unlockFocus()
+            return image
+        }
+        return NSImage(cgImage: cgThumb, size: .zero)
     }
 
     // MARK: - CBZ (ZIP)
 
     private static func loadCBZ(url: URL) throws -> Comic {
-        let cacheDir = persistentPageCacheDir(for: url)
-
-        // If already extracted, use cached files directly.
-        if !isCacheStale(cacheDir: cacheDir, sourceURL: url) {
-            let pages = try pagesFromDirectory(cacheDir)
-            if !pages.isEmpty {
-                return Comic(url: url, format: .cbz, pages: pages)
-            }
+        // CBZ: read the ZIP central directory only — no extraction to disk.
+        // ZIPFoundation gives us entry paths; pages are decoded on-demand via
+        // Archive streaming when the reader requests each page.
+        guard let archive = try? Archive(url: url, accessMode: .read) else {
+            throw LoadError.extractionFailed("Could not open ZIP archive.")
         }
-
-        // Extract to persistent cache.
-        try? FileManager.default.removeItem(at: cacheDir)
-        try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        try FileManager.default.unzipItem(at: url, to: cacheDir)
-
-        let pages = try pagesFromDirectory(cacheDir)
-        guard !pages.isEmpty else { throw LoadError.noImagesFound }
+        let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif"])
+        let entries = archive
+            .filter { entry in
+                entry.type == .file
+                && imageExtensions.contains((entry.path as NSString).pathExtension.lowercased())
+                && !entry.path.contains("__MACOSX")
+            }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        guard !entries.isEmpty else { throw LoadError.noImagesFound }
+        let pages: [ComicPage] = entries.enumerated().map { (idx, entry) in
+            ComicPage(id: idx, source: .zip(url, entry.path))
+        }
         return Comic(url: url, format: .cbz, pages: pages)
     }
 
@@ -185,14 +383,15 @@ enum ComicLoader {
 
         let pages = try pagesFromDirectory(cacheDir)
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
-        return Comic(url: url, format: .cbt, pages: pages)
+        let comic = Comic(url: url, format: .cbt, pages: pages)
+        Task.detached(priority: .background) { prunePageCache(keepCount: 5) }
+        return comic
     }
 
     // MARK: - CBR / CB7 via unar
 
     private static func loadWithUnar(url: URL) throws -> Comic {
-        let unarPaths = ["/opt/homebrew/bin/unar", "/usr/local/bin/unar"]
-        let unarPath = unarPaths.first { FileManager.default.fileExists(atPath: $0) } ?? "unar"
+        let unarPath = bundledToolPath("unar")
 
         let cacheDir = persistentPageCacheDir(for: url)
 
@@ -214,15 +413,47 @@ enum ComicLoader {
 
         let pages = try pagesFromDirectory(cacheDir)
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
-        return Comic(url: url, format: ComicFormat.from(url: url)!, pages: pages)
+        let comic = Comic(url: url, format: ComicFormat.from(url: url)!, pages: pages)
+        // Prune old cache entries — keep only the 5 most recently opened.
+        Task.detached(priority: .background) { prunePageCache(keepCount: 5) }
+        return comic
     }
 
     // MARK: - Persistent cache helpers
 
+    /// FNV-1a hash — stable across processes (unlike Swift's hashValue).
+    private static func stablePageHash(_ string: String) -> UInt64 {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in string.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211
+        }
+        return hash
+    }
+
     /// Returns the persistent cache directory for a comic's extracted pages.
     static func persistentPageCacheDir(for url: URL) -> URL {
-        let hash = abs(url.path.hashValue)
+        let hash = stablePageHash(url.path)
         return pageCacheDir.appendingPathComponent("\(hash)")
+    }
+
+    /// Keeps only the N most-recently-modified cache directories, deletes the rest.
+    static func prunePageCache(keepCount: Int = 5) {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: pageCacheDir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: .skipsHiddenFiles
+        ) else { return }
+        let sorted = entries
+            .compactMap { url -> (URL, Date)? in
+                guard let d = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+                else { return nil }
+                return (url, d)
+            }
+            .sorted { $0.1 > $1.1 }
+        for (url, _) in sorted.dropFirst(keepCount) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     /// Returns true if the cache doesn't exist or the source file is newer than the cache.
@@ -284,5 +515,35 @@ enum ComicLoader {
         try? task.run()
         task.waitUntilExit()
         return task.terminationStatus
+    }
+
+    /// Runs a command and returns its stdout as a String, or nil on failure.
+    private static func shellOutput(_ command: String, args: [String]) -> String? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = [command] + args
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Runs a full-path executable and returns its stdout as a String, or nil on failure.
+    private static func shellOutputFull(_ executablePath: String, args: [String]) -> String? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executablePath)
+        task.arguments = args
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
     }
 }

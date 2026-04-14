@@ -33,8 +33,12 @@ struct ReaderView: View {
         case .downArrow, .keyS:   if !isVertical { vm.zoomOut() }
         case .keyQ:               library.openAdjacentComic(offset: -1, currentMode: vm.readingMode.rawValue)
         case .keyE:               library.openAdjacentComic(offset:  1, currentMode: vm.readingMode.rawValue)
-        case .backspace:          library.closeComic()
+        case .backspace, .keyZ:  library.closeComic()
         case .cmdF:               toggleFullscreen()
+        case .key1:               vm.readingMode = .singlePage;     vm.saveMode()
+        case .key2:               vm.readingMode = .doublePage;     vm.saveMode()
+        case .key3:               vm.readingMode = .verticalScroll; vm.saveMode()
+        case .key4:               vm.readingMode = .verticalDouble; vm.saveMode()
         }
     }
 
@@ -62,6 +66,7 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func singlePageView(containerSize: CGSize) -> some View {
+        let _ = vm.cacheVersion  // creates SwiftUI dependency — re-evaluates when a page decode completes
         if let image = vm.currentImage {
             ZoomableImageView(
                 image: image,
@@ -85,8 +90,11 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func doublePageView(containerSize: CGSize) -> some View {
+        let _ = vm.cacheVersion  // creates SwiftUI dependency — re-evaluates when a page decode completes
+        let leftIsSpread = vm.currentPage < vm.pageCount && vm.comic.pages[vm.currentPage].isSpread
         let leftImage  = vm.currentImage
-        let rightImage: NSImage? = {
+        // Spread pages occupy the full slot alone — no right page.
+        let rightImage: NSImage? = leftIsSpread ? nil : {
             let next = vm.currentPage + 1
             guard next < vm.pageCount else { return nil }
             return vm.image(for: next)
@@ -95,6 +103,7 @@ struct ReaderView: View {
         SpreadView(
             leftImage: leftImage,
             rightImage: rightImage,
+            leftIsSpread: leftIsSpread,
             scale: $vm.scale,
             offset: $vm.offset,
             minScale: vm.minScale,
@@ -119,7 +128,6 @@ struct ReaderView: View {
                 containerWidth: containerSize.width,
                 restoreOffset: vm.savedScrollOffset,
                 imageCache: vm.imageCache,
-                cacheVersion: vm.cacheVersion,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
                 onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction }
             )
@@ -236,10 +244,13 @@ struct ReaderView: View {
 // MARK: - Spread view (Double Page with spread-level loupe)
 
 /// Renders two pages side by side with a single MouseCatcher covering the whole spread.
+/// When `leftIsSpread` is true, renders the left image full-width (double-scan spread page).
 /// The loupe samples from whichever page the cursor is over, eliminating the cross-boundary glitch.
 struct SpreadView: View {
     let leftImage:  NSImage?
     let rightImage: NSImage?
+    /// True when the current page is a double-scan spread and should fill the full width.
+    let leftIsSpread: Bool
     @Binding var scale: CGFloat
     @Binding var offset: CGSize
     let minScale: CGFloat
@@ -261,26 +272,38 @@ struct SpreadView: View {
 
         ZStack {
             // Pages — use real frame widths, no scaleEffect
-            HStack(spacing: 2) {
+            if leftIsSpread {
+                // Double-scan spread: single image fills the full width of both columns.
                 if let img = leftImage {
                     Image(nsImage: img)
                         .resizable()
                         .interpolation(.high)
                         .scaledToFit()
-                        .frame(width: pageW, height: pageH)
+                        .frame(width: scaledTotal, height: pageH)
+                        .offset(x: offset.width, y: offset.height)
                 }
-                if let img = rightImage {
-                    Image(nsImage: img)
-                        .resizable()
-                        .interpolation(.high)
-                        .scaledToFit()
-                        .frame(width: pageW, height: pageH)
-                } else {
-                    Spacer().frame(width: pageW)
+            } else {
+                HStack(spacing: 2) {
+                    if let img = leftImage {
+                        Image(nsImage: img)
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                            .frame(width: pageW, height: pageH)
+                    }
+                    if let img = rightImage {
+                        Image(nsImage: img)
+                            .resizable()
+                            .interpolation(.high)
+                            .scaledToFit()
+                            .frame(width: pageW, height: pageH)
+                    } else {
+                        Spacer().frame(width: pageW)
+                    }
                 }
+                .frame(width: scaledTotal)
+                .offset(x: offset.width, y: offset.height)
             }
-            .frame(width: scaledTotal)
-            .offset(x: offset.width, y: offset.height)
 
             // Loupe overlay
             if showLoupe, let img = loupeImage {
@@ -350,19 +373,29 @@ struct SpreadView: View {
         let spreadOriginX = (containerSize.width - scaledTotal) / 2 + offset.width
         let spreadOriginY = (containerSize.height - pageH) / 2 + offset.height
 
-        // Which side is the cursor on?
-        let leftEdge  = spreadOriginX
-        let midX      = spreadOriginX + pageW + 2
-        let isLeft    = pos.x < midX
-        guard let img = isLeft ? leftImage : rightImage else { return }
+        let img: NSImage
+        let pageContainerSize: CGSize
+        let localPos: CGPoint
 
-        // Cursor relative to the page's top-left corner
-        let localX = isLeft ? pos.x - leftEdge : pos.x - midX
-        let localY = pos.y - spreadOriginY
-        let localPos = CGPoint(x: localX, y: localY)
-        let pageContainerSize = CGSize(width: pageW, height: pageH)
+        if leftIsSpread {
+            // Full-width single image — no column split.
+            guard let left = leftImage else { return }
+            img = left
+            pageContainerSize = CGSize(width: scaledTotal, height: pageH)
+            localPos = CGPoint(x: pos.x - spreadOriginX, y: pos.y - spreadOriginY)
+        } else {
+            // Two-column layout — determine which side the cursor is on.
+            let leftEdge = spreadOriginX
+            let midX     = spreadOriginX + pageW + 2
+            let isLeft   = pos.x < midX
+            guard let candidate = isLeft ? leftImage : rightImage else { return }
+            img = candidate
+            pageContainerSize = CGSize(width: pageW, height: pageH)
+            let localX = isLeft ? pos.x - leftEdge : pos.x - midX
+            localPos = CGPoint(x: localX, y: pos.y - spreadOriginY)
+        }
 
-        // Compute rendered image size within its page frame (scaledToFit)
+        // Compute rendered image size within its page frame (scaledToFit) — same formula for both cases.
         let imgAR = img.size.width / img.size.height
         let conAR = pageContainerSize.width / pageContainerSize.height
         let ivSize: CGSize = imgAR > conAR
@@ -381,7 +414,7 @@ struct SpreadView: View {
 
 // MARK: - Global key monitor (singleton)
 
-enum MonitoredKey { case leftArrow, rightArrow, upArrow, downArrow, keyA, keyD, keyW, keyS, keyQ, keyE, backspace, cmdF }
+enum MonitoredKey { case leftArrow, rightArrow, upArrow, downArrow, keyA, keyD, keyW, keyS, keyQ, keyE, backspace, cmdF, key1, key2, key3, key4, keyZ }
 
 final class KeyMonitor {
     static let shared = KeyMonitor()
@@ -409,6 +442,11 @@ final class KeyMonitor {
             case (14, _, true):  handler(.keyE);       return nil  // E
             case (51, _, true):  handler(.backspace);  return nil  // ⌫
             case (3, true, _):   handler(.cmdF);       return nil  // Cmd+F
+            case (18, _, true):  handler(.key1);       return nil  // 1
+            case (19, _, true):  handler(.key2);       return nil  // 2
+            case (20, _, true):  handler(.key3);       return nil  // 3
+            case (21, _, true):  handler(.key4);       return nil  // 4
+            case (6,  _, true):  handler(.keyZ);       return nil  // Z
             default:             return event
             }
         }

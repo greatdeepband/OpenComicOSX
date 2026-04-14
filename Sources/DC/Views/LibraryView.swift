@@ -5,12 +5,15 @@ import AppKit
 
 struct LibraryView: View {
     @EnvironmentObject var library: LibraryViewModel
+    @StateObject private var memoryMonitor = MemoryMonitor.shared
 
     /// Controls the Create Gallery sheet.
     @State private var showCreateGallery = false
     /// Controls the Rename sheet — holds the gallery being renamed.
     @State private var renamingGallery: Gallery? = nil
     @State private var renameText = ""
+    /// When true, the debug memory bar is shown and polling is active.
+    @State private var debugMode = false
 
     private let columns = [
         GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 16)
@@ -32,6 +35,13 @@ struct LibraryView: View {
             }
         }
         .frame(minWidth: 600, minHeight: 400)
+        .onChange(of: debugMode) {
+            if debugMode {
+                MemoryMonitor.shared.start(library: library, interval: 5)
+            } else {
+                MemoryMonitor.shared.stop()
+            }
+        }
         .sheet(isPresented: $showCreateGallery) {
             CreateGallerySheet()
                 .environmentObject(library)
@@ -49,63 +59,129 @@ struct LibraryView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack {
-            HStack(spacing: 24) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Comics")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("\(library.totalComics)")
-                        .font(.title2.bold())
-                        .foregroundStyle(.primary)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Pages Read")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("\(library.totalPages)")
-                        .font(.title2.bold())
-                        .foregroundStyle(.primary)
-                }
-            }
-
-            Spacer()
-
-            // Centered search bar
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                    .font(.system(size: 13))
-                TextField("Search comics", text: $library.searchQuery)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                    .frame(width: 220)
-                if !library.searchQuery.isEmpty {
-                    Button(action: { library.searchQuery = "" }) {
-                        Image(systemName: "xmark.circle.fill")
+        VStack(spacing: 0) {
+            HStack {
+                HStack(spacing: 24) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Comics")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
+                        Text("\(library.totalComics)")
+                            .font(.title2.bold())
+                            .foregroundStyle(.primary)
                     }
-                    .buttonStyle(.plain)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Pages Read")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("\(library.totalPages)")
+                            .font(.title2.bold())
+                            .foregroundStyle(.primary)
+                    }
                 }
+
+                Spacer()
+
+                // Centered search bar
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                        .font(.system(size: 13))
+                    TextField("Search comics", text: $library.searchQuery)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                        .frame(width: 220)
+                    if !library.searchQuery.isEmpty {
+                        Button(action: { library.searchQuery = "" }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+
+                Spacer()
+
+                Button(action: { showCreateGallery = true }) {
+                    Text("Create Gallery")
+                }
+                .buttonStyle(.bordered)
+
+                Button(action: { library.openFilePicker() }) {
+                    Label("Open Comic", systemImage: "folder.badge.plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("o", modifiers: .command)
+
+                // Debug toggle
+                Button(action: { debugMode.toggle() }) {
+                    Image(systemName: debugMode ? "memorychip.fill" : "memorychip")
+                        .foregroundStyle(debugMode ? .orange : .secondary)
+                        .font(.system(size: 15))
+                }
+                .buttonStyle(.plain)
+                .help(debugMode ? "Debug mode ON — click to disable" : "Enable memory debug mode")
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            .padding()
+
+            // Debug bar — only visible when debugMode is on
+            if debugMode {
+                debugBar
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: debugMode)
+    }
+
+    // MARK: - Debug bar
+
+    private var debugBar: some View {
+        HStack(spacing: 20) {
+            Label(memoryMonitor.residentFormatted, systemImage: "memorychip")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(memoryBarColor)
+
+            Divider().frame(height: 14)
+
+            Label("\(memoryMonitor.cacheCount) cached", systemImage: "photo.stack")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            Divider().frame(height: 14)
+
+            Label("\(memoryMonitor.diskCount) on disk", systemImage: "internaldrive")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+            Divider().frame(height: 14)
+
+            Text("sampled \(memoryMonitor.lastSampleTime.formatted(date: .omitted, time: .standard))")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.tertiary)
 
             Spacer()
 
-            Button(action: { showCreateGallery = true }) {
-                Text("Create Gallery")
+            Button("Sample now") {
+                MemoryMonitor.shared.start(library: library, interval: 5)
             }
-            .buttonStyle(.bordered)
-
-            Button(action: { library.openFilePicker() }) {
-                Label("Open Comic", systemImage: "folder.badge.plus")
-            }
-            .buttonStyle(.borderedProminent)
-            .keyboardShortcut("o", modifiers: .command)
+            .font(.system(size: 11))
+            .buttonStyle(.plain)
+            .foregroundStyle(.orange)
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        .background(.orange.opacity(0.08))
+    }
+
+    /// Colour-codes the RAM reading: green < 300 MB, yellow < 700 MB, red above.
+    private var memoryBarColor: Color {
+        let mb = Double(memoryMonitor.residentBytes) / (1024 * 1024)
+        if mb < 300 { return .green }
+        if mb < 700 { return .yellow }
+        return .red
     }
 
     // MARK: - Main content
@@ -227,8 +303,8 @@ struct LibraryView: View {
             }
             .onAppear {
                 if !library.hasLaunched {
-                    // Cold launch: collapse all galleries, leave Recent open.
-                    var keys: Set<String> = []
+                    // Cold launch: collapse all sections.
+                    var keys: Set<String> = ["favorites", "recent"]
                     for g in library.galleries { keys.insert(g.id.uuidString) }
                     library.collapsedSections = keys
                     library.hasLaunched = true
@@ -249,18 +325,10 @@ struct LibraryView: View {
                 } else if library.recentComics.contains(where: { $0.url == url }) {
                     library.collapsedSections.remove("recent")
                 }
-                // Scroll to the section header (always rendered) so it's reliable.
-                let scrollTarget: String
-                if inGallery,
-                   let g = library.galleries.first(where: { $0.comics.contains(url) }) {
-                    scrollTarget = "header:" + g.id.uuidString
-                } else if inFavorites {
-                    scrollTarget = "header:favorites"
-                } else {
-                    scrollTarget = "header:recent"
-                }
+                // Scroll directly to the card — .center anchor means no scroll if already visible.
+                // The card has .id(url) set in both the Recents grid and DraggableComicGrid.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(scrollTarget, anchor: .top) }
+                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(url, anchor: .center) }
                 }
             }
             .onChange(of: library.galleries.count) {
@@ -492,11 +560,23 @@ struct ComicCard: View {
     let readingProgress: Double?
 
     @EnvironmentObject var library: LibraryViewModel
-    @State private var thumbnail: NSImage? = nil
+
+    /// Bumping this token forces SwiftUI to re-evaluate body, which re-reads
+    /// cachedThumbnail(for: url) and picks up the newly loaded image.
+    /// Calling requestThumbnail from onChange was wrong — it returns early
+    /// (cache already populated) and never causes a re-render.
+    @State private var renderToken: UUID = UUID()
 
     var body: some View {
+        // Reference renderToken so body depends on it — any change forces a re-render.
+        let _ = renderToken
+        // Read the thumbnail directly from the NSCache on every render pass.
+        // No @State NSImage means no strong reference in the view — NSCache is the
+        // sole owner and can evict freely under memory pressure.
+        let thumbnail = library.cachedThumbnail(for: url)
+
         VStack(alignment: .leading, spacing: 6) {
-            coverImage
+            coverImage(thumbnail)
                 .aspectRatio(0.7, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
@@ -521,35 +601,21 @@ struct ComicCard: View {
                 .font(.caption)
                 .lineLimit(2)
                 .truncationMode(.middle)
+                .frame(height: 32, alignment: .topLeading)
         }
         .contentShape(Rectangle())
-        .onAppear { loadThumb() }
-        .onChange(of: library.thumbnailGeneration) { loadThumb() }
-    }
-
-    private func loadThumb() {
-        // Fast path: NSCache hit — no disk I/O.
-        if let img = library.cachedThumbnail(for: url) {
-            thumbnail = img
-            return
-        }
-        // Slow path: NSCache miss (evicted or not yet loaded).
-        // Load from disk on a background thread so the main thread isn't blocked,
-        // then re-insert into NSCache so subsequent scrolls are instant.
-        let comicURL = url
-        Task.detached(priority: .utility) {
-            guard let img = LibraryViewModel.loadThumbnail(for: comicURL) else { return }
-            await MainActor.run { [weak library] in
-                // Re-populate the cache so the next scroll past this card is free.
-                library?.insertIntoCache(img, for: comicURL)
-                self.thumbnail = img
-            }
+        .onAppear { library.requestThumbnail(for: url) }
+        // When this card's URL appears in updatedThumbnailURLs, bump renderToken.
+        // This forces SwiftUI to re-evaluate body, which re-reads cachedThumbnail
+        // and displays the image. Only fires for this card's URL — O(1) check.
+        .onChange(of: library.updatedThumbnailURLs) { urls in
+            if urls.contains(url) { renderToken = UUID() }
         }
     }
 
     @ViewBuilder
-    private var coverImage: some View {
-        if let img = thumbnail {
+    private func coverImage(_ img: NSImage?) -> some View {
+        if let img {
             Image(nsImage: img)
                 .resizable()
                 .interpolation(.high)

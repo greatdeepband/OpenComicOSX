@@ -1,18 +1,6 @@
 import Foundation
 import AppKit
 import SwiftUI
-private func navLog(_ msg: String) {
-    let line = msg + "\n"
-    let path = "/tmp/nav_debug.txt"
-    if let data = line.data(using: .utf8) {
-        if FileManager.default.fileExists(atPath: path),
-           let fh = FileHandle(forWritingAtPath: path) {
-            fh.seekToEndOfFile(); fh.write(data); fh.closeFile()
-        } else {
-            try? data.write(to: URL(fileURLWithPath: path))
-        }
-    }
-}
 
 // MARK: - Gallery model
 
@@ -39,10 +27,14 @@ struct RecentComic: Identifiable, Codable {
     let id: UUID
     let url: URL
     var title: String { url.deletingPathExtension().lastPathComponent }
-    /// Computed from ReadingPositionStore — not stored in Codable (no page count available here).
+    /// Computed from ReadingPositionStore — not stored in Codable.
+    /// Uses the page count saved by ReaderViewModel.init so the fraction is accurate.
     var readingProgress: Double? {
         let page = ReadingPositionStore.page(for: url)
-        return page > 0 ? Double(page) / 100.0 : nil
+        guard page > 0 else { return nil }
+        let total = ReadingPositionStore.pageCount(for: url)
+        guard total > 1 else { return nil }
+        return Double(page) / Double(total - 1)
     }
 
     init(url: URL) {
@@ -69,8 +61,15 @@ final class LibraryViewModel: ObservableObject {
     /// Collapsed gallery section keys — survives LibraryView re-creation.
     @Published var collapsedSections: Set<String> = []
 
-    /// Incremented whenever a thumbnail is saved or loaded — cards observe this to reload.
-    @Published var thumbnailGeneration: Int = 0
+    /// Set of URLs whose thumbnails were just updated.
+    /// Cards observe this and re-render only when their own URL is present,
+    /// eliminating the O(n) full-grid re-render caused by a global counter.
+    /// Cleared on the next run loop tick after publishing.
+    @Published var updatedThumbnailURLs: Set<URL> = []
+
+    /// Pending URLs not yet flushed to updatedThumbnailURLs.
+    private var pendingURLs: Set<URL> = []
+    private var flushScheduled = false
 
     /// Current search query — empty string means no filter.
     @Published var searchQuery: String = ""
@@ -142,13 +141,19 @@ final class LibraryViewModel: ObservableObject {
         return cache
     }()
 
+    /// Manually tracked count of items in the NSCache.
+    /// NSCache has no built-in count property, so we increment/decrement here.
+    /// Used by MemoryMonitor for debug stats.
+    private(set) var thumbnailCacheCount: Int = 0
+
     private let recentsKey = "recentComics"
     private let galleriesKey = "galleries_v1"
     private let favoritesKey = "favoriteURLs_v1"
 
     /// Disk cache directory for cover thumbnails.
     static let thumbnailCacheDir: URL = {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
         let dir = support.appendingPathComponent("DC/Thumbnails")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
@@ -158,59 +163,96 @@ final class LibraryViewModel: ObservableObject {
         loadRecents()
         loadGalleries()
         loadFavorites()
-        // Preload thumbnails for the current library, then generate any that are missing.
+        // One-time migration: wipe the entire thumbnail cache on first launch after
+        // switching from Swift's non-deterministic hashValue to FNV-1a.
+        // All old files have names that don't match any FNV-1a key, so purgeOrphanedThumbnails
+        // would delete them anyway — but doing it upfront avoids a false "all missing" state
+        // that triggers a full regeneration pass on every launch until the purge runs.
+        let migrationKey = "thumbnailScheme_fnv1a_v1"
+        if !UserDefaults.standard.bool(forKey: migrationKey) {
+            let dir = LibraryViewModel.thumbnailCacheDir
+            if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+                for file in files { try? FileManager.default.removeItem(at: file) }
+                DCLogger.shared.log("[THUMB] Migration: cleared \(files.count) old hashValue thumbnail(s).")
+            }
+            UserDefaults.standard.set(true, forKey: migrationKey)
+        }
+        // Generate any missing thumbnails and clean up orphaned files from previous sessions.
+        // Thumbnail loading is fully lazy — requestThumbnail(for:) handles everything on demand.
         Task.detached(priority: .utility) { [weak self] in
-            await self?.preloadThumbnailCache()
             await self?.generateMissingThumbnails()
+            await self?.purgeOrphanedThumbnails()
         }
-    }
-
-    // MARK: - Scoped cache pre-load
-
-    /// Loads thumbnails from disk into the NSCache for every comic currently in the
-    /// library (recents + all galleries). Thumbnails for comics that are no longer in
-    /// the library are intentionally skipped — they stay on disk but are never decoded
-    /// into RAM unless the user opens that comic again.
-    private func preloadThumbnailCache() async {
-        let recents = await recentComics
-        let allGalleries = await galleries
-
-        // Build the set of cache keys we actually need.
-        var needed: [String] = recents.map { LibraryViewModel.thumbnailCacheKey(for: $0.url) }
-        for gallery in allGalleries {
-            for url in gallery.comics {
-                needed.append(LibraryViewModel.thumbnailCacheKey(for: url))
-            }
-        }
-        // Deduplicate (a comic can appear in multiple galleries).
-        let uniqueKeys = Array(Set(needed))
-
-        let dir = LibraryViewModel.thumbnailCacheDir
-        for key in uniqueKeys {
-            let fileURL = dir.appendingPathComponent("\(key).jpg")
-            guard FileManager.default.fileExists(atPath: fileURL.path),
-                  let img = NSImage(contentsOf: fileURL)
-            else { continue }
-            let nsKey = key as NSString
-            await MainActor.run {
-                self.thumbnailCache.setObject(img, forKey: nsKey)
-            }
-        }
-        // Signal cards to re-render now that the cache is populated.
-        await MainActor.run { self.thumbnailGeneration += 1 }
     }
 
     // MARK: - Background thumbnail generation on launch
+
+    /// Deletes thumbnail files on disk whose names don't match any comic currently
+    /// in the library. This cleans up the 2,000+ orphaned files left by the old
+    /// non-deterministic hashValue scheme, and keeps the cache directory tidy.
+    /// Runs at low priority after generation is complete.
+    private func purgeOrphanedThumbnails() async {
+        let recents = await recentComics
+        let allGalleries = await galleries
+        var validKeys = Set<String>(recents.map { LibraryViewModel.thumbnailCacheKey(for: $0.url) })
+        for gallery in allGalleries {
+            for url in gallery.comics {
+                validKeys.insert(LibraryViewModel.thumbnailCacheKey(for: url))
+            }
+        }
+        let dir = LibraryViewModel.thumbnailCacheDir
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil
+        ) else { return }
+        var deleted = 0
+        for file in files {
+            let stem = file.deletingPathExtension().lastPathComponent
+            if !validKeys.contains(stem) {
+                try? FileManager.default.removeItem(at: file)
+                deleted += 1
+            }
+        }
+        if deleted > 0 {
+            DCLogger.shared.log("[THUMB] Purged \(deleted) orphaned thumbnail(s) from disk.")
+        }
+    }
 
     private func generateMissingThumbnails() async {
         let recents = await recentComics
         let allGalleries = await galleries
         var all: [URL] = recents.map { $0.url }
         for gallery in allGalleries { all.append(contentsOf: gallery.comics) }
-        await generateThumbnailsParallel(for: all)
+        // Visible-first: comics already requested by visible cards are processed
+        // first (they are in visibleRequestQueue). The rest fill in afterwards.
+        let prioritised = await buildPrioritisedQueue(all: all)
+        await generateThumbnailsParallel(for: prioritised)
+        await MainActor.run { flushThumbnailGeneration() }
     }
 
-    /// Extract and cache covers for a list of URLs, 8 at a time.
+    /// URLs requested by visible ComicCards that don't have a thumbnail yet.
+    /// Populated by requestThumbnailGeneration(for:); consumed by generateMissingThumbnails.
+    private var visibleRequestQueue: [URL] = []
+
+    /// Builds a URL list with visible comics first, then the rest in library order.
+    private func buildPrioritisedQueue(all: [URL]) async -> [URL] {
+        let visible = await visibleRequestQueue
+        var seen = Set<URL>(visible)
+        var result = visible
+        for url in all {
+            if !seen.contains(url) {
+                seen.insert(url)
+                result.append(url)
+            }
+        }
+        return result
+    }
+
+    /// Extract and cache covers for a list of URLs, 2 at a time.
+    ///
+    /// Concurrency is capped at 8 — streaming CBZ extraction is fast and low-RAM,
+    /// so we can parallelise more aggressively without memory pressure.
+    /// A Task.yield() after each completion lets the OS schedule UI work between
+    /// extractions, keeping the app responsive during bulk generation.
     private func generateThumbnailsParallel(for urls: [URL]) async {
         let missing = urls.filter {
             !FileManager.default.fileExists(atPath: LibraryViewModel.thumbnailURL(for: $0).path)
@@ -223,15 +265,67 @@ final class LibraryViewModel: ObservableObject {
                 if inFlight >= concurrency {
                     await group.next()
                     inFlight -= 1
+                    await Task.yield()
                 }
                 inFlight += 1
                 group.addTask(priority: .background) { [weak self] in
                     guard let self else { return }
-                    let cover = ComicLoader.loadCover(url: url)
-                    guard let cover else { return }
-                    await MainActor.run { self.saveThumbnailAndCache(cover, for: url) }
+                    // Load and scale cover entirely on the background thread.
+                    guard let cgImage = ComicLoader.loadCoverCGImage(url: url) else { return }
+                    // Encode and write to disk on the background thread — no MainActor needed.
+                    let diskURL = LibraryViewModel.thumbnailURL(for: url)
+                    LibraryViewModel.saveCGImage(cgImage, to: diskURL)
+                    // Only cache visible comics — off-screen comics are written
+                    // to disk only and loaded lazily when their card fires onAppear.
+                    // This prevents the 1 GB RAM spike from caching all 2000+ thumbnails
+                    // during the first-launch generation pass.
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        let isVisible = self.visibleRequestQueue.contains(url)
+                        if isVisible {
+                            let thumb = NSImage(cgImage: cgImage, size: .zero)
+                            let key = LibraryViewModel.thumbnailCacheKey(for: url) as NSString
+                            let isNew = self.thumbnailCache.object(forKey: key) == nil
+                            self.thumbnailCache.setObject(thumb, forKey: key)
+                            if isNew { self.thumbnailCacheCount += 1 }
+                            // Notify only this card — no full-grid re-render.
+                            self.pendingURLs.insert(url)
+                            self.scheduleFlush()
+                        }
+                        // Off-screen: disk write already done above. Card will load
+                        // lazily via requestThumbnail when it fires onAppear.
+                    }
                 }
             }
+        }
+    }
+
+    /// Called by ComicCard.onAppear when the thumbnail is not yet on disk.
+    /// Adds the URL to the visible-first queue so it is prioritised by the
+    /// background generator. If the thumbnail already exists on disk, loads
+    /// it into the cache directly without queuing generation.
+    func requestThumbnail(for comicURL: URL) {
+        // Already cached — nothing to do.
+        guard cachedThumbnail(for: comicURL) == nil else { return }
+
+        // Thumbnail exists on disk — load it into cache on a background thread.
+        if FileManager.default.fileExists(atPath: LibraryViewModel.thumbnailURL(for: comicURL).path) {
+            Task.detached(priority: .utility) { [weak self] in
+                guard let img = LibraryViewModel.loadThumbnail(for: comicURL) else { return }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.insertIntoCache(img, for: comicURL)
+                    // Notify only this card — no full-grid re-render.
+                    self.pendingURLs.insert(comicURL)
+                    self.scheduleFlush()
+                }
+            }
+            return
+        }
+
+        // No thumbnail on disk yet — add to the visible-first queue.
+        if !visibleRequestQueue.contains(comicURL) {
+            visibleRequestQueue.append(comicURL)
         }
     }
 
@@ -284,6 +378,13 @@ final class LibraryViewModel: ObservableObject {
         // mutation doesn't trigger a LibraryView re-render while the reader is open.
         if let url = lastOpenedURL {
             addRecent(url: url)
+            // Remove this URL from updatedThumbnailURLs so that when the card
+            // reappears and requestThumbnail fires scheduleFlush, the Set value
+            // genuinely changes and onChange triggers a re-render on the card.
+            // Without this, the URL stays in the Set from the background thumbnail
+            // generation that ran while the reader was open, and the subsequent
+            // scheduleFlush produces no Set change — so onChange never fires.
+            updatedThumbnailURLs.remove(url)
         }
         openComic = nil
     }
@@ -294,29 +395,29 @@ final class LibraryViewModel: ObservableObject {
     /// in the first gallery that contains it. Returns nil if not found or at boundary.
     func adjacentComicURL(offset: Int) -> URL? {
         guard let url = lastOpenedURL else {
-            navLog("adjacentComicURL: lastOpenedURL is nil")
+            DCLogger.shared.log("[NAV] adjacentComicURL: lastOpenedURL is nil")
             return nil
         }
         let normalizedTarget = url.standardizedFileURL.path
-        navLog("adjacentComicURL: looking for \(normalizedTarget) offset=\(offset)")
-        navLog("adjacentComicURL: galleries.count=\(self.galleries.count)")
+        DCLogger.shared.log("[NAV] adjacentComicURL: looking for \(normalizedTarget) offset=\(offset)")
+        DCLogger.shared.log("[NAV] adjacentComicURL: galleries.count=\(self.galleries.count)")
         for gallery in galleries {
-            navLog("adjacentComicURL: checking gallery '\(gallery.name)' comics.count=\(gallery.comics.count)")
+            DCLogger.shared.log("[NAV] adjacentComicURL: checking gallery '\(gallery.name)' comics.count=\(gallery.comics.count)")
             if gallery.comics.count > 0 {
-                navLog("adjacentComicURL: first comic in gallery=\(gallery.comics[0].standardizedFileURL.path)")
+                DCLogger.shared.log("[NAV] adjacentComicURL: first comic in gallery=\(gallery.comics[0].standardizedFileURL.path)")
             }
             if let idx = gallery.comics.firstIndex(where: { $0.standardizedFileURL.path == normalizedTarget }) {
                 let next = idx + offset
-                navLog("adjacentComicURL: found at idx=\(idx), next=\(next), count=\(gallery.comics.count)")
+                DCLogger.shared.log("[NAV] adjacentComicURL: found at idx=\(idx), next=\(next), count=\(gallery.comics.count)")
                 guard next >= 0 && next < gallery.comics.count else {
-                    navLog("adjacentComicURL: at boundary, returning nil")
+                    DCLogger.shared.log("[NAV] adjacentComicURL: at boundary, returning nil")
                     return nil
                 }
-                navLog("adjacentComicURL: returning \(gallery.comics[next].lastPathComponent)")
+                DCLogger.shared.log("[NAV] adjacentComicURL: returning \(gallery.comics[next].lastPathComponent)")
                 return gallery.comics[next]
             }
         }
-        navLog("adjacentComicURL: comic not found in any gallery")
+        DCLogger.shared.log("[NAV] adjacentComicURL: comic not found in any gallery")
         return nil
     }
 
@@ -409,14 +510,19 @@ final class LibraryViewModel: ObservableObject {
 
     func addFolders(_ folders: [URL], to galleryID: UUID) {
         guard let idx = galleries.firstIndex(where: { $0.id == galleryID }) else { return }
-        // Append only new folders
-        let existing = Set(galleries[idx].sourceFolders.map { $0.path })
-        let newFolders = folders.filter { !existing.contains($0.path) }
+        // Append only new source folders
+        let existingFolders = Set(galleries[idx].sourceFolders.map { $0.path })
+        let newFolders = folders.filter { !existingFolders.contains($0.path) }
         galleries[idx].sourceFolders.append(contentsOf: newFolders)
-        galleries[idx].comics = resolveComics(from: galleries[idx].sourceFolders)
+        // Re-scan all source folders but only append comics not already present.
+        // This preserves manual removals and custom ordering.
+        let existingComics = Set(galleries[idx].comics)
+        let newComics = resolveComics(from: galleries[idx].sourceFolders)
+            .filter { !existingComics.contains($0) }
+        galleries[idx].comics.append(contentsOf: newComics)
         saveGalleries()
-        Task.detached(priority: .background) { [weak self, comics = galleries[idx].comics] in
-            await self?.generateThumbnailsParallel(for: comics)
+        Task.detached(priority: .background) { [weak self, newComics] in
+            await self?.generateThumbnailsParallel(for: newComics)
         }
     }
 
@@ -492,8 +598,20 @@ final class LibraryViewModel: ObservableObject {
 
     // MARK: - Thumbnail helpers
 
+    /// FNV-1a 64-bit hash — deterministic across processes and launches.
+    /// Swift's built-in hashValue is randomised per-process (since Swift 4.2),
+    /// which causes thumbnails saved in one session to be unfindable in the next.
+    nonisolated static func stableHash(_ string: String) -> UInt64 {
+        var hash: UInt64 = 14_695_981_039_346_656_037  // FNV offset basis
+        for byte in string.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 1_099_511_628_211             // FNV prime
+        }
+        return hash
+    }
+
     nonisolated static func thumbnailURL(for comicURL: URL) -> URL {
-        let hash = abs(comicURL.path.hashValue)
+        let hash = stableHash(comicURL.path)
         return thumbnailCacheDir.appendingPathComponent("\(hash).jpg")
     }
 
@@ -507,8 +625,7 @@ final class LibraryViewModel: ObservableObject {
 
     /// Cache key used by both the pre-loader and the in-memory lookup.
     nonisolated static func thumbnailCacheKey(for comicURL: URL) -> String {
-        let hash = abs(comicURL.path.hashValue)
-        return "\(hash)"
+        return "\(stableHash(comicURL.path))"
     }
 
     /// Fast in-memory lookup — O(1), no disk I/O.
@@ -521,36 +638,126 @@ final class LibraryViewModel: ObservableObject {
     /// Re-insert an image into the NSCache (used by ComicCard after a disk fallback load).
     func insertIntoCache(_ image: NSImage, for comicURL: URL) {
         let key = LibraryViewModel.thumbnailCacheKey(for: comicURL) as NSString
+        let isNew = thumbnailCache.object(forKey: key) == nil
         thumbnailCache.setObject(image, forKey: key)
+        if isNew { thumbnailCacheCount += 1 }
     }
 
     /// Save to disk and insert into the NSCache.
-    /// The cache stores the 200×280 scaled thumbnail, NOT the original full-res image.
+    ///
+    /// Uses ImageIO directly (CGImageDestination) instead of the old
+    /// NSImage → lockFocus → TIFF → NSBitmapImageRep → JPEG roundtrip.
+    /// On Apple Silicon this routes through the hardware JPEG encoder.
+    /// The CGImage is cached directly — no disk reload needed.
     func saveThumbnailAndCache(_ image: NSImage, for comicURL: URL) {
-        let url = LibraryViewModel.thumbnailURL(for: comicURL)
-        LibraryViewModel.saveThumbnail(image, to: url)
+        let diskURL = LibraryViewModel.thumbnailURL(for: comicURL)
+        guard let cgImage = LibraryViewModel.scaledCGImage(from: image) else { return }
+
+        // Write to disk via ImageIO — hardware-accelerated on Apple Silicon.
+        LibraryViewModel.saveCGImage(cgImage, to: diskURL)
+
+        // Cache the CGImage directly — no disk reload.
+        let thumb = NSImage(cgImage: cgImage, size: .zero)
         let key = LibraryViewModel.thumbnailCacheKey(for: comicURL) as NSString
-        // Re-load from disk so we store the compressed JPEG decode, not the raw bitmap.
-        if let thumb = NSImage(contentsOf: url) {
-            thumbnailCache.setObject(thumb, forKey: key)
+        let isNew = thumbnailCache.object(forKey: key) == nil
+        thumbnailCache.setObject(thumb, forKey: key)
+        if isNew { thumbnailCacheCount += 1 }
+
+        // Notify only this card — no full-grid re-render.
+        pendingURLs.insert(comicURL)
+        scheduleFlush()
+    }
+
+    /// Schedules a single run-loop flush of pendingURLs → updatedThumbnailURLs.
+    /// Multiple insertions within the same run loop are coalesced into one publish.
+    ///
+    /// The set is never cleared — SwiftUI's onChange only fires when the value
+    /// actually changes (i.e. when a new URL is inserted), so idempotent calls
+    /// are free. Clearing on the next tick caused a race where onChange fired
+    /// after the set was already empty, leaving cards permanently blank.
+    private func scheduleFlush() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // Assign (not union) so value always transitions {} -> {batch},
+            // guaranteeing onChange fires even if URL was in a prior flush.
+            let batch = self.pendingURLs
+            self.pendingURLs = []
+            self.flushScheduled = false
+            self.updatedThumbnailURLs = []
+            self.updatedThumbnailURLs = batch
         }
-        thumbnailGeneration += 1
     }
 
-    nonisolated static func saveThumbnail(_ image: NSImage, to url: URL) {
-        let size = CGSize(width: 200, height: 280)
-        let thumb = NSImage(size: size)
-        thumb.lockFocus()
-        image.draw(in: CGRect(origin: .zero, size: size),
-                   from: .zero,
-                   operation: .copy,
-                   fraction: 1.0)
-        thumb.unlockFocus()
+    // MARK: - Cache management
 
-        guard let tiff = thumb.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
-        else { return }
-        try? jpeg.write(to: url)
+    /// Wipes all disk caches (extracted pages + thumbnails) and all reading-state UserDefaults.
+    /// Galleries and favorites are preserved. Thumbnails regenerate automatically.
+    func clearAllCache() {
+        // 1. Disk: extracted CBR/CB7 pages
+        let pagesDir = ComicLoader.pageCacheDir
+        if let files = try? FileManager.default.contentsOfDirectory(at: pagesDir, includingPropertiesForKeys: nil) {
+            files.forEach { try? FileManager.default.removeItem(at: $0) }
+            DCLogger.shared.log("[CACHE] Cleared \(files.count) extracted page cache(s).")
+        }
+        // 2. Disk: thumbnails
+        let thumbDir = LibraryViewModel.thumbnailCacheDir
+        if let files = try? FileManager.default.contentsOfDirectory(at: thumbDir, includingPropertiesForKeys: nil) {
+            files.forEach { try? FileManager.default.removeItem(at: $0) }
+            DCLogger.shared.log("[CACHE] Cleared \(files.count) thumbnail(s).")
+        }
+        // 3. In-memory thumbnail NSCache
+        thumbnailCache.removeAllObjects()
+        thumbnailCacheCount = 0
+        // 4. UserDefaults: reading positions, scroll offsets, modes, page counts, recents
+        for key in ["readingPositions", "scrollOffsets", "readingModes", "pageCounts", recentsKey] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        // 5. Clear in-memory recents list
+        recentComics = []
+        // 6. Kick off thumbnail regeneration from scratch
+        Task.detached(priority: .utility) { [weak self] in
+            await self?.generateMissingThumbnails()
+        }
+        DCLogger.shared.log("[CACHE] Full cache clear complete.")
     }
+
+    /// Called at the end of generateThumbnailsParallel to ensure the last batch is shown.
+    private func flushThumbnailGeneration() {
+        if !pendingURLs.isEmpty {
+            scheduleFlush()
+        }
+    }
+
+    /// Scales the source NSImage to the 200×280 thumbnail canvas and returns a CGImage.
+    /// Uses CGContext directly — no NSImage lockFocus, no TIFF intermediate.
+    nonisolated static func scaledCGImage(from image: NSImage) -> CGImage? {
+        let w = 200, h = 280
+        guard let cgSrc = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: w, height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(cgSrc, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return ctx.makeImage()
+    }
+
+    /// Writes a CGImage to disk as JPEG using ImageIO.
+    /// On Apple Silicon, CGImageDestination routes through the hardware JPEG encoder.
+    nonisolated static func saveCGImage(_ cgImage: CGImage, to url: URL) {
+        guard let dest = CGImageDestinationCreateWithURL(
+            url as CFURL, "public.jpeg" as CFString, 1, nil
+        ) else { return }
+        let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.75]
+        CGImageDestinationAddImage(dest, cgImage, props as CFDictionary)
+        CGImageDestinationFinalize(dest)
+    }
+
 }

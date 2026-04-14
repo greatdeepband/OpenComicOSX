@@ -16,6 +16,19 @@ struct DCApp: App {
                 }
                 .keyboardShortcut("o", modifiers: .command)
             }
+            CommandMenu("Library") {
+                Button("Clear All Cache…") {
+                    let alert = NSAlert()
+                    alert.messageText = "Clear All Cache?"
+                    alert.informativeText = "This will delete all extracted page caches, thumbnails, and reading positions. Galleries and favorites are kept. Thumbnails will regenerate automatically."
+                    alert.addButton(withTitle: "Clear")
+                    alert.addButton(withTitle: "Cancel")
+                    alert.alertStyle = .warning
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        library.clearAllCache()
+                    }
+                }
+            }
         }
     }
 }
