@@ -8,7 +8,7 @@ A high-performance, native macOS comic book reader built with SwiftUI and AppKit
 - **Reading Modes:** Single Page, Double Page, Vertical Scroll, and Vertical Double.
 - **Library Management:** Create custom galleries, scan multiple folders, and drag-to-reorder comics.
 - **Instant Loading:** Background parallel thumbnail extraction and in-memory caching for zero-lag library scrolling.
-- **Smart Persistence:** Remembers your exact reading position (down to the pixel in vertical modes) and preferred reading mode per comic.
+- **Smart Persistence:** Remembers your exact reading position (page index in vertical modes, pixel offset in single/double modes) and preferred reading mode per comic.
 - **Magnifier Loupe:** Right-click and hold anywhere on a page to activate a high-quality circular zoom loupe.
 - **Native Performance:** Uses AppKit's `NSScrollView` under the hood for pixel-perfect scrolling and memory efficiency, wrapped in modern SwiftUI.
 
@@ -42,23 +42,24 @@ The app is a hybrid SwiftUI/AppKit application. It uses SwiftUI for the main UI 
 
 - macOS 14.0+
 - Xcode 15+ (or Swift 5.10+ toolchain)
-- `unar` (required for CBR/CB7 support): `brew install unar`
+- No external dependencies required — `unar` and `lsar` are bundled inside the app at `Contents/Resources/bin/`.
 
 ### Building the App
 
-The project uses Swift Package Manager for dependencies but is built as a standard macOS `.app` bundle using a custom shell script.
+The project uses Swift Package Manager for dependencies and is built as a standard macOS `.app` bundle using a custom shell script.
 
-To build the release app bundle:
+To build and package the app:
 
 ```bash
 cd /path/to/OpenComic
-bash scripts/make_app.sh
+swift build
+bash /tmp/package_dc.sh   # assembles build/Open Comic.app
 ```
 
-This script will:
-1. Compile the binary using `xcodebuild`.
+`package_dc.sh` will:
+1. Compile the binary using `swift build`.
 2. Assemble the `.app` bundle structure in `build/Open Comic.app`.
-3. Copy the `Info.plist`, app icon (`DC.icns`), and any required framework bundles.
+3. Copy the `Info.plist`, app icon (`DC.icns`), entitlements, and bundled tools (`unar`, `lsar`).
 4. Ad-hoc sign the application.
 
 ### Working with AI Agents
@@ -69,6 +70,8 @@ This project has been heavily developed in collaboration with AI agents. When wo
 2. **Memory Management:** `NSImage` caches decoded bitmap data aggressively. The thumbnail cache in `LibraryViewModel` specifically stores scaled-down JPEGs, not the original full-resolution images, to prevent massive memory leaks.
 3. **Coordinate Systems:** `VerticalComicScrollView` uses a custom `FlippedStackView` to force a top-left origin (matching SwiftUI/UIKit), but `NSImage.draw(in:)` still assumes a bottom-left origin. `ComicPageView` handles the necessary context flipping.
 4. **State Lifecycle:** `LibraryView` is conditionally rendered via an `if/else` in `ContentView`. This means `@State` variables in `LibraryView` are destroyed and recreated every time the reader is opened/closed. Persistent session state (like collapsed galleries) must live in `LibraryViewModel`.
+
+5. **SwiftUI Update Cycle Gotcha:** `makeNSView` and `updateNSView` on an `NSViewRepresentable` coordinator are called synchronously by SwiftUI's update cycle. Any state written in `makeNSView` (e.g., `pendingRestorePage`) can be wiped by `updateNSView` before an async block referencing that state has a chance to run. The fix is to capture values in the closure that schedules the async work, not read them lazily at execution time.
 
 ## Dependencies
 

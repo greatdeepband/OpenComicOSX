@@ -1,5 +1,28 @@
 # DC Reader — Changelog
 
+## v0.2.1 — 2026-04-14
+
+### Changes
+
+**1. Vertical scroll position restoration: async race condition fixed**
+`VerticalComicScrollView.makeNSView` scheduled `applyPendingRestore()` via `DispatchQueue.main.async`. SwiftUI synchronously called `updateNSView` before the async block fired, which cleared `pendingRestorePage`/`pendingRestoreOffset` to nil — so the restore closure found nothing to restore.
+
+Fix: the async closure now captures the pending values *at schedule time* and writes them back before calling `applyPendingRestore`. This ensures `updateNSView` cannot wipe them before the restore fires.
+
+**2. DCLogger: lazy file handle initialization**
+`DCLogger` required an explicit `truncate()` call before writing, which never happened at startup. All `Task { await DCLogger.shared.log(...) }` calls silently failed. Fix: `ensureHandle()` opens the file on first write, and the file is truncated on first write so each app run starts a fresh log.
+
+**3. Vertical view image loading: removed stale-image guard**
+`VerticalComicScrollView.syncInitialImages` had `guard v.image == nil` — preventing cached images from being pushed into newly created page views on rebuild. Images stayed blank until a manual scroll. Fix: guard removed, stale images are always replaced.
+
+**4. Vertical view: page-number restore via binary search**
+`applyPendingRestore()` now tries page-number restore first (binary search over the `pageYOffsets` table), falls back to scroll fraction. Page-number restore is mode-agnostic — 50% in single-page (1 page wide) ≠ 50% in vertical (52 pages stacked).
+
+**5. Debug logging**
+`DCLogger` calls added throughout the restoration pipeline: `ReaderView.onAppear`, `makeNSView`, `updateNSView` (needsRebuild reason), `applyPendingRestore`, `RESTORE applying saved page/fraction`, `syncInitialImages`, `scrollDidChange`.
+
+---
+
 ## v0.2.0 — 2026-04-14
 
 ### Changes

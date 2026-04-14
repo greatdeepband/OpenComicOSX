@@ -20,7 +20,7 @@ struct ReaderView: View {
         }
         .toolbar { toolbarContent }
         .navigationTitle(vm.comic.title)
-        .onAppear  { KeyMonitor.shared.start(handler: handleKey) }
+        .onAppear  { KeyMonitor.shared.start(handler: handleKey); let msg = "ReaderView.onAppear — readingMode=\(vm.readingMode), currentPage=\(vm.currentPage), savedScrollOffset=\(String(describing: vm.savedScrollOffset))"; print("[DEBUG] \(msg)"); Task { await DCLogger.shared.log(msg) } }
         .onDisappear { if library.openComic == nil { KeyMonitor.shared.stop() } }
     }
 
@@ -127,6 +127,7 @@ struct ReaderView: View {
                 scale: vm.scale,
                 containerWidth: containerSize.width,
                 restoreOffset: vm.savedScrollOffset,
+                restorePage: vm.currentPage,
                 imageCache: vm.imageCache,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
                 onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction }

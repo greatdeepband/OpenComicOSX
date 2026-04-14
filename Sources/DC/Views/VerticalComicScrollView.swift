@@ -145,6 +145,9 @@ struct VerticalComicScrollView: NSViewRepresentable {
     let scale: CGFloat
     let containerWidth: CGFloat
     let restoreOffset: Double?
+    /// Page index to restore to — preferred over restoreOffset when switching between
+    /// vertical modes where fractional offsets are layout-dependent and inaccurate.
+    let restorePage: Int?
     /// Cache reference — used to pull decoded images during layout builds.
     weak var imageCache: PageImageCache?
     var onPageChanged: (Int) -> Void
@@ -200,10 +203,23 @@ struct VerticalComicScrollView: NSViewRepresentable {
         // Wire onPageReady BEFORE buildPages so no decode completions are missed.
         wireCache(context: context)
         buildPages(stack: stack, scrollView: scrollView, context: context)
+        print("[DEBUG] makeNSView: restorePage=\(String(describing: restorePage)), restoreOffset=\(String(describing: restoreOffset))")
+        Task { await DCLogger.shared.log("makeNSView: restorePage=\(String(describing: restorePage)), restoreOffset=\(String(describing: restoreOffset))") }
 
-        if let fraction = restoreOffset, fraction > 0 {
+        // Restore by page number (preferred) or by scroll fraction.
+        if let page = restorePage, page >= 0 {
+            context.coordinator.pendingRestorePage = page
+            print("[DEBUG] makeNSView: scheduling page restore to page \(page)")
+            Task { await DCLogger.shared.log("makeNSView: scheduling page restore to page \(page)") }
+            // Capture page in the closure so updateNSView can't wipe it before applyPendingRestore runs.
+            let capturedPage = page
+            DispatchQueue.main.async { context.coordinator.pendingRestorePage = capturedPage; context.coordinator.applyPendingRestore() }
+        } else if let fraction = restoreOffset, fraction > 0 {
             context.coordinator.pendingRestoreOffset = fraction
-            DispatchQueue.main.async { context.coordinator.applyPendingRestore() }
+            print("[DEBUG] makeNSView: scheduling fraction restore to \(fraction)")
+            Task { await DCLogger.shared.log("makeNSView: scheduling fraction restore to \(fraction)") }
+            let capturedFraction = fraction
+            DispatchQueue.main.async { context.coordinator.pendingRestoreOffset = capturedFraction; context.coordinator.applyPendingRestore() }
         }
 
         return scrollView
@@ -215,6 +231,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
         // Full rebuild only when the column layout changes.
         let needsRebuild = abs(context.coordinator.lastContainerWidth - containerWidth) > 1
             || context.coordinator.lastPagesPerRow != pagesPerRow
+        Task { await DCLogger.shared.log("updateNSView: needsRebuild=\(needsRebuild) (containerW: \(context.coordinator.lastContainerWidth)->\(containerWidth), pagesPerRow: \(context.coordinator.lastPagesPerRow)->\(pagesPerRow))") }
 
         if needsRebuild {
             // Capture current scroll fraction before tearing down the layout.
@@ -232,6 +249,11 @@ struct VerticalComicScrollView: NSViewRepresentable {
             context.coordinator.lastScale = scale
             context.coordinator.pages = pages
             context.coordinator.imageCache = imageCache
+            // Update pending offset so the async restore uses the correct saved offset for this mode.
+            // Also reset hasRestoredOnce so the async restore fires even after a prior restore.
+            context.coordinator.pendingRestoreOffset = restoreOffset
+            context.coordinator.pendingRestorePage = nil
+            context.coordinator.hasRestoredOnce = false
             wireCache(context: context)
             buildPages(stack: stack, scrollView: scrollView, context: context)
             // Restore scroll position after rebuild.
@@ -243,6 +265,10 @@ struct VerticalComicScrollView: NSViewRepresentable {
                 scrollView.documentView?.scroll(CGPoint(x: 0, y: targetY))
                 scrollView.reflectScrolledClipView(scrollView.contentView)
             }
+            // Prefetch visible pages after rebuild so images load without requiring a manual scroll.
+            context.coordinator.prefetchVisibleRange()
+            let logMsg = "UPDATE rebuild complete, pagesPerRow=\(pagesPerRow), priorFraction=\(priorFraction), pendingRestoreOffset=\(String(describing: restoreOffset)), pendingRestorePage=\(String(describing: context.coordinator.pendingRestorePage))"
+            Task { await DCLogger.shared.log(logMsg) }
             return
         }
 
@@ -481,6 +507,8 @@ struct VerticalComicScrollView: NSViewRepresentable {
         }
         if updated > 0 {
             Task { await DCLogger.shared.log("SYNC pushed \(updated) cached image(s) into page views on layout") }
+        } else {
+            Task { await DCLogger.shared.log("SYNC no cached images found during layout — page views will load via onPageReady") }
         }
     }
 
@@ -545,6 +573,7 @@ struct VerticalComicScrollView: NSViewRepresentable {
         var lastContainerWidth: CGFloat = 0
         var lastPagesPerRow: Int = 0
         var pendingRestoreOffset: Double? = nil
+        var pendingRestorePage: Int? = nil
         var hasRestoredOnce = false
 
         /// Kept in sync with the SwiftUI struct so scrollDidChange can call viewport prefetch.
@@ -637,9 +666,14 @@ struct VerticalComicScrollView: NSViewRepresentable {
         }
 
         func applyPendingRestore() {
-            guard !hasRestoredOnce,
-                  let fraction = pendingRestoreOffset,
-                  let sv = scrollView,
+            guard hasRestoredOnce == false else { return }
+            // Capture pending values immediately so they can't be wiped by a concurrent
+            // updateNSView before we use them.
+            let pendingPage = pendingRestorePage
+            let pendingOffset = pendingRestoreOffset
+            pendingRestorePage = nil
+            pendingRestoreOffset = nil
+            guard let sv = scrollView,
                   let doc = sv.documentView else { return }
             let docH = doc.bounds.height
             let visH = sv.contentView.bounds.height
@@ -650,27 +684,55 @@ struct VerticalComicScrollView: NSViewRepresentable {
                 }
                 return
             }
-            let targetY = CGFloat(fraction) * maxOffset
-            doc.scroll(CGPoint(x: 0, y: targetY))
-            sv.reflectScrolledClipView(sv.contentView)
-            hasRestoredOnce = true
-            pendingRestoreOffset = nil
+
+            if let page = pendingPage, page >= 0 {
+                // Restore by page index — use the binary-search Y-offset table.
+                let offsets = pageYOffsets
+                print("[DEBUG] applyPendingRestore: page=\(page), offsets.count=\(offsets.count)")
+                guard page < offsets.count else {
+                    hasRestoredOnce = true
+                    pendingRestorePage = nil
+                print("[DEBUG] applyPendingRestore: page out of bounds, skipping")
+                Task { await DCLogger.shared.log("applyPendingRestore: page out of bounds (page=\(page), offsets.count=\(offsets.count))") }
+                return
+                }
+                let targetY = offsets[page]
+                doc.scroll(CGPoint(x: 0, y: targetY))
+                sv.reflectScrolledClipView(sv.contentView)
+                hasRestoredOnce = true
+                pendingRestorePage = nil
+                prefetchVisibleRange()
+                print("[DEBUG] RESTORE applying saved page=\(page) (Y=\(Int(targetY)))")
+                Task { await DCLogger.shared.log("RESTORE applying saved page=\(page) (fraction=0.\(Int(targetY / maxOffset * 1000)))") }
+            } else if let fraction = pendingOffset {
+                let targetY = CGFloat(fraction) * maxOffset
+                doc.scroll(CGPoint(x: 0, y: targetY))
+                sv.reflectScrolledClipView(sv.contentView)
+                hasRestoredOnce = true
+                pendingRestoreOffset = nil
+                prefetchVisibleRange()
+                print("[DEBUG] RESTORE applying saved offset=\(fraction) (Y=\(Int(targetY)))")
+                Task { await DCLogger.shared.log("RESTORE applying saved offset=\(fraction) (Y=\(Int(targetY)))") }
+            } else {
+                print("[DEBUG] applyPendingRestore: nothing to restore (both pendingRestorePage and pendingRestoreOffset are nil)")
+                Task { await DCLogger.shared.log("applyPendingRestore: nothing to restore (pendingRestorePage=\(String(describing: pendingRestorePage)), pendingRestoreOffset=\(String(describing: pendingRestoreOffset)))") }
+            }
         }
 
-        @objc func scrollDidChange(_ notification: Notification) {
+        /// O(log n) prefetch trigger — called both on scroll and on restore.
+        func prefetchVisibleRange() {
             guard let sv = scrollView, let doc = sv.documentView else { return }
             let docH = doc.bounds.height
             let visH = sv.contentView.bounds.height
             let maxOffset = docH - visH
             guard maxOffset > 0 else { return }
+
             let currentY = sv.contentView.bounds.origin.y
             let fraction = Double(currentY / maxOffset).clamped(to: 0...1)
             onOffsetChanged(fraction)
-
             let offsets = pageYOffsets
             guard !offsets.isEmpty else { return }
 
-            // O(log n): find first visible page (top edge <= currentY).
             var lo = 0, hi = offsets.count - 1
             while lo < hi {
                 let mid = (lo + hi + 1) / 2
@@ -678,7 +740,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
             }
             let firstVisible = lo
 
-            // Find last visible page (top edge < currentY + visH).
             let bottomY = currentY + visH
             var lo2 = firstVisible, hi2 = offsets.count - 1
             while lo2 < hi2 {
@@ -687,13 +748,10 @@ struct VerticalComicScrollView: NSViewRepresentable {
             }
             let lastVisible = lo2
 
-            // Report the topmost visible page for toolbar display.
             let bestPage = pageConstraints.indices.contains(firstVisible)
                 ? pageConstraints[firstVisible].pageIndex : 0
             onPageChanged(bestPage)
 
-            // Viewport-aware prefetch: decode exactly what's visible + 3 pages ahead.
-            // Pages on screen are never evicted.
             if !pages.isEmpty, let cache = imageCache {
                 let firstIdx = pageConstraints.indices.contains(firstVisible)
                     ? pageConstraints[firstVisible].pageIndex : 0
@@ -702,6 +760,11 @@ struct VerticalComicScrollView: NSViewRepresentable {
                 let visibleRange = min(firstIdx, lastIdx)...max(firstIdx, lastIdx)
                 cache.prefetch(visible: visibleRange, lookahead: 3, pages: pages)
             }
+        }
+
+        @objc func scrollDidChange(_ notification: Notification) {
+            prefetchVisibleRange()
+            Task { await DCLogger.shared.log("scrollDidChange: prefetchVisibleRange called") }
         }
     }
 }

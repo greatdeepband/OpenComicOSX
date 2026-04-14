@@ -3,7 +3,7 @@ name: dc-coder
 description: DC macOS comic reader — conservative Swift changes with approval for aggressive refactors
 mode: primary
 model: minimax-custom/MiniMax-M2.7-highspeed
-max_steps: 50
+max_steps: 150
 tools:
   bash: true
   read: true
