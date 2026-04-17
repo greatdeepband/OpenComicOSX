@@ -1,6 +1,31 @@
 # DC Reader — Changelog
 
-## v0.2.1 — 2026-04-14
+## v0.3.0 — 2026-04-17
+
+### Option C: NSScrollView Native Magnification (Zoom Fix)
+
+**Problem:** Scroll-wheel zoom was broken in vertical modes (NSScrollView ate the events), and toolbar zoom buttons triggered a full page-layout rebuild on every zoom step — expensive and caused visible flash.
+
+**Fix:** Delegate zoom rendering to NSScrollView's native `magnification` system.
+
+- `VerticalComicScrollView`: enable `allowsMagnification = true`, set `minMagnification = 0.1`, `maxMagnification = 8.0`
+- `updateNSView`: when `scale` changes from toolbar/keyboard, call `scrollView.magnification = scale` — NSScrollView renders the zoom natively, no rebuild
+- `Coordinator`: add `magnificationDidChange` handler for `NSScrollView.didEndLiveMagnifyNotification`; new `onMagnificationChanged` callback pushes pinch-zoom values back to ReaderViewModel so the toolbar stays in sync
+- `ReaderViewModel`: add `setScaleFromScrollView(_:)` — updates `vm.scale` from NSScrollView without feedback loop
+
+Result: scroll-wheel pinch-zoom now works natively; toolbar zoom is instant with no flash; zoom is genuinely global (all pages scale as one unit).
+
+**fitToWidth fix (Double Page):** The method now checks `readingMode == .doublePage` first and sets `scale = 1.0` directly — because the spread always fills container width, so "fit to width" means no scaling. Previously it computed scale from the left page only, which was wrong when right page was wider.
+
+### Architecture Changes (pre-existing)
+
+**VerticalComicScrollView:** Replaced `FlippedStackView` + manual `NSLayoutConstraint`-based layout with `NSCollectionView` + custom `ComicFlowLayout`. Handles multi-column vertical and spread pages natively via layout attributes rather than constraint math.
+
+**In-memory CBZ streaming:** `PageSource.zipData` variant holds compressed CBZ bytes in RAM; `CGImageSourceCreateIncremental` streams images without disk I/O.
+
+**PageImageCache:** Added `removeObjectsOutside(lo:hi:)` for synchronous direct eviction during fast scroll sweeps — keeps RAM hard-capped at ~5 decoded pages.
+
+---
 
 ### Changes
 
