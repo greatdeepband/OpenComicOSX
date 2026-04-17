@@ -29,8 +29,11 @@ enum PageSource {
     case file(URL)
     /// A page inside a PDF document.
     case pdf(PDFDocument, Int)
-    /// A page inside a ZIP archive (CBZ) — streamed on demand, no disk extraction.
+    /// A page inside a ZIP archive (CBZ) — streamed on demand via file path (disk IO).
     case zip(URL, String)   // archiveURL, entryPath
+    /// A page inside a ZIP archive whose entire content is pre-loaded in RAM.
+    /// No disk IO during scroll — the `data` is the raw compressed CBZ bytes.
+    case zipData(Data, String)  // compressedCBZData, entryPath
 
     /// Decodes and returns the image at screen resolution. Called on a background thread.
     ///
@@ -125,6 +128,38 @@ enum PageSource {
             let image = NSImage(cgImage: cgImg, size: .zero)
             Task { await DCLogger.shared.log("DECODE OK     zip:\(label) size=\(image.size.width)x\(image.size.height)") }
             return image
+        case .zipData(let archiveData, let entryPath):
+            let label = (entryPath as NSString).lastPathComponent
+            guard let archive = try? Archive(data: archiveData, accessMode: .read),
+                  let entry = archive[entryPath] else {
+                Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — entry not found") }
+                return nil
+            }
+            let imageSource = CGImageSourceCreateIncremental(nil)
+            var accumulated = Data()
+            do {
+                try archive.extract(entry) { chunk in
+                    accumulated.append(chunk)
+                    CGImageSourceUpdateData(imageSource, accumulated as CFData, false)
+                }
+                CGImageSourceUpdateData(imageSource, accumulated as CFData, true)
+            } catch {
+                Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — extract error: \(error)") }
+                return nil
+            }
+            let maxPx = 2048
+            let options: [CFString: Any] = [
+                kCGImageSourceThumbnailMaxPixelSize: maxPx,
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true
+            ]
+            guard let cgImg = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
+                Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — CGImageSource thumbnail failed") }
+                return nil
+            }
+            let image = NSImage(cgImage: cgImg, size: .zero)
+            return image
         }
     }
 
@@ -151,22 +186,31 @@ enum PageSource {
             // Stream just the image metadata from the ZIP entry — no full decode.
             guard let archive = try? Archive(url: archiveURL, accessMode: .read),
                   let entry = archive[entryPath] else { return CGSize(width: 1, height: 1) }
-            var headerData = Data()
-            let headerSize = min(entry.uncompressedSize, 65536)
-            do {
-                try archive.extract(entry, bufferSize: UInt32(headerSize)) { chunk in
-                    headerData.append(chunk)
-                    if headerData.count >= Int(headerSize) { throw CancellationError() }
-                }
-            } catch is CancellationError { /* expected — we only want the header */ }
-            catch { return CGSize(width: 1, height: 1) }
-            guard let src = CGImageSourceCreateWithData(headerData as CFData, nil),
-                  let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
-                  let w = props[kCGImagePropertyPixelWidth] as? CGFloat,
-                  let h = props[kCGImagePropertyPixelHeight] as? CGFloat,
-                  w > 0, h > 0 else { return CGSize(width: 1, height: 1) }
-            return CGSize(width: w, height: h)
+            return imageSizeFromArchiveEntry(archive, entry)
+        case .zipData(let archiveData, let entryPath):
+            guard let archive = try? Archive(data: archiveData, accessMode: .read),
+                  let entry = archive[entryPath] else { return CGSize(width: 1, height: 1) }
+            return imageSizeFromArchiveEntry(archive, entry)
         }
+    }
+
+    /// Extract just the image header bytes to determine dimensions — no full decode.
+    private func imageSizeFromArchiveEntry(_ archive: Archive, _ entry: Entry) -> CGSize {
+        var headerData = Data()
+        let headerSize = min(entry.uncompressedSize, 65536)
+        do {
+            try archive.extract(entry, bufferSize: UInt32(headerSize)) { chunk in
+                headerData.append(chunk)
+                if headerData.count >= Int(headerSize) { throw CancellationError() }
+            }
+        } catch is CancellationError { /* expected — we only want the header */ }
+        catch { return CGSize(width: 1, height: 1) }
+        guard let src = CGImageSourceCreateWithData(headerData as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? CGFloat,
+              let h = props[kCGImagePropertyPixelHeight] as? CGFloat,
+              w > 0, h > 0 else { return CGSize(width: 1, height: 1) }
+        return CGSize(width: w, height: h)
     }
 }
 

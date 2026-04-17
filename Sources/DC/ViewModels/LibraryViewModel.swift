@@ -12,12 +12,16 @@ struct Gallery: Identifiable, Codable {
     var sourceFolders: [URL]
     /// Resolved comic URLs — folder order first, then alphabetically within each folder.
     var comics: [URL]
+    /// Comic URLs the user has explicitly removed from this gallery.
+    /// These are permanently excluded to prevent reappearing when addFolders re-scans source folders.
+    var deletedComics: Set<URL>
 
-    init(id: UUID = UUID(), name: String, sourceFolders: [URL] = [], comics: [URL] = []) {
+    init(id: UUID = UUID(), name: String, sourceFolders: [URL] = [], comics: [URL] = [], deletedComics: Set<URL> = []) {
         self.id = id
         self.name = name
         self.sourceFolders = sourceFolders
         self.comics = comics
+        self.deletedComics = deletedComics
     }
 }
 
@@ -514,11 +518,12 @@ final class LibraryViewModel: ObservableObject {
         let existingFolders = Set(galleries[idx].sourceFolders.map { $0.path })
         let newFolders = folders.filter { !existingFolders.contains($0.path) }
         galleries[idx].sourceFolders.append(contentsOf: newFolders)
-        // Re-scan all source folders but only append comics not already present.
-        // This preserves manual removals and custom ordering.
+        // Re-scan all source folders but only append comics not already present
+        // and not in deletedComics (permanently removed by the user).
         let existingComics = Set(galleries[idx].comics)
+        let deletedComics = galleries[idx].deletedComics
         let newComics = resolveComics(from: galleries[idx].sourceFolders)
-            .filter { !existingComics.contains($0) }
+            .filter { !existingComics.contains($0) && !deletedComics.contains($0) }
         galleries[idx].comics.append(contentsOf: newComics)
         saveGalleries()
         Task.detached(priority: .background) { [weak self, newComics] in
@@ -543,10 +548,12 @@ final class LibraryViewModel: ObservableObject {
         saveGalleries()
     }
 
-    /// Remove specific comic URLs from a gallery.
+    /// Remove specific comic URLs from a gallery and persist the deletion
+    /// so they do not reappear when addFolders re-scans source folders.
     func removeComics(_ urls: Set<URL>, from galleryID: UUID) {
         guard let idx = galleries.firstIndex(where: { $0.id == galleryID }) else { return }
         galleries[idx].comics.removeAll { urls.contains($0) }
+        galleries[idx].deletedComics.formUnion(urls)
         saveGalleries()
     }
 

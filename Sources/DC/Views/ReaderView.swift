@@ -130,14 +130,13 @@ struct ReaderView: View {
                 restorePage: vm.currentPage,
                 imageCache: vm.imageCache,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
-                onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction }
+                onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction },
+                onMagnificationChanged: { newScale in
+                    vm.setScaleFromScrollView(newScale)
+                }
             )
-            .onScrollWheel { event in
-                let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
-                vm.scale = (vm.scale * factor).clamped(to: vm.minScale...vm.maxScale)
-            }
-
-            // Loupe is handled by VerticalLoupeOverlayView (native NSView sibling).
+            // Note: NSScrollView handles scroll-wheel zoom natively via its own
+            // magnification system — no SwiftUI .onScrollWheel intercept needed.
         }
     }
 
@@ -242,15 +241,14 @@ struct ReaderView: View {
     }
 }
 
-// MARK: - Spread view (Double Page with spread-level loupe)
+// MARK: - Spread view (Double Page — side-by-side with spread support)
 
-/// Renders two pages side by side with a single MouseCatcher covering the whole spread.
-/// When `leftIsSpread` is true, renders the left image full-width (double-scan spread page).
-/// The loupe samples from whichever page the cursor is over, eliminating the cross-boundary glitch.
+/// Renders two pages side by side. When `leftIsSpread` is true, renders the
+/// left image full-width (double-scan spread page). Right-click loupe shows
+/// a magnified crop of the hovered page.
 struct SpreadView: View {
     let leftImage:  NSImage?
     let rightImage: NSImage?
-    /// True when the current page is a double-scan spread and should fill the full width.
     let leftIsSpread: Bool
     @Binding var scale: CGFloat
     @Binding var offset: CGSize
@@ -266,15 +264,12 @@ struct SpreadView: View {
     @State private var loupeCursorInImage: CGPoint = .zero
 
     var body: some View {
-        // Derive live page width from container + scale so pages reflow on window resize.
         let scaledTotal = containerSize.width * scale
-        let pageW = (scaledTotal - 2) / 2  // 2pt gap
+        let pageW = (scaledTotal - 2) / 2
         let pageH = containerSize.height * scale
 
         ZStack {
-            // Pages — use real frame widths, no scaleEffect
             if leftIsSpread {
-                // Double-scan spread: single image fills the full width of both columns.
                 if let img = leftImage {
                     Image(nsImage: img)
                         .resizable()
@@ -317,7 +312,7 @@ struct SpreadView: View {
                 .allowsHitTesting(false)
             }
 
-            // Single MouseCatcher covers the full spread
+            // MouseCatcher handles pan + loupe
             MouseCatcher(
                 onLeftDragBegan: { _ in },
                 onLeftDragMoved: { delta in
@@ -334,12 +329,12 @@ struct SpreadView: View {
                 onLeftDragEnded: { _ in },
                 onRightBegan: { pos in
                     loupePosition = pos
-                    updateLoupe(at: pos)
+                    computeLoupe(at: pos)
                     showLoupe = true
                 },
                 onRightMoved: { pos in
                     loupePosition = pos
-                    updateLoupe(at: pos)
+                    computeLoupe(at: pos)
                 },
                 onRightEnded: { showLoupe = false }
             )
@@ -364,46 +359,48 @@ struct SpreadView: View {
         .onTapGesture(count: 2) { onDoubleTap() }
     }
 
-    /// Determine which page the cursor is over and compute loupe parameters for that page.
-    private func updateLoupe(at pos: CGPoint) {
-        // Use the same scaled dimensions as the layout.
+    /// Compute loupe parameters for the page under the cursor.
+    /// Spread mode: single full-width image. Normal mode: split at midX.
+    private func computeLoupe(at pos: CGPoint) {
         let scaledTotal = containerSize.width * scale
-        let pageW = (scaledTotal - 2) / 2
-        let pageH = containerSize.height * scale
-        // The spread is centred in the container; compute its origin.
-        let spreadOriginX = (containerSize.width - scaledTotal) / 2 + offset.width
-        let spreadOriginY = (containerSize.height - pageH) / 2 + offset.height
+        let spreadOrigin = (containerSize.width - scaledTotal) / 2 + offset.width
+        let midX = spreadOrigin + scaledTotal / 2
 
+        let isRight = pos.x >= midX && !leftIsSpread && rightImage != nil
         let img: NSImage
-        let pageContainerSize: CGSize
-        let localPos: CGPoint
+        let pageW: CGFloat
 
         if leftIsSpread {
-            // Full-width single image — no column split.
             guard let left = leftImage else { return }
             img = left
-            pageContainerSize = CGSize(width: scaledTotal, height: pageH)
-            localPos = CGPoint(x: pos.x - spreadOriginX, y: pos.y - spreadOriginY)
+            pageW = scaledTotal
+        } else if isRight {
+            guard let r = rightImage else { return }
+            img = r
+            pageW = (scaledTotal - 2) / 2
         } else {
-            // Two-column layout — determine which side the cursor is on.
-            let leftEdge = spreadOriginX
-            let midX     = spreadOriginX + pageW + 2
-            let isLeft   = pos.x < midX
-            guard let candidate = isLeft ? leftImage : rightImage else { return }
-            img = candidate
-            pageContainerSize = CGSize(width: pageW, height: pageH)
-            let localX = isLeft ? pos.x - leftEdge : pos.x - midX
-            localPos = CGPoint(x: localX, y: pos.y - spreadOriginY)
+            guard let l = leftImage else { return }
+            img = l
+            pageW = (scaledTotal - 2) / 2
         }
 
-        // Compute rendered image size within its page frame (scaledToFit) — same formula for both cases.
+        let spreadH = containerSize.height * scale
+        let localX: CGFloat
+        if isRight && !leftIsSpread {
+            localX = pos.x - midX
+        } else {
+            localX = pos.x - spreadOrigin
+        }
+        let localPos = CGPoint(x: localX, y: pos.y - (containerSize.height - spreadH) / 2 - offset.height)
+
+        let pageContainerSize = CGSize(width: pageW, height: spreadH)
         let imgAR = img.size.width / img.size.height
         let conAR = pageContainerSize.width / pageContainerSize.height
         let ivSize: CGSize = imgAR > conAR
             ? CGSize(width: pageContainerSize.width, height: pageContainerSize.width / imgAR)
             : CGSize(width: pageContainerSize.height * imgAR, height: pageContainerSize.height)
 
-        let ox = (pageContainerSize.width  - ivSize.width)  / 2
+        let ox = (pageContainerSize.width - ivSize.width) / 2
         let oy = (pageContainerSize.height - ivSize.height) / 2
         let cursorInIV = CGPoint(x: localPos.x - ox, y: localPos.y - oy)
 

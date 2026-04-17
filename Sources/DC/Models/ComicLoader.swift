@@ -331,10 +331,14 @@ enum ComicLoader {
     // MARK: - CBZ (ZIP)
 
     private static func loadCBZ(url: URL) throws -> Comic {
-        // CBZ: read the ZIP central directory only — no extraction to disk.
-        // ZIPFoundation gives us entry paths; pages are decoded on-demand via
-        // Archive streaming when the reader requests each page.
-        guard let archive = try? Archive(url: url, accessMode: .read) else {
+        // Load entire CBZ into RAM upfront. This eliminates all disk IO during
+        // scrolling — page decodes read from memory instead of re-opening the
+        // ZIP file on disk for every page.
+        // Memory cost: compressed file size (50-200 MB typical).
+        guard let archiveData = try? Data(contentsOf: url) else {
+            throw LoadError.extractionFailed("Could not read ZIP archive from disk.")
+        }
+        guard let archive = try? Archive(data: archiveData, accessMode: .read) else {
             throw LoadError.extractionFailed("Could not open ZIP archive.")
         }
         let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif"])
@@ -347,7 +351,7 @@ enum ComicLoader {
             .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
         guard !entries.isEmpty else { throw LoadError.noImagesFound }
         let pages: [ComicPage] = entries.enumerated().map { (idx, entry) in
-            ComicPage(id: idx, source: .zip(url, entry.path))
+            ComicPage(id: idx, source: .zipData(archiveData, entry.path))
         }
         return Comic(url: url, format: .cbz, pages: pages)
     }

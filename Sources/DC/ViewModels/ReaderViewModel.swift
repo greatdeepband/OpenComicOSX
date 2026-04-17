@@ -178,6 +178,35 @@ actor PageImageCache {
         }
     }
 
+    /// Remove all cached images outside [lo...hi]. Called from coordinator to keep
+    /// RAM capped during fast scroll sweeps — only ever keeps ~5 pages in memory.
+    /// **Synchronous direct eviction** — no Task delay, clears cache + inFlight
+    /// immediately so new visible pages aren't blocked by stale decode tasks.
+    nonisolated func removeObjectsOutside(lo: Int, hi: Int) {
+        // NSCache is thread-safe. Evict pages outside window.
+        Task { [weak self] in
+            await self?._evictOutside(lo: lo, hi: hi)
+        }
+    }
+
+    /// Internal async eviction that runs on the actor for `inFlight` access.
+    private func _evictOutside(lo: Int, hi: Int) async {
+        for i in 0..<lo {
+            cache.removeObject(forKey: NSNumber(value: i))
+        }
+        let extra = 10
+        for i in (hi + 1)...(hi + extra) {
+            cache.removeObject(forKey: NSNumber(value: i))
+        }
+        // Clear stale in-flight entries — critical: this unblocks new decode requests
+        // that would otherwise see "already in flight" and skip.
+        let stale = inFlight.filter { $0 < lo || $0 > hi }
+        inFlight.subtract(stale)
+        if !stale.isEmpty {
+            await DCLogger.shared.log("EVICT [\(lo)...\(hi)] cleared stale inFlight: \(stale.sorted())")
+        }
+    }
+
     nonisolated func removeAll() {
         Task { [weak self] in
             await self?.removeAllInternal()
@@ -355,7 +384,23 @@ final class ReaderViewModel: ObservableObject {
         }
     }
 
+    func setScaleFromScrollView(_ newScale: CGFloat) {
+        // Called from NSScrollView magnification callbacks. Update the published
+        // property so the toolbar UI stays in sync, but avoid triggering a
+        // feedback loop — this path only goes TO the VM, not back to the view.
+        scale = newScale.clamped(to: minScale...maxScale)
+    }
+
     func fitToWidth(containerWidth: CGFloat) {
+        // In Double Page mode the spread always fills the container width,
+        // so Fit to Width simply means scale = 1.0.
+        if readingMode == .doublePage {
+            withAnimation(.easeOut(duration: 0.2)) {
+                scale = 1.0
+                offset = .zero
+            }
+            return
+        }
         let size = naturalSize(for: currentPage)
         guard size.width > 0 else { return }
         let imgAR = size.width / size.height
