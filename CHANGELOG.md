@@ -1,5 +1,23 @@
 # DC Reader — Changelog
 
+## v0.3.1 — 2026-04-20
+
+### Metal Rendering Pipeline — Phase 1
+
+**New files:** `MetalPageView.swift`, `MetalPageRenderer.swift`, `MetalPageManager.swift`, `Shaders.metal`
+
+**Critical bugs fixed:**
+- `triggerPrefetch` passed empty `Data()` to `decodePage` — CGImageSource returned nil for all pages. Fixed: now extracts `.zipData` from `PageSource` enum via pattern matching.
+- `render()` never called `upload()` — the texture ring was always empty, all pages rendered black. Fixed: `render()` now fetches decoded `CVPixelBuffer` from `pageManager` and uploads to `renderer` texture ring before encoding.
+- `MetalPageManager.page(for:)` didn't update `lastAccessTimes` — LRU eviction always evicted the same page regardless of access pattern. Fixed: `lastAccessTimes[pageIndex] = Date()` on every access.
+- `MetalPageManager` LRU eviction used `dict.keys.first` (arbitrary ordering) instead of true LRU. Fixed: `lastAccessTimes.min(by:)` finds the least-recently-used entry.
+
+**Architecture:** Two-ring design — `MetalPageManager` (actor) holds decoded `CVPixelBuffer`s, `MetalPageRenderer` (struct) holds uploaded `MTLTexture`s. Both rings are 10-page capped with LRU eviction.
+
+**Remaining work (Phase 2+):** spread texture composition for vertical-double, loupe magnifier, memory profiling, deletion of old reader code.
+
+---
+
 ## v0.3.0 — 2026-04-17
 
 ### Option C: NSScrollView Native Magnification (Zoom Fix)
