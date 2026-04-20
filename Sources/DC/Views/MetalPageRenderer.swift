@@ -8,6 +8,7 @@ final class MetalPageRenderer {
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     let textureCache: CVMetalTextureCache
+    let pipelineState: MTLRenderPipelineState
 
     private var textureRing: [Int: (texture: MTLTexture, lastAccess: Date)] = [:]
     private let maxCachedPages = 10
@@ -22,6 +23,24 @@ final class MetalPageRenderer {
         CVMetalTextureCacheCreate(nil, nil, device, nil, &cache)
         guard let textureCache = cache else { return nil }
         self.textureCache = textureCache
+
+        // Create the render pipeline state from the metal shaders
+        guard let library = device.makeDefaultLibrary(),
+              let vertexFunc = library.makeFunction(name: "vertexShader"),
+              let fragmentFunc = library.makeFunction(name: "fragmentShader") else {
+            return nil
+        }
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+        pipelineDescriptor.vertexFunction = vertexFunc
+        pipelineDescriptor.fragmentFunction = fragmentFunc
+        pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+
+        do {
+            pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+        } catch {
+            return nil
+        }
     }
 
     /// Upload a CVPixelBuffer to a MTLTexture and store in the ring buffer.
@@ -77,6 +96,9 @@ final class MetalPageRenderer {
             width: Double(viewport.width), height: Double(viewport.height),
             znear: 0, zfar: 1
         ))
+
+        // Set the render pipeline state
+        encoder.setRenderPipelineState(pipelineState)
 
         // Simple passthrough vertex/fragment shaders (see Shaders.metal)
         // Quad vertices: two triangles covering each page rect

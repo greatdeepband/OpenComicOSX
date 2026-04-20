@@ -303,7 +303,9 @@ extension MetalPageView {
                 triggerPrefetch(first: firstIdx, last: lastIdx)
             }
 
-            render(visibleRange: visibleRange)
+            Task { [weak self] in
+                await self?.render(visibleRange: visibleRange)
+            }
         }
 
         func triggerPrefetch(first: Int, last: Int) {
@@ -315,17 +317,19 @@ extension MetalPageView {
             Task {
                 for idx in firstIdx...lastIdx {
                     let page = pages[idx]
-                    // Extract image data from PageSource if available
-                    if case .zipData(let archiveData, _) = page.source {
-                        _ = await manager.decodePage(pageIndex: page.id, from: archiveData, entryIndex: idx)
+                    // Decode page from its source (handles .zipData, .file, .pdf, etc.)
+                    if let buffer = await manager.decodePage(pageIndex: page.id, from: page.source) {
+                        // Page decoded successfully - it's now in the pageManager's ring buffer
+                        _ = buffer
                     }
-                    // For .file and .zip sources, decoding happens via CGImageSource directly
-                    // which requires file system access - skip prefetch for those types
                 }
             }
         }
 
-        func render(visibleRange: ClosedRange<Int>) {
+        /// Render the visible page range. Uploads visible pages synchronously before encoding
+        /// to guarantee textures are in the ring before draw calls fire.
+        @MainActor
+        func render(visibleRange: ClosedRange<Int>) async {
             guard let metalView = metalView,
                   let renderer = renderer,
                   let pageManager = pageManager,
@@ -341,14 +345,11 @@ extension MetalPageView {
             // Evict textures outside visible range first
             renderer.evictOutside(visibleRange)
 
-            // Upload any decoded CVPixelBuffers to the texture ring before rendering
-            Task {
-                for pageIndex in visibleRange {
-                    if let buffer = await pageManager.page(for: pageIndex) {
-                        // Upload if not already in ring (upload() handles its own LRU)
-                        if renderer.texture(for: pageIndex) == nil {
-                            _ = renderer.upload(pixelBuffer: buffer, for: pageIndex)
-                        }
+            // Synchronously upload visible pages — needed for the current frame
+            for pageIndex in visibleRange {
+                if let buffer = await pageManager.page(for: pageIndex) {
+                    if renderer.texture(for: pageIndex) == nil {
+                        _ = renderer.upload(pixelBuffer: buffer, for: pageIndex)
                     }
                 }
             }

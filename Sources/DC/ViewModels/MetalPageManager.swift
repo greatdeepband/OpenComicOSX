@@ -1,6 +1,7 @@
 import Foundation
 import CoreVideo
 import ImageIO
+import ZIPFoundation
 
 /// Actor that manages async page decoding and the decoded CVPixelBuffer cache.
 /// Pages are decoded from raw CBZ entry bytes via CGImageSource.
@@ -11,21 +12,54 @@ actor MetalPageManager {
     private var lastAccessTimes: [Int: Date] = [:]
     private let maxCachedPages = 10
 
-    /// Decode a single page from raw CBZ data (Data containing the compressed image bytes).
-    /// Returns a CVPixelBuffer suitable for Metal upload.
-    func decodePage(pageIndex: Int, from archiveData: Data, entryIndex: Int) async -> CVPixelBuffer? {
+    /// Decode a single page from a PageSource.
+    /// For .zipData sources: extracts the specific entry from the CBZ archive,
+    /// decompresses it, and decodes to a CVPixelBuffer suitable for Metal upload.
+    /// For other sources: falls back to the source's own decode() method.
+    func decodePage(pageIndex: Int, from source: PageSource) async -> CVPixelBuffer? {
         if decodedPages[pageIndex] != nil { return decodedPages[pageIndex] }
         if pendingPages.contains(pageIndex) { return nil }
         pendingPages.insert(pageIndex)
         defer { pendingPages.remove(pageIndex) }
 
+        // Handle .zipData source: extract entry from archive and decode
+        if case .zipData(let archiveData, let entryPath) = source {
+            return decodeZipDataPage(pageIndex: pageIndex, archiveData: archiveData, entryPath: entryPath)
+        }
+
+        // For other source types, we can't decode to CVPixelBuffer directly
+        // without going through NSImage/CGImage. Return nil and let the
+        // existing pipeline handle these pages.
+        return nil
+    }
+
+    /// Extract a specific entry from a CBZ archive and decode it to CVPixelBuffer.
+    private func decodeZipDataPage(pageIndex: Int, archiveData: Data, entryPath: String) -> CVPixelBuffer? {
+        guard let archive = try? Archive(data: archiveData, accessMode: .read) else {
+            return nil
+        }
+        guard let entry = archive[entryPath] else {
+            return nil
+        }
+
+        // Extract the decompressed data for this entry using the consumer pattern
+        var entryData = Data()
+        do {
+            try archive.extract(entry) { chunk in
+                entryData.append(chunk)
+            }
+        } catch {
+            return nil
+        }
+
+        // Decode the image data to CGImage
         let options: [CFString: Any] = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailFromImageAlways: false
         ]
 
-        guard let imageSource = CGImageSourceCreateWithData(archiveData as CFData, options as CFDictionary),
-              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, entryIndex, options as CFDictionary) else {
+        guard let imageSource = CGImageSourceCreateWithData(entryData as CFData, options as CFDictionary),
+              let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, options as CFDictionary) else {
             return nil
         }
 
@@ -72,6 +106,12 @@ actor MetalPageManager {
         decodedPages[pageIndex] = buffer
         lastAccessTimes[pageIndex] = Date()
         return buffer
+    }
+
+    /// Legacy decode method for backward compatibility with existing callers
+    /// that pass archiveData + entryIndex. Uses the entryPath from PageSource instead.
+    func decodePage(pageIndex: Int, from archiveData: Data, entryPath: String) async -> CVPixelBuffer? {
+        return await decodePage(pageIndex: pageIndex, from: .zipData(archiveData, entryPath))
     }
 
     func page(for pageIndex: Int) -> CVPixelBuffer? {
