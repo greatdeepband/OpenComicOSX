@@ -328,10 +328,9 @@ extension MetalPageView {
         func render(visibleRange: ClosedRange<Int>) {
             guard let metalView = metalView,
                   let renderer = renderer,
+                  let pageManager = pageManager,
                   let drawable = metalView.metalLayer.nextDrawable(),
                   let commandBuffer = renderer.commandQueue.makeCommandBuffer() else { return }
-
-            _ = CGRect(origin: metalView.bounds.origin, size: metalView.metalLayer.drawableSize)
 
             let renderPassDescriptor = MTLRenderPassDescriptor()
             renderPassDescriptor.colorAttachments[0].texture = drawable.texture
@@ -339,7 +338,20 @@ extension MetalPageView {
             renderPassDescriptor.colorAttachments[0].storeAction = .store
             renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
 
+            // Evict textures outside visible range first
             renderer.evictOutside(visibleRange)
+
+            // Upload any decoded CVPixelBuffers to the texture ring before rendering
+            Task {
+                for pageIndex in visibleRange {
+                    if let buffer = await pageManager.page(for: pageIndex) {
+                        // Upload if not already in ring (upload() handles its own LRU)
+                        if renderer.texture(for: pageIndex) == nil {
+                            _ = renderer.upload(pixelBuffer: buffer, for: pageIndex)
+                        }
+                    }
+                }
+            }
 
             renderer.render(
                 viewport: metalView.bounds,

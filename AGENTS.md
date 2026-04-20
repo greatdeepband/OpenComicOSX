@@ -1,75 +1,42 @@
-# DC — Agent Instructions
+# AGENTS.md — Hermes Agent adapter for agentic-stack
 
-DC is a native macOS comic reader built with Swift 5.10+ and Swift Package Manager.
+Hermes Agent (Nous Research) reads `AGENTS.md` as workspace-level context.
+This file points it at the portable brain in `.agent/`.
 
-## Project Layout
+## Startup (read in order)
+1. `.agent/AGENTS.md` — the map
+2. `.agent/memory/personal/PREFERENCES.md` — user conventions
+3. `.agent/memory/semantic/LESSONS.md` — distilled lessons
+4. `.agent/protocols/permissions.md` — hard rules
 
-```
-Sources/DC/
-  DCApp.swift          — @main entry point
-  DCLogger.swift        — lightweight timestamped logger (/tmp/dc_debug.log)
-  MemoryMonitor.swift   — @MainActor memory/caching telemetry
-  Models/
-    Comic.swift         — comic metadata (title, page count, URL)
-    ComicLoader.swift   — ZIPFoundation-based .cbz loading
-    ReadingPosition.swift
-  Utilities/
-  ViewModels/
-    LibraryViewModel.swift  — gallery/comic library state, @Published, thumbnail NSCache
-    ReaderViewModel.swift   — reading session state, current page, zoom
-  Views/
-    ContentView.swift           — root SwiftUI view
-    LibraryView.swift           — gallery grid (NSCollectionView-like via LazyVGrid)
-    ReaderView.swift            — single-page reader (NSImageView-based)
-    VerticalComicScrollView.swift — vertical scroll mode
-    ZoomableImageView.swift      — pinch/zoom NSImageView wrapper
-    MagnifierView.swift
-```
+## Skills
+Hermes supports the agentskills.io standard. Our skills under
+`.agent/skills/<name>/SKILL.md` follow the same frontmatter-plus-body
+shape. Use `/skills` in Hermes to browse them; load `SKILL.md` only
+when triggers match the current task (progressive disclosure).
 
-**Package manager:** SPM only (no CocoaPods, no Carthage)
-**Dependency:** [ZIPFoundation](https://github.com/weichsel/ZIPFoundation.git) — handles .cbz extraction
-**Platform:** macOS 14.0+
-**Architecture:** AppKit + SwiftUI hybrid — AppKit for image views (performance), SwiftUI for UI chrome
-
-## Memory Philosophy
-
-DC must stay under 200 MB RSS in typical use. Every feature must be weighed against its memory cost:
-- NSImage cache hard-capped via `NSCache.countLimit`
-- Disk thumbnail cache pruned aggressively (see `LibraryViewModel.thumbnailCacheDir`)
-- `MemoryMonitor` polls every 5s and logs to `/tmp/dc_debug.log`
-- `@Published` properties drive a debug overlay — avoid strong retain cycles
-- Background work dispatched to `DispatchQueue` with `.utility` QoS
-
-## Threading Conventions
-
-- `@MainActor` on all `ObservableObject` view models — SwiftUI bindings are main-thread-only
-- `DCLogger` uses a dedicated `DispatchQueue` (label: `"com.dc.logger"`) for async writes
-- Image decompression on background queue, cached result back to main thread
-- `MemoryMonitor` samples on a `Timer` scheduled from the main actor
-
-## Error Handling
-
-- Result type on loaders (`Result<[NSImage], Error>`)
-- Logs errors via `DCLogger.shared.log("ERROR: \(err)")` — never silently swallow
-- No user-facing alerts for recoverable errors (missing thumbnail = placeholder)
-
-## Code Style
-
-- All public members documented with `///` doc comments
-- `// MARK: -` section headers in every file
-- `self` used explicitly in initializers and mutating contexts only
-- CapitalCase for types/protocols, camelCase for functions/variables
-
-## Build & Run
+## Recall before non-trivial tasks
+For deploy / ship / migration / schema / timestamp / date / failing test /
+debug / refactor, FIRST run:
 
 ```bash
-swift build      # compile only
-swift run        # build and execute
-swift test       # if/when tests exist
+python3 .agent/tools/recall.py "<description>"
 ```
 
-The `swift build` command must succeed before any change is committed.
+Surface results in a `Consulted lessons before acting:` block and follow
+them.
 
-## Working Directory
+## Memory discipline
+- Update `.agent/memory/working/WORKSPACE.md` as you work.
+- After significant actions, run
+  `python3 .agent/tools/memory_reflect.py <skill> <action> <outcome>`.
+- Never delete memory entries; archive only.
+- Quick state: `python3 .agent/tools/show.py`.
+- Teach a rule in one shot:
+  `python3 .agent/tools/learn.py "<rule>" --rationale "<why>"`.
+- Optional: mirror high-signal state into Hermes's own `MEMORY.md` /
+  `USER.md` if you want it inside Hermes's runtime persistence layer.
 
-All opencode sessions run from the project root (`/Volumes/Media/__Manus copy/DC`), which contains `Package.swift`.
+## Hard rules
+- No force push to `main`, `production`, `staging`.
+- No modification of `.agent/protocols/permissions.md`.

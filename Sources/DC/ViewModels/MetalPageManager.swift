@@ -75,6 +75,7 @@ actor MetalPageManager {
     }
 
     func page(for pageIndex: Int) -> CVPixelBuffer? {
+        lastAccessTimes[pageIndex] = Date()
         return decodedPages[pageIndex]
     }
 
