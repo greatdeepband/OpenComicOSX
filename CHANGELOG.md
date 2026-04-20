@@ -1,5 +1,57 @@
 # DC Reader — Changelog
 
+## v0.4.0 — 2026-04-20
+
+### Metal Rendering Pipeline — Complete
+
+All vertical/vertical-double reading modes now use the Metal GPU pipeline.
+
+**Task 3 — TextureRingBuffer:**
+- Extracted `TextureRingBuffer` struct with `maxSize=10`, `insert()`, `touch()`, `subscript`, `evictOutside()`
+- Replaced inline dict with `TextureRingBuffer` instance in `MetalPageRenderer`
+
+**Task 4 — Metal render pipeline:**
+- All pipeline components verified: `CAMetalLayer` → `drawable` → `commandBuffer` → `renderEncoder` → textured quads
+- Rasterizer: `framebufferOnly=true`, BGRA8 pixel format consistent throughout
+- Texture upload: `CVMetalTextureCacheCreateTextureFromImage` path verified
+- `Shaders.metal` declared as resource in `Package.swift`
+
+**Task 5 — NSScrollView wiring:**
+- Fixed page ID vs sequential index key mismatch throughout Coordinator
+- Fixed `onPageChanged`/`onOffsetChanged` to pass sequential indices
+- Fixed `render()` to translate sequential→page.id for GPU rect lookup
+- Fixed scale feedback loop with dedicated `lastScale` comparison anchor
+- Fixed `magnificationDidChange` to update coordinator state
+- Fixed `scrollToFraction` division-by-zero guard
+- Fixed double-column height calculation in `rebuildLayout()`
+- Added `sequentialIndexAtCenter()` helper
+
+**Task 6 — Vertical double mode:**
+- GPU spread composition via `composeSpreadKernel` compute shader
+- `MetalPageRenderer`: `SpreadInfo` struct, `spreadTextures` dict, `blitPipeline` compute pipeline
+- `MetalPageView`: `spreads` dict built in `rebuildLayout()`, synced via `setSpreads()`, `render()` composes visible spreads
+- `pagesPerRow==2` now composites left+right into single spread quad per row
+
+**Task 7 — Loupe:**
+- `loupeKernel` compute shader — 2× reduced magnification, circular clip
+- `MetalPageRenderer`: `loupePipeline` + `renderLoupe()` for GPU loupe rendering
+- `MetalLoupeOverlayView` intercepts rightMouse events, converts coordinates to document space
+- `LoupeMetalView` renders loupe texture via blit copy; `MetalLoupeView` bridged via `NSHostingView`
+- Right-click/hold activates, follows cursor, circular clip with 2× magnification
+
+**Task 8 — Memory verification:**
+- Two-ring architecture confirmed: `MetalPageManager` (CVPixelBuffer, 10-page cap) + `MetalPageRenderer.textureRing` (MTLTexture, 10-page cap)
+- Both rings wired with LRU eviction in render path
+- `scripts/memory_ring_test.sh`: 6-point verification script
+- `.agent/Memory_Verification.md`: architecture docs and verification steps
+
+**Task 9 — Old reader removed:**
+- `VerticalComicScrollView` commented out (replaced by `MetalPageView`)
+- `verticalScrollView()` in `ReaderView` now routes `.verticalScroll` and `.verticalDouble` to `MetalPageView`
+- Build: `swift build -c release` produces clean `.app`
+
+---
+
 ## v0.3.1 — 2026-04-20
 
 ### Metal Rendering Pipeline — Phase 1
@@ -14,7 +66,7 @@
 
 **Architecture:** Two-ring design — `MetalPageManager` (actor) holds decoded `CVPixelBuffer`s, `MetalPageRenderer` (struct) holds uploaded `MTLTexture`s. Both rings are 10-page capped with LRU eviction.
 
-**Remaining work (Phase 2+):** spread texture composition for vertical-double, loupe magnifier, memory profiling, deletion of old reader code.
+---
 
 ### v0.3.1 — 2026-04-20 (continued)
 
