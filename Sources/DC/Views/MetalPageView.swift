@@ -55,6 +55,8 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.pagesPerRow = pagesPerRow
         context.coordinator.containerWidth = containerWidth
         context.coordinator.scale = scale
+        // Initialize lastScale to current scale so first updateNSView doesn't trigger scale sync
+        context.coordinator.lastScale = scale
 
         scrollView.documentView = metalView
 
@@ -109,7 +111,8 @@ struct MetalPageView: NSViewRepresentable {
             context.coordinator.rebuildLayout()
         }
 
-        if abs(context.coordinator.scale - scale) > 0.001 {
+        if abs(context.coordinator.lastScale - scale) > 0.001 {
+            context.coordinator.lastScale = scale
             context.coordinator.scale = scale
             scrollView.magnification = scale
         }
@@ -159,8 +162,16 @@ extension MetalPageView {
         var pagesPerRow: Int = 1
         var containerWidth: CGFloat = 0
         var scale: CGFloat = 1.0
+        /// Tracks the last scale we synced TO the NSScrollView to avoid feedback loops.
+        var lastScale: CGFloat = 1.0
+
+        /// Maps sequential index → page id (stable across rebuilds).
+        var sequentialToID: [Int] = []
+        /// Maps page id → sequential index.
+        var idToSequential: [Int: Int] = [:]
 
         var pagePositions: [Int: CGRect] = [:]
+        /// Cumulative Y-offset table for binary search (sequential index → Y).
         var pageYOffsets: [CGFloat] = []
 
         var lastContainerWidth: CGFloat = 0
@@ -185,33 +196,43 @@ extension MetalPageView {
                 || lastPagesPerRow != pagesPerRow
         }
 
+        /// Rebuilds the layout from scratch: recomputes all position tables and
+        /// rebuilds the sequential↔pageID mapping to match the current pages array.
         func rebuildLayout() {
             guard let metalView = metalView else { return }
 
             pagePositions.removeAll()
             pageYOffsets.removeAll()
 
+            // Build sequential index → page ID map
+            sequentialToID = pages.map { $0.id }
+            idToSequential.removeAll()
+            for (seqIdx, pageID) in sequentialToID.enumerated() {
+                idToSequential[pageID] = seqIdx
+            }
+
             let totalWidth = pagesPerRow == 1 ? containerWidth * scale : containerWidth
             var y: CGFloat = 0
-            var i = 0
 
-            while i < pages.count {
-                let page = pages[i]
-                let ar = page.naturalSize.height / max(page.naturalSize.width, 1)
-
-                if pagesPerRow == 1 {
+            if pagesPerRow == 1 {
+                for i in 0..<pages.count {
+                    let page = pages[i]
+                    let ar = page.naturalSize.height / max(page.naturalSize.width, 1)
                     let h = totalWidth * ar
                     let rect = CGRect(x: 0, y: y, width: totalWidth, height: h)
                     pagePositions[page.id] = rect
                     pageYOffsets.append(y)
                     y += h + 4
-                    i += 1
-                } else {
-                    // Vertical double: pair pages side by side
-                    let pageWidth = (totalWidth - 2) / 2
+                }
+            } else {
+                // Vertical double: pair pages side by side
+                var i = 0
+                while i < pages.count {
+                    let page = pages[i]
 
                     if page.isSpread {
-                        // Full-width spread
+                        // Full-width spread: occupies its own row
+                        let ar = page.naturalSize.height / max(page.naturalSize.width, 1)
                         let h = totalWidth * ar
                         let rect = CGRect(x: 0, y: y, width: totalWidth, height: h)
                         pagePositions[page.id] = rect
@@ -219,25 +240,30 @@ extension MetalPageView {
                         y += h + 4
                         i += 1
                     } else {
-                        // Left page
-                        let leftH = pageWidth * ar
+                        // Pair: left + right pages in same row at same Y
+                        let pageWidth = (totalWidth - 2) / 2
+                        let leftAR = page.naturalSize.height / max(page.naturalSize.width, 1)
+                        let leftH = pageWidth * leftAR
                         let leftRect = CGRect(x: 0, y: y, width: pageWidth, height: leftH)
                         pagePositions[page.id] = leftRect
 
-                        // Right page (if exists and not a spread)
+                        // Record Y for left page (sequential index i)
+                        pageYOffsets.append(y)
+
+                        var rightH: CGFloat = leftH
                         if i + 1 < pages.count && !pages[i + 1].isSpread {
                             let rightPage = pages[i + 1]
                             let rightAR = rightPage.naturalSize.height / max(rightPage.naturalSize.width, 1)
-                            let rightH = pageWidth * rightAR
+                            rightH = pageWidth * rightAR
                             let rightRect = CGRect(x: pageWidth + 2, y: y, width: pageWidth, height: rightH)
                             pagePositions[rightPage.id] = rightRect
                             i += 2
                         } else {
                             i += 1
                         }
-                        pageYOffsets.append(y)
-                        let maxH = leftH + 4 // could be refined per-pair
-                        y += maxH + 4
+
+                        // Advance Y by the max of the two page heights plus spacing
+                        y += max(leftH, rightH) + 4
                     }
                 }
             }
@@ -250,22 +276,40 @@ extension MetalPageView {
             metalView.needsDisplay = true
         }
 
+        /// Restores scroll position by page index (sequential index).
         func scrollToPage(_ page: Int) {
             guard let sv = scrollView, let doc = sv.documentView else { return }
-            guard page < pageYOffsets.count else { return }
+            guard page >= 0 && page < pageYOffsets.count else { return }
             let targetY = pageYOffsets[page]
             doc.scroll(CGPoint(x: 0, y: targetY))
             sv.reflectScrolledClipView(sv.contentView)
             updateVisibleRange()
         }
 
+        /// Restores scroll position by fractional offset (0.0–1.0).
         func scrollToFraction(_ fraction: Double) {
             guard let sv = scrollView, let doc = sv.documentView else { return }
             let maxY = doc.bounds.height - sv.contentView.bounds.height
+            guard maxY > 0 else { return }
             let targetY = CGFloat(fraction) * maxY
             doc.scroll(CGPoint(x: 0, y: targetY))
             sv.reflectScrolledClipView(sv.contentView)
             updateVisibleRange()
+        }
+
+        /// Finds the sequential page index at the center of the viewport.
+        private func sequentialIndexAtCenter() -> Int {
+            guard let sv = scrollView else { return 0 }
+            let currentY = sv.contentView.bounds.origin.y
+            let visH = sv.contentView.bounds.height
+            let centerY = currentY + visH / 2
+
+            var lo = 0, hi = pageYOffsets.count - 1
+            while lo < hi {
+                let mid = (lo + hi + 1) / 2
+                if pageYOffsets[mid] <= centerY { lo = mid } else { hi = mid - 1 }
+            }
+            return lo
         }
 
         func updateVisibleRange() {
@@ -279,7 +323,7 @@ extension MetalPageView {
             let currentY = sv.contentView.bounds.origin.y
             let bottomY = currentY + visH
 
-            // Binary search for first visible page
+            // Binary search for first visible page (sequential index)
             var lo = 0, hi = pageYOffsets.count - 1
             while lo < hi {
                 let mid = (lo + hi + 1) / 2
@@ -287,6 +331,7 @@ extension MetalPageView {
             }
             let firstVisible = lo
 
+            // Binary search for last visible page
             var lo2 = firstVisible, hi2 = pageYOffsets.count - 1
             while lo2 < hi2 {
                 let mid = (lo2 + hi2 + 1) / 2
@@ -296,12 +341,10 @@ extension MetalPageView {
 
             let visibleRange = firstVisible...lastVisible
 
-            if !pages.isEmpty {
-                let firstIdx = pages.indices.contains(firstVisible) ? pages[firstVisible].id : 0
-                let lastIdx = pages.indices.contains(lastVisible) ? pages[lastVisible].id : firstIdx
-                onPageChanged(firstIdx)
-                triggerPrefetch(first: firstIdx, last: lastIdx)
-            }
+            // Report page to ViewModel using SEQUENTIAL index (not page ID)
+            // The ViewModel.currentPage is also a sequential index.
+            onPageChanged(firstVisible)
+            triggerPrefetch(first: firstVisible, last: lastVisible)
 
             Task { [weak self] in
                 await self?.render(visibleRange: visibleRange)
@@ -315,19 +358,22 @@ extension MetalPageView {
             let lastIdx = min(pages.count - 1, last + lookahead)
 
             Task {
-                for idx in firstIdx...lastIdx {
-                    let page = pages[idx]
+                for seqIdx in firstIdx...lastIdx {
+                    guard seqIdx < pages.count else { continue }
+                    let page = pages[seqIdx]
                     // Decode page from its source (handles .zipData, .file, .pdf, etc.)
-                    if let buffer = await manager.decodePage(pageIndex: page.id, from: page.source) {
-                        // Page decoded successfully - it's now in the pageManager's ring buffer
+                    // Pass the SEQUENTIAL index as the key — MetalPageManager stores
+                    // decoded pages by sequential index so texture lookups are consistent.
+                    if let buffer = await manager.decodePage(pageIndex: seqIdx, from: page.source) {
                         _ = buffer
                     }
                 }
             }
         }
 
-        /// Render the visible page range. Uploads visible pages synchronously before encoding
-        /// to guarantee textures are in the ring before draw calls fire.
+        /// Render the visible page range. Uses SEQUENTIAL indices throughout —
+        /// sequentialToID translates to page IDs for MetalPageManager lookups
+        /// and pagePositions lookups.
         @MainActor
         func render(visibleRange: ClosedRange<Int>) async {
             guard let metalView = metalView,
@@ -346,18 +392,29 @@ extension MetalPageView {
             renderer.evictOutside(visibleRange)
 
             // Synchronously upload visible pages — needed for the current frame
-            for pageIndex in visibleRange {
-                if let buffer = await pageManager.page(for: pageIndex) {
-                    if renderer.texture(for: pageIndex) == nil {
-                        _ = renderer.upload(pixelBuffer: buffer, for: pageIndex)
+            for seqIdx in visibleRange {
+                guard seqIdx < pages.count else { continue }
+                if let buffer = await pageManager.page(for: seqIdx) {
+                    if renderer.texture(for: seqIdx) == nil {
+                        _ = renderer.upload(pixelBuffer: buffer, for: seqIdx)
                     }
+                }
+            }
+
+            // Build page positions for this render pass using SEQUENTIAL indices
+            var renderPositions: [Int: CGRect] = [:]
+            for seqIdx in visibleRange {
+                guard seqIdx < pages.count else { continue }
+                let pageID = pages[seqIdx].id
+                if let rect = pagePositions[pageID] {
+                    renderPositions[seqIdx] = rect
                 }
             }
 
             renderer.render(
                 viewport: metalView.bounds,
                 visibleRange: visibleRange,
-                pagePositions: pagePositions,
+                pagePositions: renderPositions,
                 renderPassDescriptor: renderPassDescriptor,
                 commandBuffer: commandBuffer
             )
@@ -372,6 +429,8 @@ extension MetalPageView {
 
         @objc func magnificationDidChange(_ notification: Notification) {
             guard let sv = scrollView else { return }
+            lastScale = sv.magnification
+            scale = sv.magnification
             onMagnificationChanged?(sv.magnification)
         }
     }
