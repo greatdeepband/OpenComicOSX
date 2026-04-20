@@ -174,6 +174,9 @@ extension MetalPageView {
         /// Cumulative Y-offset table for binary search (sequential index → Y).
         var pageYOffsets: [CGFloat] = []
 
+        /// Spreads map for vertical-double mode: left sequential index → SpreadInfo.
+        var spreads: [Int: SpreadInfo] = [:]
+
         var lastContainerWidth: CGFloat = 0
         var lastPagesPerRow: Int = 0
 
@@ -203,6 +206,7 @@ extension MetalPageView {
 
             pagePositions.removeAll()
             pageYOffsets.removeAll()
+            spreads.removeAll()
 
             // Build sequential index → page ID map
             sequentialToID = pages.map { $0.id }
@@ -250,16 +254,27 @@ extension MetalPageView {
                         // Record Y for left page (sequential index i)
                         pageYOffsets.append(y)
 
+                        let leftSeqIdx = i // capture before potential increment
+
                         var rightH: CGFloat = leftH
+                        var rightRect: CGRect?
+                        var rightSeqIdx: Int?
                         if i + 1 < pages.count && !pages[i + 1].isSpread {
                             let rightPage = pages[i + 1]
                             let rightAR = rightPage.naturalSize.height / max(rightPage.naturalSize.width, 1)
                             rightH = pageWidth * rightAR
-                            let rightRect = CGRect(x: pageWidth + 2, y: y, width: pageWidth, height: rightH)
+                            rightRect = CGRect(x: pageWidth + 2, y: y, width: pageWidth, height: rightH)
                             pagePositions[rightPage.id] = rightRect
+                            rightSeqIdx = i + 1
                             i += 2
                         } else {
                             i += 1
+                        }
+
+                        // Build spread info for the renderer
+                        let spreadRect = CGRect(x: 0, y: y, width: totalWidth, height: max(leftH, rightH))
+                        if let rSeq = rightSeqIdx, let _ = rightRect {
+                            spreads[leftSeqIdx] = SpreadInfo(rightIndex: rSeq, rect: spreadRect)
                         }
 
                         // Advance Y by the max of the two page heights plus spacing
@@ -267,6 +282,9 @@ extension MetalPageView {
                     }
                 }
             }
+
+            // Push spreads to renderer so it can manage spread textures
+            renderer?.setSpreads(spreads)
 
             let totalHeight = y
             metalView.frame = CGRect(x: 0, y: 0, width: totalWidth, height: totalHeight)
@@ -401,6 +419,22 @@ extension MetalPageView {
                 }
             }
 
+            // For vertical-double mode: compose spread textures from paired pages
+            if pagesPerRow == 2 {
+                for leftIdx in visibleRange {
+                    guard let spread = spreads[leftIdx] else { continue }
+                    let leftRect = pagePositions[pages[leftIdx].id] ?? .zero
+                    let rightRect = pagePositions[pages[spread.rightIndex].id] ?? .zero
+                    _ = renderer.composeSpread(
+                        leftIndex: leftIdx,
+                        rightIndex: spread.rightIndex,
+                        leftRect: leftRect,
+                        rightRect: rightRect,
+                        commandBuffer: commandBuffer
+                    )
+                }
+            }
+
             // Build page positions for this render pass using SEQUENTIAL indices
             var renderPositions: [Int: CGRect] = [:]
             for seqIdx in visibleRange {
@@ -416,7 +450,8 @@ extension MetalPageView {
                 visibleRange: visibleRange,
                 pagePositions: renderPositions,
                 renderPassDescriptor: renderPassDescriptor,
-                commandBuffer: commandBuffer
+                commandBuffer: commandBuffer,
+                spreads: pagesPerRow == 2 ? spreads : [:]
             )
 
             commandBuffer.present(drawable)
