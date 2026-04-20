@@ -16,6 +16,16 @@
 
 **Remaining work (Phase 2+):** spread texture composition for vertical-double, loupe magnifier, memory profiling, deletion of old reader code.
 
+### v0.3.1 — 2026-04-20 (continued)
+
+**Task 2 — CBZ decode pipeline:**
+- `decodePage` now uses `ZIPFoundation.Archive` to extract the correct entry bytes from `.zipData`, then decodes via `CGImageSource`
+- `MetalPageRenderer` added `MTLRenderPipelineState` — loads shaders from default library, sets pipeline on encoder
+- `triggerPrefetch` now passes `PageSource` enum directly to `decodePage`
+
+**Race condition fixed:**
+- `render(visibleRange:)` is now `@MainActor async` — uploads visible pages synchronously before encoding, eliminating the race where background `Task` uploads raced with `commandBuffer.commit()`
+
 ---
 
 ## v0.3.0 — 2026-04-17
