@@ -121,13 +121,27 @@ struct ReaderView: View {
     @ViewBuilder
     private func verticalScrollView(containerSize: CGSize, pagesPerRow: Int) -> some View {
         ZStack {
-            VerticalComicScrollView(
+            /* OLD: VerticalComicScrollView(
                 pages: vm.comic.pages,
                 pagesPerRow: pagesPerRow,
                 scale: vm.scale,
                 containerWidth: containerSize.width,
                 restoreOffset: vm.savedScrollOffset,
                 restorePage: vm.currentPage,
+                imageCache: vm.imageCache,
+                onPageChanged: { page in vm.updateCurrentPage(page) },
+                onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction },
+                onMagnificationChanged: { newScale in
+                    vm.setScaleFromScrollView(newScale)
+                }
+            ) */
+            MetalPageView(
+                pages: vm.comic.pages,
+                pagesPerRow: pagesPerRow,
+                scale: vm.scale,
+                containerWidth: containerSize.width,
+                restorePage: vm.currentPage,
+                restoreOffset: vm.savedScrollOffset,
                 imageCache: vm.imageCache,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
                 onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction },
