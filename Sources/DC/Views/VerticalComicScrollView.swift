@@ -1,4 +1,9 @@
+// DISABLED — replaced by MetalPageView (Metal GPU reader)
+// @main enum App { static func main() { NSApplication.shared.run() } }
+
 import SwiftUI
+
+/* DISABLED — replaced by MetalPageView
 
 // MARK: - Flipped NSStackView (top-left origin, like UIKit)
 
@@ -796,4 +801,6 @@ struct VerticalComicScrollView: NSViewRepresentable {
         }
     }
 }
+
+/* DISABLED — replaced by MetalPageView */
 
