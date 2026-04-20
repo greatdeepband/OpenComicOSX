@@ -2,6 +2,52 @@ import Metal
 import MetalKit
 import CoreVideo
 
+// MARK: - TextureRingBuffer
+
+/// Thread-unsafe LRU texture ring buffer with a fixed capacity.
+struct TextureRingBuffer {
+    private var entries: [Int: (texture: MTLTexture, lastAccess: Date)] = [:]
+    private let maxSize: Int
+
+    init(maxSize: Int = 10) {
+        self.maxSize = maxSize
+    }
+
+    // MARK: - Mutating API
+
+    /// Insert or replace a texture for the given page index.
+    /// Evicts the least-recently-used entry if at capacity.
+    mutating func insert(_ texture: MTLTexture, for pageIndex: Int) {
+        if entries.count >= maxSize {
+            let lruKey = entries.min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key
+            if let key = lruKey { entries.removeValue(forKey: key) }
+        }
+        entries[pageIndex] = (texture, Date())
+    }
+
+    /// Touch the entry for `pageIndex`, updating its last-access time.
+    /// Returns the texture if found.
+    mutating func touch(pageIndex: Int) -> MTLTexture? {
+        guard var entry = entries[pageIndex] else { return nil }
+        entry.lastAccess = Date()
+        entries[pageIndex] = entry
+        return entry.texture
+    }
+
+    /// Evict all entries outside the given range.
+    mutating func evictOutside(_ range: ClosedRange<Int>) {
+        entries = entries.filter { range.contains($0.key) }
+    }
+
+    // MARK: - Non-mutating subscript
+
+    subscript(pageIndex: Int) -> MTLTexture? {
+        entries[pageIndex]?.texture
+    }
+}
+
+// MARK: - MetalPageRenderer
+
 /// Metal device, command queue, and texture ring buffer.
 /// Handles CVPixelBuffer → MTLTexture upload and GPU render encoding.
 final class MetalPageRenderer {
@@ -10,8 +56,7 @@ final class MetalPageRenderer {
     let textureCache: CVMetalTextureCache
     let pipelineState: MTLRenderPipelineState
 
-    private var textureRing: [Int: (texture: MTLTexture, lastAccess: Date)] = [:]
-    private let maxCachedPages = 10
+    private var textureRing = TextureRingBuffer(maxSize: 10)
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -60,25 +105,18 @@ final class MetalPageRenderer {
         }
 
         // Ring buffer: evict LRU if at capacity
-        if textureRing.count >= maxCachedPages {
-            let lru = textureRing.min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key
-            if let key = lru { textureRing.removeValue(forKey: key) }
-        }
-        textureRing[pageIndex] = (texture, Date())
+        textureRing.insert(texture, for: pageIndex)
         return texture
     }
 
     /// Returns the texture for a cached page, updating its last-access time.
     func texture(for pageIndex: Int) -> MTLTexture? {
-        guard var entry = textureRing[pageIndex] else { return nil }
-        entry.lastAccess = Date()
-        textureRing[pageIndex] = entry
-        return entry.texture
+        return textureRing.touch(pageIndex: pageIndex)
     }
 
     /// Evict all textures outside the given page range.
     func evictOutside(_ range: ClosedRange<Int>) {
-        textureRing = textureRing.filter { range.contains($0.key) }
+        textureRing.evictOutside(range)
     }
 
     /// Encode a render pass for the given viewport and page positions.
@@ -103,7 +141,7 @@ final class MetalPageRenderer {
         // Simple passthrough vertex/fragment shaders (see Shaders.metal)
         // Quad vertices: two triangles covering each page rect
         for pageIndex in visibleRange {
-            guard let texture = textureRing[pageIndex]?.texture,
+            guard let texture = textureRing[pageIndex],
                   let rect = pagePositions[pageIndex] else { continue }
 
             encoder.setFragmentTexture(texture, index: 0)
