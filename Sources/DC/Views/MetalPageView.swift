@@ -1,5 +1,136 @@
 import SwiftUI
 import AppKit
+import Metal
+
+// MARK: - MetalLoupeOverlayView
+
+/// A transparent NSView that sits as a sibling of the NSScrollView inside the
+/// NSViewRepresentable's host view. It captures right-click events across the
+/// entire scroll area and fires loupe update callbacks.
+final class MetalLoupeOverlayView: NSView {
+    /// Called with (document-space point, overlay-space cursor point)
+    var onLoupeUpdate: ((CGPoint, CGPoint) -> Void)?
+    var onLoupeEnd: (() -> Void)?
+
+    weak var scrollView: NSScrollView?
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        return bounds.contains(convert(point, from: superview)) ? self : nil
+    }
+    override var acceptsFirstResponder: Bool { false }
+
+    override func rightMouseDown(with event: NSEvent) {
+        NSCursor.hide()
+        postLoupe(event: event)
+    }
+    override func rightMouseDragged(with event: NSEvent) {
+        postLoupe(event: event)
+    }
+    override func rightMouseUp(with event: NSEvent) {
+        NSCursor.unhide()
+        onLoupeEnd?()
+    }
+
+    private func postLoupe(event: NSEvent) {
+        guard let sv = scrollView else { return }
+
+        let overlayPt = convert(event.locationInWindow, from: nil)
+        let scrollOffset = sv.contentView.bounds.origin
+        // Document-space point (accounts for scroll position)
+        let docPt = CGPoint(
+            x: overlayPt.x + scrollOffset.x,
+            y: overlayPt.y + scrollOffset.y
+        )
+
+        // Also pass the overlay-space cursor position for loupe window placement
+        let cursorPt = CGPoint(x: overlayPt.x, y: overlayPt.y)
+        onLoupeUpdate?(docPt, cursorPt)
+    }
+}
+
+// MARK: - LoupeMetalView
+
+/// NSView subclass that owns a CAMetalLayer and renders the loupe texture
+/// via a blit encoder in draw().
+final class LoupeMetalView: NSView {
+    var loupeTexture: MTLTexture?
+    var loupeSize: CGSize = .zero
+
+    private let metalLayer = CAMetalLayer()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        metalLayer.device = MTLCreateSystemDefaultDevice()
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = false
+        metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        wantsLayer = true
+        layer = metalLayer
+    }
+
+    override func layout() {
+        super.layout()
+        metalLayer.drawableSize = CGSize(
+            width: bounds.width * (NSScreen.main?.backingScaleFactor ?? 2.0),
+            height: bounds.height * (NSScreen.main?.backingScaleFactor ?? 2.0)
+        )
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let texture = loupeTexture,
+              let drawable = metalLayer.nextDrawable(),
+              let device = metalLayer.device,
+              let commandQueue = device.makeCommandQueue(),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
+
+        blitEncoder.copy(
+            from: texture,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
+            to: drawable.texture,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        blitEncoder.endEncoding()
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+    }
+}
+
+// MARK: - MetalLoupeView
+
+/// SwiftUI wrapper around LoupeMetalView — renders the 2× magnified loupe
+/// texture produced by MetalPageRenderer.renderLoupe().
+struct MetalLoupeView: NSViewRepresentable {
+    let loupeTexture: MTLTexture?
+    let loupeSize: CGSize
+
+    func makeNSView(context: Context) -> LoupeMetalView {
+        LoupeMetalView()
+    }
+
+    func updateNSView(_ nsView: LoupeMetalView, context: Context) {
+        nsView.loupeTexture = loupeTexture
+        nsView.loupeSize = loupeSize
+        nsView.setBoundsSize(loupeSize)
+        nsView.needsDisplay = true
+    }
+}
+
+// MARK: - MetalPageView
 
 /// Metal-backed reader view using NSScrollView for scroll math
 /// and CAMetalLayer for GPU rendering. Replaces the NSStackView
@@ -55,7 +186,6 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.pagesPerRow = pagesPerRow
         context.coordinator.containerWidth = containerWidth
         context.coordinator.scale = scale
-        // Initialize lastScale to current scale so first updateNSView doesn't trigger scale sync
         context.coordinator.lastScale = scale
 
         scrollView.documentView = metalView
@@ -90,6 +220,11 @@ struct MetalPageView: NSViewRepresentable {
             }
         }
 
+        // Add loupe overlay as sibling of scroll view
+        DispatchQueue.main.async {
+            self.addLoupeOverlay(to: scrollView, context: context)
+        }
+
         return scrollView
     }
 
@@ -118,6 +253,28 @@ struct MetalPageView: NSViewRepresentable {
         }
 
         context.coordinator.updateVisibleRange()
+    }
+
+    // MARK: - Loupe overlay
+
+    private func addLoupeOverlay(to scrollView: NSScrollView, context: Context) {
+        guard context.coordinator.loupeOverlay == nil else { return }
+
+        let overlay = MetalLoupeOverlayView()
+        overlay.frame = scrollView.bounds
+        overlay.autoresizingMask = [.width, .height]
+        overlay.scrollView = scrollView
+
+        let coordinator = context.coordinator
+        overlay.onLoupeUpdate = { [weak coordinator] docPt, cursorPt in
+            coordinator?.showLoupe(docPt: docPt, cursorOverlayPt: cursorPt)
+        }
+        overlay.onLoupeEnd = { [weak coordinator] in
+            coordinator?.hideLoupe()
+        }
+
+        scrollView.superview?.addSubview(overlay)
+        context.coordinator.loupeOverlay = overlay
     }
 }
 
@@ -162,16 +319,12 @@ extension MetalPageView {
         var pagesPerRow: Int = 1
         var containerWidth: CGFloat = 0
         var scale: CGFloat = 1.0
-        /// Tracks the last scale we synced TO the NSScrollView to avoid feedback loops.
         var lastScale: CGFloat = 1.0
 
-        /// Maps sequential index → page id (stable across rebuilds).
         var sequentialToID: [Int] = []
-        /// Maps page id → sequential index.
         var idToSequential: [Int: Int] = [:]
 
         var pagePositions: [Int: CGRect] = [:]
-        /// Cumulative Y-offset table for binary search (sequential index → Y).
         var pageYOffsets: [CGFloat] = []
 
         /// Spreads map for vertical-double mode: left sequential index → SpreadInfo.
@@ -183,6 +336,14 @@ extension MetalPageView {
         var onPageChanged: (Int) -> Void = { _ in }
         var onOffsetChanged: (Double) -> Void = { _ in }
         var onMagnificationChanged: ((CGFloat) -> Void)?
+
+        // MARK: - Loupe state
+        var loupeOverlay: MetalLoupeOverlayView?
+        var loupeHostingView: NSHostingView<AnyView>?
+        @objc dynamic var loupeTexture: MTLTexture?
+        @objc dynamic var loupeSize: CGSize = .zero
+        private let loupeRadius: CGFloat = 270
+        private let loupeMagnification: CGFloat = 2.0
 
         init(
             onPageChanged: @escaping (Int) -> Void,
@@ -199,8 +360,6 @@ extension MetalPageView {
                 || lastPagesPerRow != pagesPerRow
         }
 
-        /// Rebuilds the layout from scratch: recomputes all position tables and
-        /// rebuilds the sequential↔pageID mapping to match the current pages array.
         func rebuildLayout() {
             guard let metalView = metalView else { return }
 
@@ -208,7 +367,6 @@ extension MetalPageView {
             pageYOffsets.removeAll()
             spreads.removeAll()
 
-            // Build sequential index → page ID map
             sequentialToID = pages.map { $0.id }
             idToSequential.removeAll()
             for (seqIdx, pageID) in sequentialToID.enumerated() {
@@ -229,13 +387,11 @@ extension MetalPageView {
                     y += h + 4
                 }
             } else {
-                // Vertical double: pair pages side by side
                 var i = 0
                 while i < pages.count {
                     let page = pages[i]
 
                     if page.isSpread {
-                        // Full-width spread: occupies its own row
                         let ar = page.naturalSize.height / max(page.naturalSize.width, 1)
                         let h = totalWidth * ar
                         let rect = CGRect(x: 0, y: y, width: totalWidth, height: h)
@@ -244,26 +400,22 @@ extension MetalPageView {
                         y += h + 4
                         i += 1
                     } else {
-                        // Pair: left + right pages in same row at same Y
                         let pageWidth = (totalWidth - 2) / 2
                         let leftAR = page.naturalSize.height / max(page.naturalSize.width, 1)
                         let leftH = pageWidth * leftAR
                         let leftRect = CGRect(x: 0, y: y, width: pageWidth, height: leftH)
                         pagePositions[page.id] = leftRect
-
-                        // Record Y for left page (sequential index i)
                         pageYOffsets.append(y)
 
-                        let leftSeqIdx = i // capture before potential increment
+                        let leftSeqIdx = i
 
                         var rightH: CGFloat = leftH
-                        var rightRect: CGRect?
                         var rightSeqIdx: Int?
                         if i + 1 < pages.count && !pages[i + 1].isSpread {
                             let rightPage = pages[i + 1]
                             let rightAR = rightPage.naturalSize.height / max(rightPage.naturalSize.width, 1)
                             rightH = pageWidth * rightAR
-                            rightRect = CGRect(x: pageWidth + 2, y: y, width: pageWidth, height: rightH)
+                            let rightRect = CGRect(x: pageWidth + 2, y: y, width: pageWidth, height: rightH)
                             pagePositions[rightPage.id] = rightRect
                             rightSeqIdx = i + 1
                             i += 2
@@ -271,19 +423,16 @@ extension MetalPageView {
                             i += 1
                         }
 
-                        // Build spread info for the renderer
                         let spreadRect = CGRect(x: 0, y: y, width: totalWidth, height: max(leftH, rightH))
-                        if let rSeq = rightSeqIdx, let _ = rightRect {
+                        if let rSeq = rightSeqIdx {
                             spreads[leftSeqIdx] = SpreadInfo(rightIndex: rSeq, rect: spreadRect)
                         }
 
-                        // Advance Y by the max of the two page heights plus spacing
                         y += max(leftH, rightH) + 4
                     }
                 }
             }
 
-            // Push spreads to renderer so it can manage spread textures
             renderer?.setSpreads(spreads)
 
             let totalHeight = y
@@ -294,7 +443,6 @@ extension MetalPageView {
             metalView.needsDisplay = true
         }
 
-        /// Restores scroll position by page index (sequential index).
         func scrollToPage(_ page: Int) {
             guard let sv = scrollView, let doc = sv.documentView else { return }
             guard page >= 0 && page < pageYOffsets.count else { return }
@@ -304,7 +452,6 @@ extension MetalPageView {
             updateVisibleRange()
         }
 
-        /// Restores scroll position by fractional offset (0.0–1.0).
         func scrollToFraction(_ fraction: Double) {
             guard let sv = scrollView, let doc = sv.documentView else { return }
             let maxY = doc.bounds.height - sv.contentView.bounds.height
@@ -313,21 +460,6 @@ extension MetalPageView {
             doc.scroll(CGPoint(x: 0, y: targetY))
             sv.reflectScrolledClipView(sv.contentView)
             updateVisibleRange()
-        }
-
-        /// Finds the sequential page index at the center of the viewport.
-        private func sequentialIndexAtCenter() -> Int {
-            guard let sv = scrollView else { return 0 }
-            let currentY = sv.contentView.bounds.origin.y
-            let visH = sv.contentView.bounds.height
-            let centerY = currentY + visH / 2
-
-            var lo = 0, hi = pageYOffsets.count - 1
-            while lo < hi {
-                let mid = (lo + hi + 1) / 2
-                if pageYOffsets[mid] <= centerY { lo = mid } else { hi = mid - 1 }
-            }
-            return lo
         }
 
         func updateVisibleRange() {
@@ -341,7 +473,6 @@ extension MetalPageView {
             let currentY = sv.contentView.bounds.origin.y
             let bottomY = currentY + visH
 
-            // Binary search for first visible page (sequential index)
             var lo = 0, hi = pageYOffsets.count - 1
             while lo < hi {
                 let mid = (lo + hi + 1) / 2
@@ -349,7 +480,6 @@ extension MetalPageView {
             }
             let firstVisible = lo
 
-            // Binary search for last visible page
             var lo2 = firstVisible, hi2 = pageYOffsets.count - 1
             while lo2 < hi2 {
                 let mid = (lo2 + hi2 + 1) / 2
@@ -359,8 +489,6 @@ extension MetalPageView {
 
             let visibleRange = firstVisible...lastVisible
 
-            // Report page to ViewModel using SEQUENTIAL index (not page ID)
-            // The ViewModel.currentPage is also a sequential index.
             onPageChanged(firstVisible)
             triggerPrefetch(first: firstVisible, last: lastVisible)
 
@@ -379,9 +507,6 @@ extension MetalPageView {
                 for seqIdx in firstIdx...lastIdx {
                     guard seqIdx < pages.count else { continue }
                     let page = pages[seqIdx]
-                    // Decode page from its source (handles .zipData, .file, .pdf, etc.)
-                    // Pass the SEQUENTIAL index as the key — MetalPageManager stores
-                    // decoded pages by sequential index so texture lookups are consistent.
                     if let buffer = await manager.decodePage(pageIndex: seqIdx, from: page.source) {
                         _ = buffer
                     }
@@ -389,9 +514,6 @@ extension MetalPageView {
             }
         }
 
-        /// Render the visible page range. Uses SEQUENTIAL indices throughout —
-        /// sequentialToID translates to page IDs for MetalPageManager lookups
-        /// and pagePositions lookups.
         @MainActor
         func render(visibleRange: ClosedRange<Int>) async {
             guard let metalView = metalView,
@@ -406,10 +528,8 @@ extension MetalPageView {
             renderPassDescriptor.colorAttachments[0].storeAction = .store
             renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
 
-            // Evict textures outside visible range first
             renderer.evictOutside(visibleRange)
 
-            // Synchronously upload visible pages — needed for the current frame
             for seqIdx in visibleRange {
                 guard seqIdx < pages.count else { continue }
                 if let buffer = await pageManager.page(for: seqIdx) {
@@ -419,7 +539,6 @@ extension MetalPageView {
                 }
             }
 
-            // For vertical-double mode: compose spread textures from paired pages
             if pagesPerRow == 2 {
                 for leftIdx in visibleRange {
                     guard let spread = spreads[leftIdx] else { continue }
@@ -435,7 +554,6 @@ extension MetalPageView {
                 }
             }
 
-            // Build page positions for this render pass using SEQUENTIAL indices
             var renderPositions: [Int: CGRect] = [:]
             for seqIdx in visibleRange {
                 guard seqIdx < pages.count else { continue }
@@ -467,6 +585,108 @@ extension MetalPageView {
             lastScale = sv.magnification
             scale = sv.magnification
             onMagnificationChanged?(sv.magnification)
+        }
+
+        // MARK: - Loupe
+
+        /// Shows or updates the loupe at the given document-space point and
+        /// overlay-space cursor position.
+        func showLoupe(docPt: CGPoint, cursorOverlayPt: CGPoint) {
+            guard let renderer = renderer else { return }
+
+            // Find which page this point falls in
+            let seqIdx = findSequentialIndex(at: docPt)
+            guard seqIdx >= 0, seqIdx < pages.count else { return }
+
+            // Get the texture for this page (check spread first in double mode)
+            var texture: MTLTexture?
+            if pagesPerRow == 2, let spread = spreads[seqIdx] {
+                texture = renderer.spreadTexture(for: seqIdx) ?? renderer.texture(for: seqIdx)
+                    ?? renderer.texture(for: spread.rightIndex)
+            } else {
+                texture = renderer.texture(for: seqIdx)
+            }
+
+            guard let srcTexture = texture else { return }
+
+            // Compute page rect in document space
+            let pageID = sequentialToID[seqIdx]
+            guard let pageRect = pagePositions[pageID] else { return }
+
+            // Normalised cursor position within the page (0-1, bottom-left origin)
+            let cursorNormX = (docPt.x - pageRect.minX) / pageRect.width
+            let cursorNormY = (docPt.y - pageRect.minY) / pageRect.height
+
+            // Cursor in image (pixel) space — use texture dimensions
+            let cursorTexX = cursorNormX
+            let cursorTexY = cursorNormY
+
+            let loupePx = loupeRadius
+            let loupeDisplaySize = CGSize(width: loupePx * 2, height: loupePx * 2)
+
+            // Render the loupe texture
+            guard let commandBuffer = renderer.commandQueue.makeCommandBuffer() else { return }
+            let loupeTex = renderer.renderLoupe(
+                srcTexture: srcTexture,
+                cursorTexCoord: CGPoint(x: cursorTexX, y: cursorTexY),
+                loupeRadiusPx: loupeRadius / CGFloat(loupeMagnification),
+                targetSize: loupeDisplaySize,
+                commandBuffer: commandBuffer
+            )
+            commandBuffer.commit()
+
+            guard let resultTex = loupeTex else { return }
+
+            // Build the SwiftUI loupe view
+            let loupeView = MetalLoupeView(
+                loupeTexture: resultTex,
+                loupeSize: loupeDisplaySize
+            )
+
+            let frame = NSRect(
+                x: cursorOverlayPt.x - loupePx,
+                y: cursorOverlayPt.y - loupePx,
+                width: loupePx * 2,
+                height: loupePx * 2
+            )
+
+            if let hv = loupeHostingView {
+                hv.rootView = AnyView(loupeView)
+                hv.frame = frame
+            } else if let overlay = loupeOverlay {
+                let hv = NSHostingView(rootView: AnyView(loupeView))
+                hv.frame = frame
+                overlay.addSubview(hv)
+                loupeHostingView = hv
+            }
+        }
+
+        func hideLoupe() {
+            loupeHostingView?.removeFromSuperview()
+            loupeHostingView = nil
+        }
+
+        /// Binary search: finds the sequential index whose page rect contains `docPt.y`.
+        /// Returns -1 if not found.
+        private func findSequentialIndex(at docPt: CGPoint) -> Int {
+            guard !pageYOffsets.isEmpty else { return -1 }
+
+            var lo = 0, hi = pageYOffsets.count - 1
+            while lo < hi {
+                let mid = (lo + hi + 1) / 2
+                if pageYOffsets[mid] <= docPt.y { lo = mid } else { hi = mid - 1 }
+            }
+
+            let idx = lo
+            let pageID = sequentialToID[idx]
+            guard let rect = pagePositions[pageID] else { return -1 }
+
+            // Check if point is within the horizontal bounds of this page
+            if docPt.x >= rect.minX && docPt.x <= rect.maxX &&
+               docPt.y >= rect.minY && docPt.y <= rect.maxY {
+                return idx
+            }
+            return -1
         }
     }
 }

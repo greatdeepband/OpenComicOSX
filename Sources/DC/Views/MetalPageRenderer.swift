@@ -75,6 +75,9 @@ final class MetalPageRenderer {
     /// Compute pipeline used to blit two page textures into a spread texture.
     private var blitPipeline: MTLComputePipelineState?
 
+    /// Compute pipeline for the 2× loupe magnifier kernel.
+    private(set) var loupePipeline: MTLComputePipelineState?
+
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
               let commandQueue = device.makeCommandQueue() else { return nil }
@@ -112,6 +115,15 @@ final class MetalPageRenderer {
                 // Non-fatal — spread composition will fall back to individual rendering
             }
         }
+
+        // Create the loupe compute pipeline
+        if let loupeFunc = library.makeFunction(name: "loupeKernel") {
+            do {
+                loupePipeline = try device.makeComputePipelineState(function: loupeFunc)
+            } catch {
+                // Non-fatal — loupe will be skipped gracefully
+            }
+        }
     }
 
     /// Upload a CVPixelBuffer to a MTLTexture and store in the ring buffer.
@@ -145,6 +157,11 @@ final class MetalPageRenderer {
         textureRing.evictOutside(range)
         // Evict spread textures whose left page is outside the range
         spreadTextures = spreadTextures.filter { range.contains($0.key) }
+    }
+
+    /// Returns the cached spread texture for the given left page index, if any.
+    func spreadTexture(for leftIndex: Int) -> MTLTexture? {
+        return spreadTextures[leftIndex]
     }
 
     /// Sets the spread map for vertical-double mode.
@@ -297,5 +314,57 @@ final class MetalPageRenderer {
         }
 
         encoder.endEncoding()
+    }
+
+    // MARK: - Loupe Rendering
+
+    /// Renders a 2× magnified circular loupe into `drawable`, centred on `cursorTexCoord`
+    /// (normalised 0–1, bottom-left origin) from `srcTexture`.
+    /// Returns the loupe texture, or nil if the pipeline isn't available.
+    func renderLoupe(
+        srcTexture: MTLTexture,
+        cursorTexCoord: CGPoint,
+        loupeRadiusPx: CGFloat,
+        targetSize: CGSize,
+        commandBuffer: MTLCommandBuffer
+    ) -> MTLTexture? {
+        guard let pipeline = loupePipeline else { return nil }
+
+        let width  = Int(targetSize.width)
+        let height = Int(targetSize.height)
+        guard width > 0, height > 0 else { return nil }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: width, height: height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        descriptor.storageMode = .private
+
+        guard let loupeTex = device.makeTexture(descriptor: descriptor) else { return nil }
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(srcTexture, index: 0)
+        encoder.setTexture(loupeTex, index: 1)
+
+        var params: (Float, Float, Float) = (
+            Float(cursorTexCoord.x),
+            Float(cursorTexCoord.y),
+            Float(loupeRadiusPx)
+        )
+        encoder.setBytes(&params, length: MemoryLayout.size(ofValue: params), index: 0)
+
+        let tgSize = MTLSize(width: 16, height: 16, depth: 1)
+        let tgCount = MTLSize(
+            width:  (width  + tgSize.width  - 1) / tgSize.width,
+            height: (height + tgSize.height - 1) / tgSize.height,
+            depth: 1
+        )
+        encoder.dispatchThreadgroups(tgCount, threadsPerThreadgroup: tgSize)
+        encoder.endEncoding()
+
+        return loupeTex
     }
 }
