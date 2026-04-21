@@ -310,6 +310,7 @@ final class MetalCanvasView: NSView {
 // MARK: - Coordinator
 
 extension MetalPageView {
+    @MainActor
     final class Coordinator: NSObject {
         weak var scrollView: NSScrollView?
         weak var metalView: MetalCanvasView?
@@ -492,9 +493,11 @@ extension MetalPageView {
             onPageChanged(firstVisible)
             triggerPrefetch(first: firstVisible, last: lastVisible)
 
-            Task { [weak self] in
-                await self?.render(visibleRange: visibleRange)
-            }
+            // Render synchronously on the main thread. nextDrawable() must be called
+            // from the main thread — using Task { await render() } creates an async
+            // context that can run on a thread-pool thread, causing Metal validation
+            // to abort with SIGABRT.
+            render(visibleRange: visibleRange)
         }
 
         func triggerPrefetch(first: Int, last: Int) {
@@ -508,17 +511,19 @@ extension MetalPageView {
                     guard seqIdx < pages.count else { continue }
                     let page = pages[seqIdx]
                     if let buffer = await manager.decodePage(pageIndex: seqIdx, from: page.source) {
-                        _ = buffer
+                        // Upload to ring buffer — renderer.texture(for:) will return this on next render pass
+                        if renderer?.texture(for: seqIdx) == nil {
+                            _ = renderer?.upload(pixelBuffer: buffer, for: seqIdx)
+                        }
                     }
                 }
             }
         }
 
         @MainActor
-        func render(visibleRange: ClosedRange<Int>) async {
+        func render(visibleRange: ClosedRange<Int>) {
             guard let metalView = metalView,
                   let renderer = renderer,
-                  let pageManager = pageManager,
                   let drawable = metalView.metalLayer.nextDrawable(),
                   let commandBuffer = renderer.commandQueue.makeCommandBuffer() else { return }
 
@@ -530,14 +535,8 @@ extension MetalPageView {
 
             renderer.evictOutside(visibleRange)
 
-            for seqIdx in visibleRange {
-                guard seqIdx < pages.count else { continue }
-                if let buffer = await pageManager.page(for: seqIdx) {
-                    if renderer.texture(for: seqIdx) == nil {
-                        _ = renderer.upload(pixelBuffer: buffer, for: seqIdx)
-                    }
-                }
-            }
+            // Textures are uploaded by triggerPrefetch running in the background.
+            // Here we only compose spreads and render.
 
             if pagesPerRow == 2 {
                 for leftIdx in visibleRange {
