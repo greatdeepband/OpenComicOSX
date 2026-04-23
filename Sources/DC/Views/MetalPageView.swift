@@ -349,6 +349,26 @@ extension MetalPageView {
                 idToSequential[pageID] = seqIdx
             }
 
+            switch layout {
+            case .verticalStack:
+                rebuildVerticalStack()
+            case .singlePage:
+                rebuildSinglePage()
+            case .doubleSpread:
+                rebuildDoubleSpread()
+            }
+
+            lastContainerWidth = containerWidth
+            lastPagesPerRow = pagesPerRow
+
+            metalView.needsDisplay = true
+        }
+
+        /// Stacks every page top-to-bottom at `containerWidth * scale` (for
+        /// `pagesPerRow == 1`) or split side-by-side honoring `.isSpread`
+        /// (for `pagesPerRow == 2`). Matches the pre-step-A behaviour exactly.
+        private func rebuildVerticalStack() {
+            guard let metalView = metalView else { return }
             let totalWidth = pagesPerRow == 1 ? containerWidth * scale : containerWidth
             var y: CGFloat = 0
 
@@ -381,10 +401,6 @@ extension MetalPageView {
                         let leftH = pageWidth * leftAR
                         let leftRect = CGRect(x: 0, y: y, width: pageWidth, height: leftH)
                         pagePositions[page.id] = leftRect
-                        // One pageYOffsets entry per PAGE (not per row). The right
-                        // page shares Y with the left so `scrollToPage` and the
-                        // visible-range binary search behave consistently with
-                        // page indices (matching single-page mode's convention).
                         pageYOffsets.append(y)
 
                         var rightH: CGFloat = leftH
@@ -394,7 +410,7 @@ extension MetalPageView {
                             rightH = pageWidth * rightAR
                             let rightRect = CGRect(x: pageWidth + 2, y: y, width: pageWidth, height: rightH)
                             pagePositions[rightPage.id] = rightRect
-                            pageYOffsets.append(y) // right page: same Y as left
+                            pageYOffsets.append(y)
                             i += 2
                         } else {
                             i += 1
@@ -407,10 +423,38 @@ extension MetalPageView {
 
             let totalHeight = y
             metalView.frame = CGRect(x: 0, y: 0, width: totalWidth, height: totalHeight)
-            lastContainerWidth = containerWidth
-            lastPagesPerRow = pagesPerRow
+        }
 
-            metalView.needsDisplay = true
+        /// One page fits to the viewport width at natural aspect ratio.
+        /// `pagePositions` and `pageYOffsets` contain exactly one entry.
+        /// Document view bounds equal the page rect size.
+        private func rebuildSinglePage() {
+            guard let metalView = metalView else { return }
+            guard currentPage >= 0 && currentPage < pages.count else {
+                metalView.frame = CGRect(x: 0, y: 0, width: max(1, containerWidth), height: 1)
+                return
+            }
+            let page = pages[currentPage]
+            let pageWidth = containerWidth
+            let pageAR = page.naturalSize.height / max(page.naturalSize.width, 1)
+            let pageHeight = pageWidth * pageAR
+
+            let rect = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
+            pagePositions[page.id] = rect
+            pageYOffsets.append(0)
+
+            metalView.frame = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
+        }
+
+        /// Stub for Phase A-2 — Task 6 fills this in. Until then, fall through
+        /// to the vertical-stack branch with `pagesPerRow == 2` as a temporary
+        /// fallback; this keeps the build green if a caller accidentally sets
+        /// `.doubleSpread` during the migration.
+        private func rebuildDoubleSpread() {
+            let savedPagesPerRow = pagesPerRow
+            pagesPerRow = 2
+            rebuildVerticalStack()
+            pagesPerRow = savedPagesPerRow
         }
 
         func scrollToPage(_ page: Int) {
