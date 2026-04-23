@@ -106,24 +106,22 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func singlePageView(containerSize: CGSize) -> some View {
-        let _ = vm.cacheVersion  // creates SwiftUI dependency — re-evaluates when a page decode completes
-        if let image = vm.currentImage {
-            ZoomableImageView(
-                image: image,
-                scale: $vm.scale,
-                offset: $vm.offset,
-                minScale: vm.minScale,
-                maxScale: vm.maxScale
-            )
-            .gesture(TapGesture(count: 2).onEnded {
-                if vm.scale > 1.05 { vm.resetZoom() }
-                else { vm.fitToWidth(containerWidth: containerSize.width) }
-            })
-        } else {
-            ProgressView()
-                .progressViewStyle(.circular)
-                .onAppear { vm.triggerPrefetch() }
-        }
+        MetalPageView(
+            pages: vm.comic.pages,
+            layout: .singlePage,
+            currentPage: vm.currentPage,
+            pagesPerRow: 1,
+            scale: vm.scale,
+            containerWidth: containerSize.width,
+            restorePage: vm.currentPage,
+            restoreOffset: nil,
+            pageManager: vm.pageManager,
+            onPageChanged: { _ in /* single-page does not scroll between pages */ },
+            onOffsetChanged: { _ in /* single-page ignores scroll fraction */ },
+            onMagnificationChanged: { newScale in
+                vm.setScaleFromScrollView(newScale)
+            }
+        )
     }
 
     // MARK: - Double Page
