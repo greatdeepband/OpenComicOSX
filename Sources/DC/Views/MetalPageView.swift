@@ -123,14 +123,20 @@ struct MetalPageView: NSViewRepresentable {
         let needsRebuild = context.coordinator.needsRebuild(
             containerWidth: containerWidth,
             pagesPerRow: pagesPerRow,
-            pages: pages
+            pages: pages,
+            layout: layout,
+            currentPage: currentPage
         )
 
         if needsRebuild {
             context.coordinator.pages = pages
             context.coordinator.pagesPerRow = pagesPerRow
             context.coordinator.containerWidth = containerWidth
+            context.coordinator.layout = layout
+            context.coordinator.currentPage = currentPage
             context.coordinator.rebuildLayout()
+            context.coordinator.lastLayout = layout
+            context.coordinator.lastCurrentPage = currentPage
         }
 
         if abs(context.coordinator.lastScale - scale) > 0.001 {
@@ -262,6 +268,10 @@ extension MetalPageView {
 
         var lastContainerWidth: CGFloat = 0
         var lastPagesPerRow: Int = 0
+        var layout: ReadingLayout = .verticalStack(pagesPerRow: 1)
+        var currentPage: Int = 0
+        var lastLayout: ReadingLayout = .verticalStack(pagesPerRow: 1)
+        var lastCurrentPage: Int = -1
 
         var onPageChanged: (Int) -> Void = { _ in }
         var onOffsetChanged: (Double) -> Void = { _ in }
@@ -312,9 +322,19 @@ extension MetalPageView {
             if cursorHidden { NSCursor.unhide() }
         }
 
-        func needsRebuild(containerWidth: CGFloat, pagesPerRow: Int, pages: [ComicPage]) -> Bool {
-            return abs(lastContainerWidth - containerWidth) > 1
-                || lastPagesPerRow != pagesPerRow
+        func needsRebuild(containerWidth: CGFloat, pagesPerRow: Int, pages: [ComicPage], layout: ReadingLayout, currentPage: Int) -> Bool {
+            if abs(lastContainerWidth - containerWidth) > 1 { return true }
+            if lastPagesPerRow != pagesPerRow { return true }
+            if lastLayout != layout { return true }
+            // For non-vertical layouts, a page-turn requires a layout rebuild
+            // because pagePositions / pageYOffsets must reflect the new page.
+            switch layout {
+            case .singlePage, .doubleSpread:
+                if lastCurrentPage != currentPage { return true }
+            case .verticalStack:
+                break
+            }
+            return false
         }
 
         func rebuildLayout() {
