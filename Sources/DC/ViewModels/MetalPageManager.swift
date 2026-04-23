@@ -16,6 +16,12 @@ actor MetalPageManager {
     private var lastAccessTimes: [Int: Date] = [:]
     private let maxCachedPages = 10
 
+    /// Prefetch-window shape: how many pages behind and ahead of centre to
+    /// decode. Matches the old `PageImageCache` window so the user-visible
+    /// prefetch radius is unchanged.
+    private let lookBehind = 1
+    private let lookAhead  = 3
+
     /// Parallel NSImage cache derived from `decodedPages`. Populated lazily
     /// after each decode. Actor-state is the CVPixelBuffer dict; this is a
     /// nonisolated NSCache read from any context (SwiftUI render paths).
@@ -26,6 +32,11 @@ actor MetalPageManager {
         cache.countLimit = 10
         return cache
     }()
+
+    /// Fires on the main actor after a decode-and-convert completes during
+    /// `prefetch(around:pages:)`. Consumers (e.g. `ReaderViewModel`) use this
+    /// to bump a `@Published` SwiftUI counter so the reader re-renders.
+    nonisolated(unsafe) var onPageReadyNSImage: ((Int, NSImage) -> Void)?
 
     /// Decode a single page from a PageSource into a BGRA CVPixelBuffer.
     /// Returns nil if decoding fails. Caches successful results and evicts
@@ -84,6 +95,37 @@ actor MetalPageManager {
 
     func isPending(_ pageIndex: Int) -> Bool {
         pendingPages.contains(pageIndex)
+    }
+
+    /// Fire-and-forget prefetch for `[center - lookBehind … center + lookAhead]`.
+    /// Safe to call from any context. Evicts anything outside the window
+    /// after scheduling.
+    nonisolated func prefetch(around center: Int, pages: [ComicPage]) {
+        Task { [weak self] in
+            await self?._prefetchAround(center: center, pages: pages)
+        }
+    }
+
+    private func _prefetchAround(center: Int, pages: [ComicPage]) async {
+        let lo = max(0, center - lookBehind)
+        let hi = min(pages.count - 1, center + lookAhead)
+        guard lo <= hi else { return }
+        let window = lo...hi
+
+        evictOutside(window)
+
+        for i in window {
+            if decodedPages[i] != nil { continue }
+            if pendingPages.contains(i) { continue }
+            let source = pages[i].source
+            guard let buffer = await decodePage(pageIndex: i, from: source),
+                  let image  = nsImage(for: i) else { continue }
+            _ = buffer  // buffer retained by decodedPages via store(); this ref keeps ARC honest
+
+            if let cb = onPageReadyNSImage {
+                await MainActor.run { cb(i, image) }
+            }
+        }
     }
 
     // MARK: - Per-source decoders
