@@ -14,7 +14,7 @@ struct MetalPageView: NSViewRepresentable {
     let containerWidth: CGFloat
     let restorePage: Int?
     let restoreOffset: Double?
-    weak var imageCache: PageImageCache?
+    let pageManager: MetalPageManager
 
     var onPageChanged: (Int) -> Void
     var onOffsetChanged: (Double) -> Void
@@ -48,13 +48,10 @@ struct MetalPageView: NSViewRepresentable {
             fatalError("Metal is not available on this device")
         }
 
-        let manager = MetalPageManager()
-
         context.coordinator.scrollView = scrollView
         context.coordinator.metalView = metalView
         context.coordinator.renderer = renderer
-        context.coordinator.pageManager = manager
-        context.coordinator.imageCache = imageCache
+        context.coordinator.pageManager = pageManager
         context.coordinator.pages = pages
         context.coordinator.pagesPerRow = pagesPerRow
         context.coordinator.containerWidth = containerWidth
@@ -255,7 +252,6 @@ extension MetalPageView {
         var onMagnificationChanged: ((CGFloat) -> Void)?
 
         // MARK: - Loupe state
-        weak var imageCache: PageImageCache?
         /// Hosts the MagnifierView inside a borderless child NSPanel.
         /// Using a panel (rather than a subview of window.contentView) avoids
         /// having SwiftUI's WindowGroup-managed hosting view clobber the
@@ -691,7 +687,7 @@ extension MetalPageView {
                 return
             }
 
-            if let img = imageCache?.image(for: seqIdx) {
+            if let img = pageManager?.nsImage(for: seqIdx) {
                 loupeImage = (seqIdx, img)
                 showMagnifier(image: img,
                               page: seqIdx,

@@ -20,7 +20,7 @@ actor PageImageCache {
     /// Actor-isolated — access is serialized by the actor.
     private var inFlight = Set<Int>()
 
-    /// Primary callback — used by VerticalComicScrollView coordinator for direct NSView injection.
+    /// Primary callback — used by MetalPageView coordinator for direct NSView injection.
     /// Marked nonisolated(unsafe) so it can be set from @MainActor and called from
     /// MainActor.run blocks without cross-actor isolation errors.
     nonisolated(unsafe) var onPageReady: ((Int, NSImage) -> Void)?
@@ -235,18 +235,22 @@ final class ReaderViewModel: ObservableObject {
     @Published var cacheVersion: Int = 0
 
     let comic: Comic
-    let imageCache = PageImageCache()
+    /// Shared decode cache for every reading mode (single, double, vertical,
+    /// vertical-double). Owns both the CVPixelBuffer ring and the NSImage
+    /// fast-path cache. Injected into `MetalPageView` so vertical modes use
+    /// the same instance the single/double path reads from.
+    let pageManager = MetalPageManager()
 
     var pageCount: Int { comic.pages.count }
 
     /// Returns the cached image for the current page (may be nil while decoding).
     var currentImage: NSImage? {
-        imageCache.image(for: currentPage)
+        pageManager.nsImage(for: currentPage)
     }
 
     /// Returns the cached image for a given page index (may be nil while decoding).
     func image(for index: Int) -> NSImage? {
-        imageCache.image(for: index)
+        pageManager.nsImage(for: index)
     }
 
     /// Natural size for a page — used for layout before the image is decoded.
@@ -278,8 +282,11 @@ final class ReaderViewModel: ObservableObject {
         // Wire the SwiftUI re-render callback — fires when any page decode completes.
         // Only bumps cacheVersion for the current page and its immediate neighbour
         // to avoid spurious re-renders on prefetch of distant pages.
-        imageCache.onPageReadySwiftUI = { [weak self] index, _ in
-            guard let self else { return }
+        pageManager.onPageReadyNSImage = { [weak self] index, _ in
+            guard let self = self else { return }
+            // Only bump for pages SwiftUI is actively rendering — the current
+            // page, and the current + 1 slot for double-page mode. Prefetched
+            // far-neighbours should not trigger re-renders.
             if index == self.currentPage || index == self.currentPage + 1 {
                 self.cacheVersion += 1
             }
@@ -291,7 +298,7 @@ final class ReaderViewModel: ObservableObject {
     /// Called whenever the visible page changes — triggers prefetch of the surrounding window
     /// and explicitly evicts pages that have fallen outside it.
     func triggerPrefetch() {
-        imageCache.prefetch(around: currentPage, pages: comic.pages)
+        pageManager.prefetch(around: currentPage, pages: comic.pages)
     }
 
     // MARK: - Navigation
