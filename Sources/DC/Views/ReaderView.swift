@@ -163,6 +163,8 @@ struct ReaderView: View {
         ZStack {
             MetalPageView(
                 pages: vm.comic.pages,
+                layout: .verticalStack(pagesPerRow: pagesPerRow),
+                currentPage: vm.currentPage,
                 pagesPerRow: pagesPerRow,
                 scale: vm.scale,
                 containerWidth: containerSize.width,

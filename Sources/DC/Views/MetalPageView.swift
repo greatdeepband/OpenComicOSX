@@ -2,6 +2,20 @@ import SwiftUI
 import AppKit
 import Metal
 
+// MARK: - ReadingLayout
+
+/// How `MetalPageView` should lay out its pages in the NSScrollView.
+/// - `.verticalStack` — pages stacked top-to-bottom, user scrolls vertically.
+///   `pagesPerRow: 1` for single column, `2` for side-by-side.
+/// - `.singlePage` — exactly one page fits the viewport; user zooms + pans.
+/// - `.doubleSpread` — one or two pages in a spread; user zooms + pans. Honors
+///   `ComicPage.isSpread` for natural full-width spread pages.
+enum ReadingLayout: Equatable {
+    case verticalStack(pagesPerRow: Int)
+    case singlePage
+    case doubleSpread
+}
+
 // MARK: - MetalPageView
 
 /// Metal-backed reader view using NSScrollView for scroll math
@@ -9,6 +23,8 @@ import Metal
 /// + NSImage pipeline for vertical and vertical-double modes.
 struct MetalPageView: NSViewRepresentable {
     let pages: [ComicPage]
+    let layout: ReadingLayout
+    let currentPage: Int
     let pagesPerRow: Int  // 1 = vertical single, 2 = vertical double
     let scale: CGFloat
     let containerWidth: CGFloat
