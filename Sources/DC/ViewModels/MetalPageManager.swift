@@ -16,6 +16,17 @@ actor MetalPageManager {
     private var lastAccessTimes: [Int: Date] = [:]
     private let maxCachedPages = 10
 
+    /// Parallel NSImage cache derived from `decodedPages`. Populated lazily
+    /// after each decode. Actor-state is the CVPixelBuffer dict; this is a
+    /// nonisolated NSCache read from any context (SwiftUI render paths).
+    /// Evicted in lockstep with the CVPixelBuffer when `store(...)` crosses
+    /// the LRU cap or `evictOutside(_:)` runs.
+    nonisolated let nsImageCache: NSCache<NSNumber, NSImage> = {
+        let cache = NSCache<NSNumber, NSImage>()
+        cache.countLimit = 10
+        return cache
+    }()
+
     /// Decode a single page from a PageSource into a BGRA CVPixelBuffer.
     /// Returns nil if decoding fails. Caches successful results and evicts
     /// LRU entries when over the cap.
@@ -53,9 +64,22 @@ actor MetalPageManager {
         return decodedPages[pageIndex]
     }
 
+    /// O(1) NSImage lookup — returns the pre-converted NSImage if present,
+    /// or nil if nothing is decoded for that page yet. Intended for SwiftUI
+    /// render paths that need to bail and wait for the `onPageReadyNSImage`
+    /// callback to trigger a re-render.
+    nonisolated func nsImage(for pageIndex: Int) -> NSImage? {
+        nsImageCache.object(forKey: NSNumber(value: pageIndex))
+    }
+
     func evictOutside(_ range: ClosedRange<Int>) {
+        let survivors = decodedPages.keys.filter { range.contains($0) }
+        let evicted = Set(decodedPages.keys).subtracting(survivors)
         decodedPages = decodedPages.filter { range.contains($0.key) }
         lastAccessTimes = lastAccessTimes.filter { range.contains($0.key) }
+        for key in evicted {
+            nsImageCache.removeObject(forKey: NSNumber(value: key))
+        }
     }
 
     func isPending(_ pageIndex: Int) -> Bool {
@@ -187,10 +211,17 @@ actor MetalPageManager {
             if let lruKey = lastAccessTimes.min(by: { $0.value < $1.value })?.key {
                 decodedPages.removeValue(forKey: lruKey)
                 lastAccessTimes.removeValue(forKey: lruKey)
+                nsImageCache.removeObject(forKey: NSNumber(value: lruKey))
             }
         }
         decodedPages[pageIndex] = buffer
         lastAccessTimes[pageIndex] = Date()
+
+        // Populate the parallel NSImage cache so SwiftUI render paths have a
+        // synchronous hit on the next render pass.
+        if let image = makeNSImageFromPixelBuffer(buffer) {
+            nsImageCache.setObject(image, forKey: NSNumber(value: pageIndex))
+        }
     }
 }
 
