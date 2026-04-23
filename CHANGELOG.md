@@ -1,5 +1,552 @@
 # DC Reader — Changelog
 
+## v0.9.0 — 2026-04-23
+
+Reader decode cache unified. Single-page, double-page, vertical, and vertical-double modes now all decode through one shared `MetalPageManager` instance. `PageImageCache` retired.
+
+### What changed
+- **`MetalPageManager`** gained three new capabilities on top of its existing CVPixelBuffer ring (10-page LRU):
+  - Parallel `NSCache<NSNumber, NSImage>` (cap 10, nonisolated) populated in `store(_:for:)` after each decode. Evicted in lockstep with the CVPixelBuffer — evictions happen through both `store`'s LRU overflow path and `evictOutside(_:)`.
+  - `nsImage(for: Int) -> NSImage?` — nonisolated O(1) fast-path read for SwiftUI render paths.
+  - `prefetch(around: Int, pages: [ComicPage])` — fire-and-forget, `[center-1 … center+3]` window (matches the old `PageImageCache` window). Evicts outside the window before scheduling decodes. Fires `onPageReadyNSImage` on the main actor after each successful decode+convert.
+- **Shared converter.** `makeNSImageFromPixelBuffer(_:)` lifted to a file-level internal function in `MetalPageManager.swift`. `MetalPageView.Coordinator.nsImage(from:)` now forwards to it. Both the manager (for populating its NSImage cache) and the loupe (for CVPixelBuffer → NSImage conversion) go through the same helper.
+- **`MetalPageView`** drops the `imageCache: PageImageCache?` parameter; instead takes `pageManager: MetalPageManager`. No longer creates its own `MetalPageManager()` in `makeNSView` — uses the injected instance so all reading modes share one decode cache. Loupe fast-path now reads `pageManager?.nsImage(for: seqIdx)` directly.
+- **`ReaderViewModel`** replaces `let imageCache = PageImageCache()` with `let pageManager = MetalPageManager()`. `currentImage`, `image(for:)`, and `triggerPrefetch()` rewired to the new manager. Callback binding moves from `imageCache.onPageReadySwiftUI` to `pageManager.onPageReadyNSImage`, same filter on `currentPage` / `currentPage + 1` for `cacheVersion` bump granularity.
+
+### Removed
+- **`PageImageCache`** actor class (218 lines) deleted from `ReaderViewModel.swift`. No external callers; two stale doc-comment references in `MetalPageManager.swift` and `Comic.swift` are harmless and can be cleaned up in a follow-up.
+
+### Memory footprint
+Before v0.9.0 the reader kept up to 15 decoded pages in memory (5 NSImages in `PageImageCache` + 10 CVPixelBuffers in `MetalPageManager`). v0.9.0 holds at most 10 pages shared across every reading mode — each page as both a `CVPixelBuffer` and a derived `NSImage`. That's ~20 page-equivalents of memory worst case (up from ~15), but the ceiling is now hard and consistent across modes, not a 5+10-ceiling that appears on mode switches.
+
+### Why this matters
+This is step B of the two-step plan toward full Metal rendering in every reading mode. Step A (replacing `ZoomableImageView` with a Metal-rendered single/double page view) is now a mechanical view-layer substitution in a follow-up session: both renderers already pull from the same decode source. Every subsequent bugfix (loupe, prefetch, eviction, CBR/PDF support) lands in one place instead of two.
+
+### Process notes
+- Backup before: `/Volumes/Media/DC_dev_lib_backup_20260423_234635/` (SHA `eaf84360…`).
+- Planned via spec `docs/superpowers/specs/2026-04-23-unify-decode-cache-step-b-design.md` + plan `docs/superpowers/plans/2026-04-23-unify-decode-cache-step-b.md`.
+- Executed with the superpowers subagent-driven-development skill: five task commits with spec+quality review between each.
+- Commits: `1023041` (helper), `7e82ced` (NSImage cache), `2fc7346` (prefetch + callback), `5a1ab1e` (inject + rewire — T4+T5 bundled per plan), `8049038` (delete PageImageCache).
+
+### Verification
+`swift build -c release` clean. `.app` produced. Per-task grep checks passed. Manual runtime verification of the four reading modes across CBZ / CBR / PDF + loupe is pending user smoke test.
+
+---
+
+## Unreleased — planned v0.9.0 (unify decode cache, step B toward full-Metal)
+
+**Snapshot taken:** `/Volumes/Media/DC_dev_lib_backup_20260423_234635/` — 158 MB, full source tree + current `.app`, SHA-matched binary (`eaf84360…`). `.build/` excluded (rebuildable). This is the last-known-good state of v0.8.3 before the decode-cache unification.
+
+### Planned work (step B)
+Retire `PageImageCache` and route single/double-page mode through `MetalPageManager`:
+
+- `ZoomableImageView` and `ReaderViewModel.image(for:)` will fetch NSImages from `MetalPageManager` instead of `PageImageCache`. The `CVPixelBuffer → NSImage` convert used by the vertical loupe is the same one we'll use for single/double display (already exists as `MetalPageView.Coordinator.nsImage(from:)`).
+- `LibraryViewModel.imageCache` / `PageImageCache` / `onPageReady` / `onPageReadySwiftUI` wiring removed.
+- Net memory ceiling drops from 15 pages (10 Metal + 5 NSImage) to **10 pages** shared across all reading modes.
+- Loupe becomes fully unified — no more mode-specific fetching.
+
+### Future work (step A, separate session)
+After B stabilises: replace `ZoomableImageView` entirely with a `MetalPageView` single-page configuration. Uses `NSScrollView.magnification` for zoom (same as vertical modes) and a single-page or two-page quad layout in `MetalPageRenderer`. Deletes `ZoomableImageView`, `MouseCatcher`, `PageImageCache` (already gone after B).
+
+---
+
+## v0.8.3 — 2026-04-23
+
+Two-button add flow. Replaces the three previous add affordances (toolbar Open Comic button, sidebar New Gallery, per-gallery Add Folders) with two:
+
+1. **Sidebar `+ New Gallery`** — unchanged. Creates an empty gallery; user can name it and optionally add source folders during creation.
+2. **Per-gallery `+ Add`** — gallery-pane toolbar's trailing action opens a **unified NSOpenPanel** that accepts files, folders, and multi-select in the same dialog. Result is smart-split into files-vs-folders and routed accordingly.
+
+### Removed
+- **Open Comic** button from `PaneToolbar`. The top library toolbar now shows only search / sort / zoom / debug. ⌘O still works via the menu-bar *File* command (kept in `DCApp`).
+- The separate "Add Folders" button on `LibraryGalleryPane` (folders-only picker) is gone — replaced by the unified one.
+
+### New API
+- `LibraryViewModel.addComicFiles(_:to:)` — appends individual comic URLs to a gallery's `comics` array without scanning source folders. De-duplicates silently. Needed because the previous `addFolders` path only handled directories; now loose files land here.
+
+### Picker
+`pickComicsOrFolders(_:)` on `LibraryGalleryPane`:
+- `canChooseFiles = true` · `canChooseDirectories = true` · `allowsMultipleSelection = true`
+- `allowedContentTypes = [.pdf, cbz, cbr, cb7, cbt]` (custom extensions via `UTType(filenameExtension:)`)
+- Title: "Add to Gallery" · message: "Choose comic files and/or folders."
+
+After OK, `addToGallery(_:)` walks the returned URL list, checks `isDirectory` per URL, and dispatches: folders → `library.addFolders(folders, to: gallery.id)` (existing scan path), files → `library.addComicFiles(files, to: gallery.id)` (new method).
+
+### Empty-gallery state
+Empty-gallery placeholder updated: title "Empty Gallery", hint "Add comic files or folders to populate this gallery", action button "Add Comics or Folders…" — all routed through the same unified picker.
+
+### Design rationale
+Context determines destination: if you click `+` inside a gallery, contents go into *that* gallery, no modal decision. To read a one-off file without tracking, either drag onto the window (existing) or use File → Open Comic (⌘O). No top-level in-window "Open Comic" button.
+
+---
+
+## v0.8.2 — 2026-04-23
+
+Fixed: CBR, CB7, CBT, and PDF comics were black pages in vertical / vertical-double reading modes (single-page and double-page worked fine).
+
+### Root cause
+`MetalPageManager.decodePage(pageIndex:from:)` only handled `PageSource.zipData` (in-memory CBZ). Every other variant — `.file(URL)` for `unar`/`tar`-extracted CBR/CB7/CBT, `.zip(URL, String)` for disk-backed archives, `.pdf(PDFDocument, Int)` for PDFs — fell through to `return nil` with a stub comment from v0.3.1 saying "let the existing pipeline handle these pages". The fallback NSImage pipeline (`VerticalComicScrollView`) was commented out in v0.4.0 and deleted in v0.5.0, so the stub quietly became a black page for every non-CBZ format.
+
+Single-page and double-page modes stayed unaffected because they route through `ZoomableImageView` using `PageSource.decode()` (the general-purpose NSImage path), not the Metal pipeline.
+
+### Fix
+Replaced the stub with full decode coverage for every `PageSource` case:
+
+- `.file(url)` → reads the file from disk and decodes via `CGImageSource` (same decode path as the CBZ entry bytes).
+- `.zip(archiveURL, entryPath)` → opens the archive from disk, extracts the entry, decodes via `CGImageSource`. Shares a common helper with `.zipData`.
+- `.pdf(doc, pageIndex)` → renders the PDF page through `PDFKit` at 2× scale on top of a white background (PDFs are opaque, so a white fill prevents the reader's black showing through transparent areas). Same `.mediaBox` bounds as the single/double-page path.
+- `.zipData(…)` → unchanged behaviourally; refactored to share the archive-entry helper.
+
+### Internal cleanup
+Extracted three shared helpers:
+- `makePixelBuffer(width:height:)` — single `CVPixelBufferCreate` with 32BGRA + Metal-compatible attrs.
+- `renderCGImageToBuffer(_:)` — lock/draw/unlock wrapper for any `CGImage`.
+- `decodeImageData(_:)` — ImageIO decode → `renderCGImageToBuffer`. Used by `.file` / `.zipData` / `.zip` branches.
+
+Caching and LRU eviction (10-page cap) centralised in a new `store(_:for:)` method instead of being duplicated inside each decoder. `PDFKit` import added. Main decode switch statement is now readable top-to-bottom: one case per source variant, each returning the same buffer type.
+
+All four formats now render correctly in all four reading modes (single, double, vertical, vertical-double).
+
+---
+
+## v0.8.1 — 2026-04-23
+
+v0.8.0 added `.windowStyle(.hiddenTitleBar)` but the bar still looked stacked — `.hiddenTitleBar` only hides the title TEXT, it doesn't make content flow under the traffic-light region. The window's title bar slab was still there, 28 pt tall, above our custom bar.
+
+**Fix — configure the NSWindow directly:** added `FullSizeTitleBarConfigurator`, an `NSViewRepresentable` that grabs the hosting `NSWindow` on appear and sets:
+- `titlebarAppearsTransparent = true` — removes the opaque title-bar background so our custom strip behind it is visible.
+- `titleVisibility = .hidden` — redundant with `.hiddenTitleBar` but explicit.
+- `styleMask.insert(.fullSizeContentView)` — this is the key one: content view now extends up under the title-bar region instead of being pushed below it.
+
+Attached to `ContentView` via `.background(FullSizeTitleBarConfigurator())` so the configuration applies across both library and reader sessions. Traffic-light controls now float over the same strip as the reader's 38-pt custom chrome.
+
+SwiftUI unfortunately doesn't expose these three NSWindow knobs, so the NSViewRepresentable bridge is necessary. One-shot configuration; no teardown required (these settings persist for the window's lifetime).
+
+---
+
+## v0.8.0 — 2026-04-23
+
+Reader top chrome redesigned — one integrated strip. Ended v0.6.x-v0.7.4's running fight with centring and color-matching by removing the native title bar entirely and making the reader's custom bar *be* the title bar.
+
+### Hidden title bar on the scene
+`DCApp` now attaches `.windowStyle(.hiddenTitleBar)` to the `WindowGroup`. The window's traffic-light controls (close/minimise/maximise) now live in the same row as the reader's custom chrome. There is no separate title bar above our controls any more, and therefore no second chrome strip for vibrancy/height to mismatch.
+
+### Reader top bar integrated with traffic lights
+`readerTopBar` now:
+- Leads with a 72-pt spacer — reserves horizontal room for the traffic-light controls at the top-left.
+- Back button sits immediately to the right of the gutter.
+- Trailing cluster (favorite · ⋯ menu) pinned flush-right by the outer HStack's `Spacer()`.
+- Transport cluster (prev-comic · prev-page · N/M · next-page · next-comic) is layered over the HStack via the ZStack's default `.center` alignment — geometrically centred at the window midpoint regardless of back/trailing widths.
+- Bar height raised 36 → 38 pt to match the natural title-bar height.
+- Horizontal padding tightened 10 → 8 pt since the gutter spacer now handles the left-side inset.
+- Background still `TitlebarEffectView()` (`NSVisualEffectView` with `.titlebar` material + `.behindWindow` blending + `.followsWindowActiveState`) — identical vibrancy to the native window chrome.
+
+### Library carried along automatically
+`NavigationSplitView` on macOS already handles hidden title bars: its sidebar-toggle button and detail-pane toolbar content render in the chrome row next to the traffic lights, matching apps like Books/Photos. No library-specific changes needed.
+
+Result: one 38-pt chrome strip at the top of the window containing the traffic lights and (in the reader) the back button, transport, favourite, and menu. No stacked bars. No color/height mismatch. Transport geometrically centred. Natively styled because it *is* the title bar.
+
+---
+
+## v0.7.4 — 2026-04-23
+
+Custom top bar now visually identical to the native macOS title-bar chrome.
+
+SwiftUI's `.background(.bar)` is close but uses a different vibrancy recipe than `NSToolbar`, so the v0.7.3 custom bar looked subtly different from the rest of the window — a more washed-out grey instead of the usual titlebar translucency.
+
+**Fix:** swapped `.background(.bar)` for `.background(TitlebarEffectView())`, a tiny `NSViewRepresentable` wrapper around `NSVisualEffectView` configured with `material = .titlebar` + `blendingMode = .behindWindow` + `state = .followsWindowActiveState`. This is the exact same view AppKit uses for the window's own title bar, so the reader top bar matches the library's NSToolbar pixel-for-pixel (including the dim/bright shift when the window loses focus).
+
+Everything else from v0.7.3 unchanged: 36 pt height, ZStack geometric centring, back button flush-left, trailing cluster flush-right, transport centred.
+
+---
+
+## v0.7.3 — 2026-04-23
+
+Back on the left, transport geometrically centred.
+
+The native `.toolbar { … .principal … }` centres the principal item between the leading and trailing clusters — which means the transport shifts whenever they have different widths. For true geometric centring, only a `ZStack` works.
+
+Reintroduced the custom top bar from v0.6.x but with **native-default button sizes** (no `.font(.system(size:))` overrides this time):
+
+- `ZStack { HStack { backButton; Spacer; trailingCluster }; transportCluster }`
+- Back button pinned flush-left by the outer HStack.
+- Trailing cluster (favourite + ⋯ menu) pinned flush-right by the outer HStack's `Spacer()`.
+- Transport layered on top of the ZStack at its default `.center` alignment — lands at the bar's exact horizontal midpoint regardless of how wide the back and trailing clusters are.
+- Bar height fixed at **36 pt** with 10 pt horizontal padding and `.bar` material background; `Divider` below separates it from the reader canvas.
+- Buttons use their default button style so sizing matches macOS conventions — no custom fonts, no `.borderless` overrides.
+- `.toolbar(.hidden, for: .windowToolbar)` hides the native NSToolbar row so the custom bar is the sole top chrome.
+
+Back button: `Label("Library", systemImage: "chevron.left")`.
+Transport: `« ‹ · ‹ · N / M · › · › »` with tooltips (Q/E, ←→/AD).
+Trailing: favourite heart · ⋯ menu (Zoom / Reading Mode / Full Screen).
+
+---
+
+## v0.7.2 — 2026-04-23
+
+Transport back in the native toolbar, floating pill removed.
+
+v0.7.0/v0.7.1 moved the transport to a bottom-centre floating pill overlaid on the comic page. User preference is the classic placement — navigation buttons in the toolbar, not overlaid on content.
+
+**Changes:**
+- Removed the `transportPill` view and its `ZStack(alignment: .bottom)` overlay layer.
+- Reader body is back to a simple `ZStack { black; modeContent }` without any floating chrome.
+- `readerToolbarContent` now has four toolbar items:
+  - `.navigation`: Back.
+  - `.principal`: a `ToolbarItemGroup` with prev-comic · prev-page · `N / M` · next-page · next-comic — the full transport cluster, using native toolbar sizing and icons.
+  - `.primaryAction`: Favorite toggle.
+  - `.primaryAction`: `⋯ More` menu (Zoom · Reading Mode · Full Screen).
+- Native macOS toolbar look throughout. `.principal` centres the cluster within the space between leading and trailing items — not geometrically perfect to the window centre, but it looks like a first-party Apple app.
+- Tooltips still show keyboard shortcuts (Q/E, ←→/AD).
+
+---
+
+## v0.7.1 — 2026-04-23
+
+Dropped the pill auto-hide — navigation buttons stay visible at all times.
+
+**Why:** v0.7.0's `.onContinuousHover` lived on the reader's `ZStack`, but `ZoomableImageView` (single/double mode) and `MetalPageView` (vertical modes) both consume mouse events internally via their own `MouseCatcher` / `NSScrollView`. Hover events never bubbled up to the `ZStack`, so after the initial 2.5 s the pill hid and never came back — user saw no navigation at all.
+
+**Fix:** kept the floating transport pill exactly as-is visually, but removed the `pillVisible` / `pillHideTask` / `pointerOverPill` state and the `.onContinuousHover` / `.onHover` handlers. Pill is now always rendered.
+
+Simpler code, no event-plumbing fight, and the navigation is always one click away. If the cinematic fade-out is wanted later, the right way to do it is a window-level `NSEvent.addLocalMonitorForEvents(.mouseMoved)` + `acceptsMouseMovedEvents = true` on the reader's NSWindow — not SwiftUI hover. That's a separate ticket.
+
+---
+
+## v0.7.0 — 2026-04-23
+
+Reader redesigned around a **floating transport pill** + **native top toolbar**. Five rounds of centring-fight on the custom bar (v0.6.4–v0.6.8) convinced me the engineered-looking bar was the problem, not the geometry inside it. Option B from the brainstorm: content-first, macOS-native chrome on top, transport pill at the bottom.
+
+### Top bar
+Back to `.toolbar { … }` with standard placements and sizes. Three items:
+
+- `.navigation`: **Back** — `Label("Library", systemImage: "chevron.left")`.
+- `.primaryAction`: **Favorite** — filled-heart toggle in red.
+- `.primaryAction`: **⋯ More** — menu with Zoom · Reading Mode · Toggle Full Screen sections. Zoom In / Zoom Out keyboard shortcuts (⌘= / ⌘-) live on the menu items.
+
+No custom heights, no dividers, no font overrides. Title shows via `.navigationTitle(vm.comic.title)`. Looks like a first-party Apple app.
+
+### Transport pill
+New floating capsule at the bottom centre of the reader:
+
+- Contents: prev-comic · `|` · prev-page · **N / M** · next-page · `|` · next-comic. Same five controls that were fighting for space in the toolbar, now in a dedicated component that's always centred because it's laid out inside a `ZStack(alignment: .bottom)` overlay on the reader.
+- Styled as an `.ultraThinMaterial` `Capsule()` with a subtle white stroke and a soft shadow. 16 pt icons, `.medium` weight, 14 pt page counter. 18 pt horizontal padding, 10 pt vertical.
+- Offset 24 pt above the window bottom.
+- Helps show keyboard shortcuts — `Q / E` for comic nav, `← → / A D` for page nav.
+
+### Auto-hide behavior
+- Pill is visible on reader open.
+- Mouse movement anywhere in the reader (`.onContinuousHover(.active)`) resets a 2.5 s idle timer. When the timer fires, pill fades out over 180 ms + slides down 16 pt.
+- `.onHover` on the pill itself: while the pointer is over the pill, the hide timer is cancelled so it stays visible indefinitely. Pointer leaves the pill → normal 2.5 s timer resumes.
+- Implemented via `@State var pillHideTask: Task<Void, Never>?` cancelled and restarted on every movement.
+- Pill is `.allowsHitTesting(pillVisible)` so invisible pill doesn't intercept clicks on pages underneath.
+
+### Removed
+- The custom `readerTopBar` VStack (v0.6.4–v0.6.8) and all its helpers: `transportCluster`, `trailingCluster`, `barIcon(_:weight:)`, `barIconSize`, `barHeight`.
+- `.toolbar(.hidden, for: .windowToolbar)` — no longer hiding the native toolbar; the reader now uses it.
+- The zoom `-`/`%`/`+` cluster from the toolbar. Zoom lives in the More menu with keyboard shortcuts. Scroll-wheel + pinch-zoom remain the primary zoom interactions.
+
+Same keyboard shortcuts as before: arrows/WASD for pages, Q/E for comics, ⌘F for full screen, Backspace/Z for back. Z-order: reader content < pill < native toolbar (system chrome).
+
+---
+
+## v0.6.8 — 2026-04-23
+
+Reader top-bar glyphs now centred both axes.
+
+**Why they were bottom-aligned:** v0.6.7 set `.font(.system(size: 26))` on the outer ZStack and expected `Button { Image(systemName:) }` children to inherit. They don't — SwiftUI's `.borderless` button style renders its icon at the button-style's own default size (~13 pt) regardless of parent font. So the bar was 40 pt tall with tiny glyphs sitting wherever SwiftUI's button baseline put them: at the bottom.
+
+**Fix:**
+- Extracted a `barIcon(_:weight:)` helper that returns `Image(systemName:).font(.system(size: 26, weight:)).frame(maxHeight: .infinity)`. Called from every button label. The font now lives on the icon itself (not the container) so the button-style honours it, and `maxHeight: .infinity` lets the icon stretch to fill the button's vertical extent so it centres inside the bar.
+- Every HStack now declares `alignment: .center` explicitly. Outer `ZStack(alignment: .center)` too.
+- Both clusters carry `.frame(maxHeight: .infinity)` so they fill the full bar height before the icons centre within them.
+- Bar height 40 → **44 pt** for a touch more breathing room around 26 pt icons.
+- Divider heights 24 → 26 pt to match icon extent.
+- Page counter font 16 → 17 pt-medium; uses `.frame(maxHeight: .infinity)` for proper vertical centring.
+
+---
+
+## v0.6.7 — 2026-04-23
+
+Reader top-bar buttons doubled in size.
+
+- Glyph size raised from SwiftUI's ~13 pt default to **26 pt** via a single `.font(.system(size: barIconSize))` on `readerTopBar` so all child buttons inherit. Back, transport, favorite, zoom, and overflow menu icons all scale together.
+- Bar height grown 22 pt → **40 pt** to fit the larger glyphs with 7 pt of breathing room top and bottom.
+- Divider heights raised from 16 pt to 24 pt so they visually match the new button extent.
+- Page counter font raised from `.callout` to 16 pt-medium; min-width 72 → 88 pt to accommodate three-digit page totals.
+- Zoom-percent text raised from `.caption` to 14 pt-medium; min-width 42 → 52 pt.
+- Inter-cluster spacing: transport cluster inner spacing 6 → 10 pt; trailing cluster 10 → 14 pt; zoom cluster internal 4 → 6 pt.
+- Overflow `Menu` frame 28 → 36 pt wide.
+
+ZStack centring, `.toolbar(.hidden)`, and `.bar` background unchanged.
+
+---
+
+## v0.6.6 — 2026-04-23
+
+Revert v0.6.5 (single-principal toolbar dropped buttons) and slim the v0.6.4 custom bar. The `ToolbarItem(placement: .principal)` single-item approach refused to lay out the inner `HStack { back; Spacer; trailing }` + ZStack transport as expected in the macOS toolbar row — SwiftUI collapsed or clipped the content and the back/trailing buttons disappeared.
+
+**Fix:** back to v0.6.4's custom bar below the title bar (VStack of `readerTopBar` + `Divider` + reader content) with `.toolbar(.hidden, for: .windowToolbar)` suppressing the native toolbar. Reduced bar height from 38 pt to **22 pt** — the transport/zoom button icons are ~14 pt, so 22 pt gives 4 pt top/bottom padding and no more; the empty space above the buttons that felt chunky in v0.6.4 is gone. Horizontal padding stays at 14 pt for edge breathing room. ZStack centring from v0.6.4 preserved.
+
+---
+
+## v0.6.5 — 2026-04-23
+
+Reader top bar: slim it back down into the native toolbar row.
+
+v0.6.4 moved the reader controls into a custom bar below the title bar and hid the native `NSToolbar`. The transport centring worked, but the window now had two stacked top regions — the (empty) title bar above the custom bar — which felt chunky and wasted vertical space.
+
+**Fix:** go back to `.toolbar { … }` but as a **single** `ToolbarItem(placement: .principal)` containing the whole ZStack. Because there are no separate leading/trailing toolbar items competing for width, the principal item fills the title-bar width, and its internal `ZStack { HStack { back; Spacer; trailing }; transport }` keeps the transport geometrically centred. Added `.frame(minWidth: 640, idealWidth: 960, maxWidth: .infinity)` to the inner content so the toolbar item expands to let the HStack's Spacer actually push the clusters to opposite edges.
+
+Result: same centred layout as v0.6.4, rendered inline in the native toolbar row — no second bar, no empty dead space above the controls.
+
+---
+
+## v0.6.4 — 2026-04-23
+
+Reader top bar: true-centre layout.
+
+### Why `.principal` wasn't centring
+The previous pass used `ToolbarItem(placement: .principal)` for the transport cluster with leading/trailing items alongside. `.principal` on macOS is centred *between the leading and trailing groups*, not within the window — and because our leading (back button) is ~30 pt while trailing (favorite + zoom + menu ~200 pt), the principal shifts toward the leading side. No amount of reshuffling inside `.principal` fixes that.
+
+### Fix — custom top bar with ZStack centring
+Retired `.toolbar { … }` for the reader entirely. A new `readerTopBar` renders above the reader content as a `VStack`-child custom bar:
+
+- `ZStack { HStack { backButton; Spacer(); trailingCluster }; transportCluster }` — back pinned to the leading edge, trailing cluster pinned to the trailing edge, transport layered on top and geometrically centred via the ZStack's default alignment.
+- The transport is therefore at the bar's exact horizontal midpoint regardless of how wide the back button or the trailing cluster are. Widening favourite/zoom/menu no longer shifts the page counter.
+- Applied `.toolbar(.hidden, for: .windowToolbar)` on the reader so the native `NSToolbar` is hidden while a comic is open — the custom bar is the sole top chrome. The window's traffic-light controls remain visible because they live in the title bar, not the toolbar.
+- Bar height fixed at 38 pt, `.bar` material background for consistency with the sidebar footer, `Divider()` below separating it from the page area.
+- Every button switched to `.borderless` style with `.help(…)` hover hints for the keyboard shortcuts (`← → W A S D Q E` + `⌘F`).
+
+The reader returns to the library via the `←` back button or the existing `Backspace`/`Z` keyboard shortcut, both of which also persist the reading position before dismissing.
+
+---
+
+## v0.6.3 — 2026-04-23
+
+Reader-toolbar layout pass and library comic-removal UX.
+
+### Reader toolbar cleanup
+The reader's centered navigation and trailing controls were packed into two large `ToolbarItemGroup`s (5 items in principal, 7 in primary action), so macOS could never balance them around the window title — the page counter drifted off-centre and individual buttons lost their hit targets on narrower windows. Rewrote both clusters:
+
+- **Principal (centered):** a single `ToolbarItem` containing an `HStack` of prev-gallery · vertical divider · prev-page · page counter · next-page · vertical divider · next-gallery. Fixed minimum widths on the counter, explicit `help(...)` strings on every button, consistent 6-pt spacing. Centres as one atomic unit instead of five loose items.
+- **Trailing:** three compact `ToolbarItem`s — favorite toggle · zoom cluster (zoom-out · "N%" · zoom-in) · overflow menu. Moved Reset Zoom, Fit to Width, Actual Size, reading-mode switch, and full-screen toggle into the overflow menu (organised into Zoom / Reading Mode / sections with `⌃⌘F` for full screen). Fewer top-level buttons, consistent layout on any window size.
+
+### Remove individual comics from a gallery
+Right-click any comic in a gallery → **"Remove from Gallery"** (destructive, red). Keyboard path: single-click selects the card (3-pt accent-colour border + title tinted), Delete key removes it. Double-click still opens. Clicking on empty space in the pane clears the selection.
+
+- `ComicCard` gained an optional `isSelected: Bool`, rendered as a `RoundedRectangle` stroke at `Color.accentColor`, animated over 120 ms.
+- `LibraryGridPane`, `LibraryGalleryPane`, and `DraggableComicGrid` each maintain their own `@State private var selectedURL: URL?`. Selection is per-pane; switching sidebar rows resets naturally because the parent view rebuilds.
+- Click-to-open was demoted to double-click (`.onTapGesture(count: 2)`) so single-click can select. This matches Finder and is what macOS users expect from a gallery grid.
+- Delete-key wiring via a hidden `Button(label: EmptyView()).keyboardShortcut(.delete)` in each pane's `.background`, disabled when `selectedURL == nil`. Each pane's removal action is scoped:
+  - Favorites → `toggleFavorite(url:)`
+  - Recents → `removeRecent(_:)`
+  - All Comics → new `LibraryViewModel.removeFromLibrary(url:)` — drops the URL from every gallery, from recents, and from favorites in one call (file on disk untouched).
+  - Gallery pane → `removeComics(_ urls:from:)` against the active gallery.
+- Context-menu labels adapt per pane: *Remove from Favorites / Recents / Library / Gallery*.
+
+### Delete-key scoping
+The sidebar intentionally does **not** bind `.delete` to "Delete Gallery". Gallery deletion is an intentional destructive action and stays behind the right-click context menu (`Delete Gallery`, destructive) to avoid conflicting with the comic-removal shortcut when a gallery row and a comic are both selected. This matches the user's stated design: "press delete on a highlighted comic".
+
+---
+
+## v0.6.2 — 2026-04-23
+
+Audit-driven fixes. Two bugs, two perf wins, one UX polish, plus cleanup.
+
+### Fixed — drag-and-drop visual rejection
+Both the window-level drag-to-import handler (`handleLibraryDrop`) and the per-sidebar-row drop handler (`LibrarySidebar.handleDrop`) set their accept flag *inside* the async `NSItemProvider.loadObject(ofClass:)` callback and returned it from the synchronous enclosing method. The return always ran before the callback, so SwiftUI always read `false`, displayed a rejection cursor, and the user saw the drop "bounce back" — even though `library.load(url:)` / `library.moveComic(_:toGallery:)` actually completed. Both handlers now eagerly return `true` when any provider conforms to `public.file-url` and do the real work in the async callback.
+
+### Fixed — deleted-gallery dead end
+Deleting the currently-selected gallery left `LibraryDetail` rendering a permanent `Text("Gallery not found")` until the user clicked elsewhere. Fix in two places: `LibraryViewModel.deleteGallery(id:)` now clears `selectedSection` back to `.home` if the deleted gallery was selected, and the detail-pane fallback case snaps to `.home` via `.onAppear` if the stored selection resolves to a missing gallery.
+
+### Perf — mtime cache for Recently Added sort
+`LibrarySort.apply(.recentlyAdded, …)` and `LibraryHome.recentlyAdded` previously called `FileManager.attributesOfItem` synchronously on the main actor for every URL, every render. `LibrarySort` now keeps a process-lifetime `[URL: Date]` mtime cache, populated on first lookup per URL. Subsequent sorts and home-view rail refreshes are O(1) per URL. Safe because file mtimes are effectively static during an app session; any stale values clear on relaunch.
+
+### Perf — memoised `allComicURLs`
+`LibraryViewModel.allComicURLs` was an O(n+m) computed property re-evaluated every time `LibraryDetail`'s body ran — which meant every thumbnail-update publish, every search keystroke, every sort change. Added a backing store plus a coarse signature (sum of per-gallery comic counts + recents count). Invalidation happens whenever any comic is added/removed; no-op renders return the cached array in O(1). Gallery renames and pure reorderings (no count change) reuse the cache correctly since the URL set is identical.
+
+### UX — loading overlay
+`LibraryViewModel.isLoading` was still set during `load(url:)` but nothing read it after the stacked-sections view was retired. Slow CBR/CB7 extraction left the user staring at an unchanged library for several seconds. Added a `LoadingOverlay` (material-backed card with `ProgressView` + "Opening comic…") that fades in whenever `library.isLoading` is true.
+
+### Cleanup
+- Removed three dead computed properties from `LibraryViewModel`: `filteredRecentComics`, `searchResults`, `filteredGalleries` — their callers were all in the pre-v0.6.0 stacked-sections view; every new pane does its filtering inline.
+- Modernised the two deprecated `onChange(of: library.updatedThumbnailURLs) { urls in … }` closures (in `ContinueReadingHero` and `ComicCard`) to the macOS-14 two-parameter form `{ _, urls in … }`.
+
+### Carried forward (not addressed this round)
+- Pre-existing concurrency warnings in `ReaderViewModel` / `ComicLoader` / `Comic` / `MetalPageManager` / `DCLogger` (Swift 6 hazards and ZIPFoundation deprecated initializers) — separate Swift 6 readiness pass.
+- `ComicCard` non-favourite heart button still hover-only; acceptable for a desktop app.
+- `LibraryView.swift` is ~1270 lines; candidate for splitting into `LibrarySidebar.swift` / `LibraryHome.swift` / `LibraryDetail.swift` if it grows further.
+
+---
+
+## v0.6.1 — 2026-04-23
+
+Library hotfixes after v0.6.0.
+
+### Reader toolbar collision
+`LibraryDetail` previously attached `.toolbar { … }` with Open Comic (⌘O), the memory-debug toggle, and a "N comics" leading item. Because `ContentView` keeps `LibraryView` mounted under the reader (dimmed to opacity 0 so its `NSScrollView` keeps its scroll position), SwiftUI's toolbar system kept merging those items into the window toolbar even while the reader was active — they stacked on top of `ReaderView`'s own toolbar and pushed the reader controls off-screen.
+
+**Fix:** removed the `.toolbar` modifier from `LibraryDetail` entirely. Open Comic, the debug toggle, and the section count now live inside each pane's `PaneToolbar` so they only render when a library pane is actually being drawn. `LibraryHome` now also has a `PaneToolbar` header for consistency. A divider separates the pane-scoped controls (search/sort/zoom/pane-specific actions) from the global library controls (Open Comic, debug).
+
+### Create Gallery affordance
+The "New Gallery" button at the bottom of the sidebar used `.buttonStyle(.plain)` with secondary foreground — it read as inactive chrome rather than a call-to-action, and users missed it entirely. Replaced with a full-width `.borderedProminent` button using `plus.circle.fill`. Same sheet wiring (`CreateGallerySheet`), just visible now.
+
+### Per-pane count badge
+`PaneToolbar` now shows the current section's count in a capsule next to the title (`Home → total comics`, `Favorites → favouriteURLs.count`, `Recents → recentComics.count`, `All Comics → allComicURLs.count`, `Gallery → gallery.comics.count`). Replaces the old leading-toolbar-item stat that was dropped along with the `.toolbar` modifier.
+
+---
+
+## v0.6.0 — 2026-04-23
+
+Library redesign. `LibraryView` moves from a stacked-sections `ScrollView` to a two-column `NavigationSplitView`, with a Home view, per-pane toolbars, and richer interaction. All prior functionality preserved.
+
+### New architecture
+- **Sidebar:** Home · Favorites · Recents · All Comics, then a "Galleries" section listing each user gallery with a count badge. A "+ New Gallery" button sits at the bottom of the sidebar. Sidebar selection (`LibrarySection`) is persisted to `UserDefaults` so the app restores the same view on relaunch.
+- **Detail pane:** content router keyed by the selected sidebar row.
+  - `Home`: `LibraryHome` with a "Continue Reading" hero (last-opened comic with 0 < progress < 1, cover + title + linear progress + Resume button) plus horizontal rails for Recently Added, Favorites, and Continue Reading. Each rail has a "See All" that jumps to the matching sidebar row.
+  - `Favorites`/`Recents`/`All Comics`: `LibraryGridPane` renders a `LazyVGrid` of `ComicCard`s.
+  - `Gallery(id)`: `LibraryGalleryPane` — uses `DraggableComicGrid` when sort order is manual and no search is active (preserves per-gallery drag-to-reorder), otherwise a sorted/filtered grid.
+- **Per-pane toolbar:** each detail pane gets a toolbar with a scoped search field, a sort menu (Custom Order only on galleries; Recently Added · Recently Read · A–Z · Progress · Format elsewhere), a card-size menu (Small/Medium/Large/Extra Large), and section-specific actions (Add Folders on gallery panes). Global "Open Comic" (⌘O) and memory-debug toggle sit in the standard window toolbar.
+- **Drag-to-import:** drop CBZ/CBR/CB7/CBT/PDF files anywhere on the library window to open immediately; a dashed accent-coloured drop-zone overlay shows while the drag is over the window.
+- **Drag between galleries:** drag a comic card onto a gallery row in the sidebar to move it to that gallery. Intra-gallery drag-to-reorder is unchanged.
+
+### New interactions
+- Hover on `ComicCard`: soft elevation (shadow opacity 0.25→0.45, radius 4→8), 3% scale-up, and the heart button fades in for non-favourites (always visible on favourited cards).
+- Card size is a global preference; applies to all panes and persists.
+- Sort preference is per-section and persists (stored as `[sectionKey: sortOrder]` in `UserDefaults`).
+- Error banner: `errorMessage` from `LibraryViewModel` now surfaces as a dismissible banner over the library, replacing the full-pane error view.
+
+### Model additions (`LibraryViewModel`)
+- `selectedSection: LibrarySection?` — sidebar selection, persisted.
+- `cardSize: CardSize` — global card size preference, persisted.
+- `sortPreferences: [String: LibrarySortOrder]` — per-section sort, persisted.
+- `allComicURLs: [URL]` — flat deduplicated list across all galleries + orphan recents; backs the All Comics pane.
+- `continueReadingURL() -> URL?` — picks the most-recently-opened comic with a reading progress strictly between 0.02 and 0.98; falls back to the most recent overall.
+- `moveComic(_:toGallery:)` — removes a comic from any gallery that contains it and appends to the target gallery.
+- `loadNewLibraryState()` called from `init()` restores the three persisted values.
+
+### New types (`LibraryTypes.swift`)
+- `LibrarySection`: `Hashable`/`Codable` enum — `.home`, `.favorites`, `.recents`, `.allComics`, `.gallery(UUID)`.
+- `CardSize`: four cases mapping to adaptive-grid minimums 140 / 180 / 240 / 320 pt and per-size title font sizes.
+- `LibrarySortOrder`: six cases (`manual`, `recentlyAdded`, `recentlyRead`, `alphabetical`, `progress`, `format`). `LibrarySort.apply(_:to:library:)` implements each against `FileManager.attributesOfItem`, the recents list, or plain string/extension comparisons.
+
+### Removed
+- Stacked-sections `ScrollView` with `GallerySectionHeader`s (`Favorites`, `Recent`, per-gallery collapsible headers).
+- `LibraryViewModel.collapsedSections` and `hasLaunched` — no longer meaningful under sidebar selection.
+- Old global header (stats + centered search) — stats moved to toolbar leading, search moved into each pane's toolbar.
+- Old `emptyState` / full-pane `errorView` — replaced by `EmptyPane` per detail pane and `ErrorBanner` overlay.
+
+### Build script
+- `build_app.sh` was hard-coded to `/Volumes/Media/DC_dev`. `DC_dev_lib`'s copy now points at `/Volumes/Media/DC_dev_lib` so each working tree has an independent `.app` output.
+
+---
+
+## v0.5.1 — 2026-04-23
+
+Loupe polish in vertical modes.
+
+### Wrong-page content while scrolling — coordinate pipeline rewrite
+**Root cause:** `updateLoupe` computed the document-space point by adding `clipView.convert(windowPt, from: nil)` and `clipView.bounds.origin`. `NSClipView.isFlipped` mirrors `documentView.isFlipped`, but the mirror isn't always in sync during transient layout states — the two-step composition occasionally produced a document Y that lagged the true scroll position, so `findSequentialIndex` resolved a page that wasn't actually under the cursor and the loupe showed content from a page further up or down the document.
+
+**Fix:** Replaced the manual composition with `scrollView.documentView.convert(windowPt, from: nil)`. The documentView is authoritative for its own coordinate system (including `isFlipped`), so the window → document-space conversion now happens in one step with no synchronisation assumptions. The loupe tracks the correct page through arbitrary-length scrolls in both vertical and vertical-double.
+
+### Stale SwiftUI state when reusing the hosting view
+**Root cause:** The loupe panel reassigned `NSHostingView.rootView = AnyView(magnifier)` when the page under the cursor changed. With `AnyView` erasure the host occasionally carried over the previous page's internal SwiftUI state, producing a stale image at the new cursor coords even though the inputs were correct.
+
+**Fix:** Added a `loupeHostPage: Int?` tracker. When `page != loupeHostPage`, the current `NSHostingView` is removed from the panel and a brand-new instance is installed. `MagnifierView` is also tagged `.id(page)` so even within a single host, SwiftUI treats each page as a distinct identity and rebuilds the Canvas from scratch.
+
+### Async-fetch race
+**Root cause:** Each right-mouse-drag spawned a Task to decode the page's pixel buffer. Fast drags queued several Tasks whose captured `cursorInImageView` / `windowPt` were stale by the time they resolved, so a late Task could paint a previous page's image at the wrong position on top of the newest correct frame.
+
+**Fixes:**
+- `loupeTaskID` monotonic counter incremented at every `updateLoupe` entry. Each Task captures its ID at dispatch and checks it before calling `showMagnifier` — stale Tasks are silently dropped.
+- Prior `loupeTask` is cancelled before a new one is spawned; `Task.isCancelled` is checked before the expensive `CGContext.makeImage()` conversion.
+- If `MetalPageManager.page(for:)` returns `nil` (page not prefetched yet), the Task now falls back to `decodePage(pageIndex:from:)` with the captured `PageSource`. Loupe works even while the user scrolls faster than the visible-first prefetch.
+
+### Scroll-without-mouse-move refresh
+**Root cause:** A trackpad or scroll-wheel scroll doesn't fire `rightMouseDragged`, but the document slides under the fixed-on-screen cursor. Without a refresh, the loupe kept showing the page that *was* under the cursor before scrolling.
+
+**Fix:** `scrollDidChange` now triggers `updateLoupe` using the live cursor location from `NSEvent.mouseLocation` → `window.convertPoint(fromScreen:)`. Guards include `loupePanel != nil` (loupe is active) and `scrollView.bounds.contains(scrollViewLocal)` (cursor is actually over the scroll area), so the refresh is skipped when the cursor has strayed onto the toolbar or window chrome.
+
+### Unified left-click loupe across all reading modes
+Single and double page already bound the loupe to left-click (`ZoomableImageView` → `MouseCatcher` intentional button swap). Vertical and vertical-double were bound to right-click. The `NSEvent` monitor now listens for `.leftMouseDown / .leftMouseDragged / .leftMouseUp` so the gesture is the same in all four modes: left-click-and-hold to show, drag to move, release to dismiss. The monitor still returns the event (doesn't consume) so scroll-wheel / pinch / trackpad gestures continue to work during the drag.
+
+### Cursor hidden for the duration of the loupe
+- Added a `cursorHidden: Bool` state tracker so `NSCursor.hide()` / `unhide()` calls stay balanced — macOS auto-unhides the cursor when it leaves the application window, which breaks naive pair counting.
+- `hideCursorIfNeeded()` is re-asserted on every `rightMouseDragged` and on the scroll-driven refresh, defending against any auto-unhide that happens mid-drag (e.g. when the child panel is attached).
+- `showCursorIfNeeded()` on right-mouse-up, `hideLoupe()`, and in `deinit` (best-effort) — guarantees the cursor reappears even if the view is torn down while right-click is still held.
+
+---
+
+## v0.5.0 — 2026-04-23
+
+Vertical-reader bug fixes and cleanup. The Metal pipeline introduced in v0.3.1/0.4.0 shipped with three compounding rendering bugs that this release addresses, plus the first working loupe in vertical modes.
+
+### Vertical stretch — CAMetalLayer sublayer architecture
+**Root cause:** `MetalCanvasView` was `NSScrollView.documentView` with a frame matching the full stacked-pages height (tens of thousands of points), and its backing layer was a `CAMetalLayer` directly. `CAMetalLayer.contentsGravity` defaults to `.resize`, so a viewport-sized drawable (~1078 pt tall) was scaled to fill the full-document layer — ~94× vertical stretch, then cropped by the clip view. Pages in vertical and vertical-double modes appeared grossly elongated.
+
+**Fix:** `MetalCanvasView.makeBackingLayer()` now returns a plain `CALayer`; `CAMetalLayer` is added as a sublayer. A new `updateMetalLayerFrame()` pins the sublayer to the visible `clipView.bounds` (position + size) and sets `drawableSize = visible × contentsScale`, wrapped in `CATransaction.setDisableActions(true)` so the sublayer snaps without tweening. Called from `layout()`, the scroll handler, and before every `nextDrawable()`.
+
+### Fast-scroll page drop-off — four memory-neutral fixes
+**Root cause:** Each scroll event spawned a fresh prefetch `Task` without cancelling earlier ones; prefetch decoded pages in `firstIdx → lastIdx` order so off-screen lookahead pages decoded *before* the actually-visible pages; `render()` called `renderer.evictOutside(visibleRange)` every frame and purged freshly uploaded prefetch pages; and renders only fired on scroll events, so a page whose decode landed *after* the last scroll stayed black.
+
+**Fixes, all memory-neutral (both rings stay at the existing cap of 10):**
+- `prefetchTask` handle on the coordinator; cancel the prior task before starting a new one; `Task.isCancelled` checked between decodes.
+- Prefetch order is now the visible range first, then lookahead pages fanning outward by `±1, ±2, …` offsets.
+- Short-circuit for pages already in the texture ring before asking the actor to decode.
+- Re-render on upload: `onTextureReady(seqIdx)` fires a `render(visibleRange:)` if the just-uploaded page is in the current visible range.
+- Removed the per-frame `renderer.evictOutside(visibleRange)` call. The `TextureRingBuffer` (cap 10) and `MetalPageManager.decodedPages` (cap 10) already bound memory via LRU.
+
+### Vertical-double rendering
+**Root cause:** `pageYOffsets` was indexed by *row* while `pagePositions` was indexed by *page id*. The visible-range binary search returned row indices but the render loop resolved them through `pages[rowIndex]`, addressing the wrong page for every row past the first. The binary search also returned the rightmost match on Y-ties, clipping the leftmost page of the top visible row and the rightmost of the bottom. On top of that, the `composeSpread` compute kernel waited for *both* halves of a pair before producing a spread texture, so a slow-decoding right half blanked the entire row.
+
+**Fixes:**
+- `rebuildLayout()` double-page branch now appends `pageYOffsets` twice per pair (left and right sharing the same Y). Everything downstream is consistently page-indexed, matching single-page mode.
+- `updateVisibleRange()` walks left from `firstVisible` and right from `lastVisible` across duplicate-Y entries so both halves of a row are always in range.
+- `findSequentialIndex(at:)` walks across the same-Y page run and returns whichever page's horizontal bounds contain the cursor — so the loupe hit-tests correctly on left and right halves.
+- Removed the spread composition path entirely. Left and right pages render as two independent quads from their individual `pagePositions` rects, so each page appears the instant its own texture uploads.
+
+### Loupe for vertical and vertical-double
+Vertical reading modes now have the same right-click-hold magnifier that single/double-page mode has.
+
+- Right-mouse events captured via a window-local `NSEvent.addLocalMonitorForEvents` monitor (not a subview) so scrolling, pinch-zoom, and scroll-wheel zoom keep working.
+- The same SwiftUI `MagnifierView` (Canvas-based, 1.45× magnification, circular clip) that single/double-page mode uses is hosted inside a borderless non-activating child `NSPanel` attached to the main window via `addChildWindow(_:ordered:)`. Using a panel rather than a subview of `window.contentView` avoids SwiftUI's `WindowGroup`-managed hosting view stripping foreign subviews on its own layout passes (which was silently killing the loupe under the initial implementation).
+- Source NSImage is resolved in order: (1) one-entry cache of the last cursored page so drag-moves are instant; (2) `PageImageCache` if the page is already decoded for single/double mode; (3) async snapshot from the `CVPixelBuffer` held by `MetalPageManager` via `CGContext.makeImage()`. Memory overhead: one NSImage (~10 MB) bounded by the cache being replaced on page change.
+- Panel teardown uses `removeChildWindow` + `orderOut` on right-mouse-up.
+
+### Cleanup
+- Deleted the 806-line commented-out `VerticalComicScrollView.swift` (replaced by `MetalPageView` in v0.4.0) and the `/* OLD: */` block in `ReaderView.verticalScrollView(...)`.
+- Removed the old pre-MagnifierView loupe infrastructure: `MetalLoupeOverlayView`, `LoupeMetalView`, `MetalLoupeView`, `MetalPageRenderer.renderLoupe`, `loupePipeline`, and the `loupeKernel` in `Shaders.metal`. Never worked in vertical modes (overlay sibling blocked scrolling; compute-kernel radius units were wrong).
+- Removed the dead spread composition path: `SpreadInfo`, `Coordinator.spreads`, `MetalPageRenderer.spreadTextures`, `setSpreads`, `composeSpread`, `renderSpreadIntoTexture`, `spreadTexture(for:)`, `blitPipeline`, and `composeSpreadKernel` in `Shaders.metal`.
+- Removed `MetalPageRenderer.evictOutside` / `TextureRingBuffer.evictOutside` (no callers after the per-frame evict was dropped).
+- Removed `MetalPageRenderer.uploadImage` (unused).
+- Removed `MetalPageManager.device` field and `init(device:)` parameter (unused) and the `import Metal` that only existed to type that parameter.
+- Trimmed chatty per-render/per-upload/per-loupe diagnostic `DCLogger` calls added while fixing the above.
+
+### Shader
+- `Shaders.metal` `vertexShader` previously clamped `viewY` into `[0, 1]` to "keep pages inside the viewport", which squashed off-viewport vertices onto the viewport edges while the texcoords interpolated unchanged — this was the second, subtler half of the vertical-stretch bug. Clamp removed; the rasterizer's NDC clipping handles the visible slice correctly.
+
+---
+
+## v0.4.1 — 2026-04-22
+
+### Bug Fix — 1× Drawable / backingScaleFactor
+
+**Root cause:** `NSScreen.main?.backingScaleFactor` returned 1.0 instead of 2.0 on Retina displays. Since the value was not nil, the `?? 2.0` fallback never triggered, causing all Metal drawables to be created at 1× scale instead of 2×.
+
+**Fix:** Replaced `NSScreen.main?.backingScaleFactor` with `NSScreen.screens.first?.backingScaleFactor` at both sites in `MetalPageView.swift`:
+- `setup()` (line 75) — `metalLayer.contentsScale`
+- `makeBackingLayer()` (line 318) — `MetalCanvasView`
+
+**Logging added:**
+- `[MetalPageView] setup: NSScreen.screens.first?.backingScaleFactor = ...`
+- `[MetalCanvasView] makeBackingLayer: NSScreen.screens.first?.backingScaleFactor = ...`
+
+**Build:** Verified clean (`swift build`).
+
+---
+
 ## v0.4.0 — 2026-04-20
 
 ### Metal Rendering Pipeline — Complete
