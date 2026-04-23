@@ -700,6 +700,7 @@ extension MetalPageView {
             ) { [weak self] event in
                 guard let self = self,
                       let scrollView = self.scrollView,
+                      event.window === scrollView.window,
                       event.modifierFlags.contains(.command) else {
                     return event
                 }
