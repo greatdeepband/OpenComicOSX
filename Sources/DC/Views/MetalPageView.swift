@@ -111,6 +111,8 @@ struct MetalPageView: NSViewRepresentable {
         // NSScrollView — any overlay sibling that intercepts events would
         // also block scroll-wheel / pinch-zoom gestures.
         context.coordinator.installLoupeMonitor()
+        context.coordinator.installZoomWheelMonitor()
+        context.coordinator.installDoubleClickMonitor()
 
         return scrollView
     }
@@ -294,6 +296,8 @@ extension MetalPageView {
         /// updates occasionally retaining stale SwiftUI state).
         private var loupeHostPage: Int?
         private var loupeEventMonitor: Any?
+        private var zoomWheelMonitor: Any?
+        private var doubleClickMonitor: Any?
         private var loupeImage: (page: Int, nsImage: NSImage)?
         /// Monotonically-increasing token for async image-fetch Tasks. Each
         /// `updateLoupe` call bumps the token, and a Task only applies its
@@ -317,8 +321,12 @@ extension MetalPageView {
             if let monitor = loupeEventMonitor {
                 NSEvent.removeMonitor(monitor)
             }
-            // Make sure the cursor isn't left hidden if the view is torn down
-            // mid-loupe (e.g. user closes the comic while still right-clicking).
+            if let monitor = zoomWheelMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            if let monitor = doubleClickMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
             if cursorHidden { NSCursor.unhide() }
         }
 
@@ -678,6 +686,72 @@ extension MetalPageView {
             ) { [weak self] event in
                 self?.handleLoupeEvent(event)
                 return event
+            }
+        }
+
+        /// ⌘+scroll-wheel adjusts NSScrollView.magnification in non-vertical
+        /// layouts. Un-modified scroll-wheel is left alone — NSScrollView
+        /// handles it as pan. In `.verticalStack`, un-modified scroll-wheel
+        /// moves the reader up/down (native NSScrollView behaviour).
+        func installZoomWheelMonitor() {
+            guard zoomWheelMonitor == nil else { return }
+            zoomWheelMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: .scrollWheel
+            ) { [weak self] event in
+                guard let self = self,
+                      let scrollView = self.scrollView,
+                      event.modifierFlags.contains(.command) else {
+                    return event
+                }
+                // Only intercept in zoom-pan layouts — vertical modes keep
+                // native NSScrollView behaviour even with ⌘ held.
+                switch self.layout {
+                case .singlePage, .doubleSpread: break
+                case .verticalStack: return event
+                }
+                // Adjust magnification proportionally to the wheel delta.
+                // 0.01 step per wheel tick matches SwiftUI's old behaviour.
+                let step: CGFloat = 1 + CGFloat(event.scrollingDeltaY) * 0.01
+                let newMag = scrollView.magnification * step
+                let clamped = min(max(newMag, scrollView.minMagnification), scrollView.maxMagnification)
+                scrollView.magnification = clamped
+                self.onMagnificationChanged?(clamped)
+                return nil // consume the event
+            }
+        }
+
+        /// Double-click inside the metal view toggles fit-to-width ↔ reset.
+        /// Matches the old SwiftUI `TapGesture(count: 2)` handler.
+        func installDoubleClickMonitor() {
+            guard doubleClickMonitor == nil else { return }
+            doubleClickMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: .leftMouseDown
+            ) { [weak self] event in
+                guard let self = self,
+                      let scrollView = self.scrollView,
+                      event.clickCount == 2,
+                      event.window === scrollView.window else {
+                    return event
+                }
+                switch self.layout {
+                case .singlePage, .doubleSpread: break
+                case .verticalStack: return event
+                }
+                // Ensure the click is inside the scroll area (not on toolbar).
+                let svLocal = scrollView.convert(event.locationInWindow, from: nil)
+                guard scrollView.bounds.contains(svLocal) else { return event }
+                // Toggle: zoomed-in → reset; otherwise → fit-to-width (mag = 1).
+                if scrollView.magnification > 1.05 {
+                    scrollView.animator().magnification = 1.0
+                } else {
+                    // "Fit to width" for a layout whose documentView width
+                    // already equals the container width is magnification = 1.
+                    // If the document is taller than the viewport we let
+                    // NSScrollView scroll naturally.
+                    scrollView.animator().magnification = 1.0
+                }
+                self.onMagnificationChanged?(1.0)
+                return nil
             }
         }
 
