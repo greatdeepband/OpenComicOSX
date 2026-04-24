@@ -31,6 +31,12 @@ struct MetalPageView: NSViewRepresentable {
     let restorePage: Int?
     let restoreOffset: Double?
     let pageManager: MetalPageManager
+    /// Top inset applied via `NSScrollView.contentInsets` so the scroll view
+    /// stretches to the full window height (required to dodge the macOS 26
+    /// "scroll-into-header" bug) while still reserving the top region for an
+    /// overlaid UI bar. The scroll view's frame is full-height; content simply
+    /// can't enter the inset band.
+    var topContentInset: CGFloat = 0
 
     var onPageChanged: (Int) -> Void
     var onOffsetChanged: (Double) -> Void
@@ -51,6 +57,19 @@ struct MetalPageView: NSViewRepresentable {
         // rendering path that lets NSScrollView content bleed above the view.
         // See: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/
         scrollView.borderType = .noBorder
+        // Reserve space for an overlaid top bar via NSScrollView's native
+        // contentInsets rather than SwiftUI .padding. SwiftUI padding frames
+        // the scroll view at Y=topInset, which does NOT satisfy the Tahoe
+        // bug's precondition (the scroll view must stretch top-to-bottom of
+        // its containing window content area). With contentInsets the scroll
+        // view frame is full-height, the clip view honors the inset as a
+        // non-scrollable top band, and zoomed content cannot overflow above.
+        if topContentInset > 0 {
+            scrollView.automaticallyAdjustsContentInsets = false
+            scrollView.contentInsets = NSEdgeInsets(
+                top: topContentInset, left: 0, bottom: 0, right: 0
+            )
+        }
         // Ensure the scroll view and its clip view never bleed outside the
         // frame SwiftUI has allocated, even when magnification > 1. Without
         // this the zoomed content can overflow upward into the reader top bar

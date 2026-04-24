@@ -56,8 +56,15 @@ struct ReaderView: View {
             GeometryReader { geo in
                 ZStack {
                     Color.black
+                    // NOTE: no .padding(.top, readerTopBarHeight) here —
+                    // applying SwiftUI padding frames the NSScrollView at
+                    // Y=topBarHeight, which defeats the macOS 26 Tahoe
+                    // scroll-into-header workaround (the scroll view must
+                    // stretch top-to-bottom of the window). Metal-backed
+                    // branches use NSScrollView.contentInsets instead;
+                    // SwiftUI-only branches (SpreadView, for now) apply their
+                    // own top padding internally.
                     modeContent(containerSize: geo.size)
-                        .padding(.top, readerTopBarHeight) // keep content visually below the bar
                 }
                 .onChange(of: geo.size) { _, newSize in vm.containerSize = newSize }
                 .onAppear { vm.containerSize = geo.size }
@@ -132,6 +139,7 @@ struct ReaderView: View {
             restorePage: vm.currentPage,
             restoreOffset: nil,
             pageManager: vm.pageManager,
+            topContentInset: readerTopBarHeight,
             onPageChanged: { _ in /* single-page does not scroll between pages */ },
             onOffsetChanged: { _ in /* single-page ignores scroll fraction */ },
             onMagnificationChanged: { newScale in
@@ -168,6 +176,10 @@ struct ReaderView: View {
                 else { vm.fitToWidth(containerWidth: containerSize.width) }
             }
         )
+        // SpreadView is still SwiftUI-rendered in phase A-1; reserve top-bar
+        // space via SwiftUI padding. Phase A-2 will migrate this to
+        // MetalPageView + topContentInset.
+        .padding(.top, readerTopBarHeight)
     }
 
     // MARK: - Vertical Scroll (single or double column)
@@ -185,6 +197,7 @@ struct ReaderView: View {
                 restorePage: vm.currentPage,
                 restoreOffset: vm.savedScrollOffset,
                 pageManager: vm.pageManager,
+                topContentInset: readerTopBarHeight,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
                 onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction },
                 onMagnificationChanged: { newScale in
