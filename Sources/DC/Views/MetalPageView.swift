@@ -46,13 +46,21 @@ struct MetalPageView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
+        // Vertical modes: vertical scroller only. Single/double: both axes —
+        // a zoomed page can overhang in either direction, so both scrollers
+        // must be available. autohidesScrollers keeps the chrome clean.
         scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
+        switch layout {
+        case .verticalStack:
+            scrollView.hasHorizontalScroller = false
+        case .singlePage, .doubleSpread:
+            scrollView.hasHorizontalScroller = true
+        }
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.contentView.drawsBackground = false
         scrollView.allowsMagnification = true
-        scrollView.minMagnification = 0.1
+        scrollView.minMagnification = 0.25
         scrollView.maxMagnification = 8.0
         scrollView.magnification = scale
 

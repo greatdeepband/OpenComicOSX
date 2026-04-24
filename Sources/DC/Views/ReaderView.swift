@@ -51,7 +51,14 @@ struct ReaderView: View {
             Divider()
             GeometryReader { geo in
                 ZStack {
-                    Color.black.ignoresSafeArea()
+                    // Do NOT use .ignoresSafeArea() here — this ZStack is
+                    // already below the readerTopBar in the VStack, so it
+                    // must stay within its layout bounds. ignoresSafeArea()
+                    // on Color.black would expand the ZStack upward, making
+                    // geo.size include the top-bar height and causing
+                    // modeContent (and the NSScrollView backing it) to
+                    // overlap the custom readerTopBar.
+                    Color.black
                     modeContent(containerSize: geo.size)
                 }
                 .onChange(of: geo.size) { _, newSize in vm.containerSize = newSize }
