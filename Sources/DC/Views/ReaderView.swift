@@ -46,24 +46,27 @@ struct ReaderView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            readerTopBar
-            Divider()
+        ZStack(alignment: .top) {
+            // Reader content fills the full window height. The NSScrollView
+            // inside MetalPageView therefore stretches from the top of the
+            // window's content view to the bottom — avoiding the macOS 26
+            // (Tahoe) bug where a non-full-height NSScrollView lets its
+            // content render OVER anything above it in the same layout tree.
+            // See: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/
             GeometryReader { geo in
                 ZStack {
-                    // Do NOT use .ignoresSafeArea() here — this ZStack is
-                    // already below the readerTopBar in the VStack, so it
-                    // must stay within its layout bounds. ignoresSafeArea()
-                    // on Color.black would expand the ZStack upward, making
-                    // geo.size include the top-bar height and causing
-                    // modeContent (and the NSScrollView backing it) to
-                    // overlap the custom readerTopBar.
                     Color.black
                     modeContent(containerSize: geo.size)
+                        .padding(.top, readerTopBarHeight) // keep content visually below the bar
                 }
-                .clipped()   // prevent NSScrollView content from bleeding above the top bar at magnification > 1
                 .onChange(of: geo.size) { _, newSize in vm.containerSize = newSize }
                 .onAppear { vm.containerSize = geo.size }
+            }
+
+            // Top bar overlay — sits visually above the reader content.
+            VStack(spacing: 0) {
+                readerTopBar
+                Divider()
             }
         }
         .toolbar(.hidden, for: .windowToolbar)
@@ -71,6 +74,11 @@ struct ReaderView: View {
         .onAppear  { KeyMonitor.shared.start(handler: handleKey); let msg = "ReaderView.onAppear — readingMode=\(vm.readingMode), currentPage=\(vm.currentPage), savedScrollOffset=\(String(describing: vm.savedScrollOffset))"; print("[DEBUG] \(msg)"); Task { await DCLogger.shared.log(msg) } }
         .onDisappear { if library.openComic == nil { KeyMonitor.shared.stop() } }
     }
+
+    /// Height of the reader top bar. Used to inset `modeContent`'s top edge
+    /// so the page doesn't render behind the bar. Must match the bar's
+    /// intrinsic height — currently 38pt per `readerTopBar`.
+    private var readerTopBarHeight: CGFloat { 38 }
 
     private func handleKey(_ key: MonitoredKey) {
         let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble

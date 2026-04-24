@@ -46,6 +46,11 @@ struct MetalPageView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
+        // Belt-and-suspenders fix for the macOS 26 (Tahoe) scroll-into-header
+        // bug: setting borderType = .noBorder independently disables the
+        // rendering path that lets NSScrollView content bleed above the view.
+        // See: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/
+        scrollView.borderType = .noBorder
         // Ensure the scroll view and its clip view never bleed outside the
         // frame SwiftUI has allocated, even when magnification > 1. Without
         // this the zoomed content can overflow upward into the reader top bar
