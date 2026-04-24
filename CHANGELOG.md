@@ -1,5 +1,81 @@
 # DC Reader — Changelog
 
+## Unreleased — Step A phase A-1 (single-page Metal migration)
+
+**Status:** Phase A-1 implementation complete, pending user smoke test.
+**Backup before:** `/Volumes/Media/DC_dev_lib_backup_20260423_234635/` (pre-v0.9.0).
+**App built at:** `/Volumes/Media/DC_dev_lib/OpenComic.app`.
+
+### What shipped in A-1
+Single Page mode now renders through `MetalPageView` — the same Metal-backed NSScrollView + CAMetalLayer stack that drives vertical and vertical-double. Decode cache is the shared `MetalPageManager` from v0.9.0; loupe, prefetch, and eviction paths are now unified for three of the four reading modes (double-page still uses SwiftUI `SpreadView` until phase A-2).
+
+### New `MetalPageView` surface
+- **`ReadingLayout` enum:** `.verticalStack(pagesPerRow:)` · `.singlePage` · `.doubleSpread`. Drives all layout branching in `Coordinator.rebuildLayout()`.
+- **`rebuildSinglePage()`** — lays out the current page fit-to-container as one quad; frame-resize zoom scales the documentView around the page.
+- **`rebuildDoubleSpread()`** — stub in place for phase A-2 (lays out left+right or single-spread at half/full width).
+- **Per-layout scrollers:** vertical modes get vertical-only; single/double get both axes (a zoomed page can overhang in any direction).
+- **Zoom path split:**
+  - Vertical modes → native `NSScrollView.magnification` (CALayer transform, fast).
+  - Single/double modes → documentView frame-resize in `rebuildLayout`. `scrollView.magnification` is pinned to 1.0 because the magnification transform is unsafe with `CAMetalLayer` (direct-to-surface drawable bypasses clipView clipping when a scale transform is present).
+- **New NSEvent monitors** (local, scoped to the scroll view's window):
+  - `installZoomWheelMonitor()` — ⌘+scroll-wheel zoom.
+  - `installDoubleClickMonitor()` — double-click fit-to-width / reset.
+  - `installPinchMonitor()` — trackpad pinch-to-zoom.
+  - Existing loupe monitor preserved.
+- **`topContentInset` parameter** — reserves top-bar space via native `NSScrollView.contentInsets` instead of SwiftUI padding (see "Tahoe scroll-into-header bug" below).
+- **`recenterIfContentFits()`** — re-centers the documentView when the zoomed content is smaller than the viewport (prevents zoom-out leaving content off-center).
+- **`updateMetalLayerFrame()`** — clamps `metalLayer.frame` to `clipView.bounds.intersection(documentView.bounds)` so the Metal drawable never paints outside the visible region.
+
+### `ReaderView` wiring
+- `singlePageView` now constructs `MetalPageView(layout: .singlePage, …)`. `ZoomableImageView` still imported but no longer invoked for single-page.
+- `doublePageView` unchanged — still uses `SpreadView` (SwiftUI) until phase A-2.
+- Top-bar overlay restructured to ZStack(alignment: .top) — the reader content fills the full window height, and the top bar sits visually above it. Outer SwiftUI `.padding(.top, 38)` removed for Metal-backed modes (see bug note below). `SpreadView` still gets the padding applied at its call site.
+- `FullSizeTitleBarConfigurator` + `TitlebarEffectView` (NSVisualEffectView `.titlebar`, `.behindWindow`) preserved — the custom 38pt bar is pixel-identical to native window chrome.
+
+### Tahoe scroll-into-header bug — final fix
+**Symptom:** zoomed single-page content rendered over the reader top bar.
+
+**Root cause:** macOS 26 (Tahoe) introduced a regression where an `NSScrollView` whose frame does **not** stretch top-to-bottom of its containing window content view lets its scrolled content render OVER any sibling view above it in the layout tree. See Sarah Reichelt's article: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/.
+
+**What didn't work:**
+- SwiftUI `.clipped()` on the MetalPageView.
+- `scrollView.layer.masksToBounds = true` + `contentView.layer.masksToBounds = true`.
+- Removing `NSScrollView.magnification` in favor of documentView frame-resize zoom.
+- Restructuring to a ZStack overlay while still applying `.padding(.top, 38)` to the reader content — the SwiftUI padding framed the scroll view at Y=38, **defeating the bug's workaround precondition** (the scroll view must be full-height).
+
+**What worked (commit `eaf85f2`):** reserve top-bar space via native `NSScrollView.contentInsets` instead of SwiftUI padding. The scroll view frame is now genuinely full-height; the clip view treats the top 38pt as a non-scrollable band; content cannot enter it regardless of zoom. Paired with `scrollView.borderType = .noBorder` as belt-and-suspenders (independently disables the buggy render path).
+
+### Commit sequence (A-1)
+| Commit | What |
+|---|---|
+| `c70d545` | spec: Metal-rendered single & double page (step A) |
+| `7e0e94b` | plan: implementation tasks for Metal single/double page |
+| `97c0e6a` | feat: add `ReadingLayout` enum + layout/currentPage params |
+| `5ee1726` | feat: Coordinator tracks layout + currentPage |
+| `6a5f78b` | feat: `rebuildLayout` branches on ReadingLayout; single-page path |
+| `237c799` | feat: cmd-scroll zoom + double-click fit-to-width monitors |
+| `ded80f6` | fix: scope cmd-scroll monitor to its own window |
+| `19725a8` | feat: single-page mode now renders via MetalPageView |
+| `d4a4d0e` | fix: single-page zoom/pan + navbar overlap (enable horizontal scroller; remove ignoresSafeArea) |
+| `27e33e2` | fix: clamp Metal layer to documentView; recenter on zoom |
+| `0224039` | fix: clip scrollView to its frame to prevent zoom overlap (insufficient alone) |
+| `a4935ca` | fix: single/double zoom via frame-resize (no magnification transform) |
+| `e4dec2b` | fix: work around macOS Tahoe scroll-into-header bug (full-height scrollView + borderless) |
+| `eaf85f2` | fix: reserve top-bar space via `NSScrollView.contentInsets` (final fix) |
+
+### Verification
+`swift build -c release` clean (pre-existing warnings only). `./build_app.sh` produces `OpenComic.app`. Manual user smoke test of single-page mode is **pending**: open a comic, zoom past 1× (pinch / ⌘-scroll / ↑ key / double-click), scroll the zoomed page around, verify the image stays below the top bar in all directions; verify keyboard shortcuts and loupe; verify behavior on CBZ, CBR, PDF.
+
+### What remains (to pick up in the next session)
+- **Phase A-1 gate:** user confirms single-page mode smoke test passes.
+- **Phase A-2 (tasks 6–8):** `rebuildDoubleSpread` body + `doublePageView` wired to `MetalPageView(layout: .doubleSpread, …)` + A-2 gate smoke test. SpreadView becomes dead code after this phase but is NOT deleted yet.
+- **Phase A-3 (tasks 9–12):** delete `ZoomableImageView` (entire file), delete `SpreadView` struct + `MouseCatcher` + `ScrollWheelModifier` family from `ReaderView.swift`, trim `pagesPerRow` API now that only vertical-double uses pagesPerRow=2, write CHANGELOG v0.10.0 entry.
+
+Spec: `docs/superpowers/specs/2026-04-24-metal-rendered-single-double-page-step-a-design.md`.
+Plan: `docs/superpowers/plans/2026-04-24-metal-rendered-single-double-page-step-a.md`.
+
+---
+
 ## v0.9.0 — 2026-04-23
 
 Reader decode cache unified. Single-page, double-page, vertical, and vertical-double modes now all decode through one shared `MetalPageManager` instance. `PageImageCache` retired.
