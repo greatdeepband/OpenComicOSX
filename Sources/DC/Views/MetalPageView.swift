@@ -226,15 +226,22 @@ final class MetalCanvasView: NSView {
         }
         let scale = metalLayer.contentsScale
         let maxDim: CGFloat = 16384
-        let w = max(1, min(visible.width * scale, maxDim))
-        let h = max(1, min(visible.height * scale, maxDim))
-        guard w > 0, h > 0, visible.width > 0, visible.height > 0 else { return }
+        // Clamp the sublayer frame to the documentView's own bounds. If the
+        // clipView is larger than the documentView (zoomed out / small page),
+        // clipView.bounds can have a negative origin — drawing there would put
+        // the sublayer off the documentView, which visually leaks over sibling
+        // chrome like the reader top bar. Intersect with documentView bounds.
+        let docFrame = CGRect(origin: .zero, size: bounds.size)
+        let clamped = visible.intersection(docFrame)
+        let w = max(1, min(clamped.width * scale, maxDim))
+        let h = max(1, min(clamped.height * scale, maxDim))
+        guard w > 0, h > 0, clamped.width > 0, clamped.height > 0 else { return }
 
         // Disable implicit CA animation so the layer snaps to the scroll
         // position on each scroll event instead of tweening behind it.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        metalLayer.frame = visible
+        metalLayer.frame = clamped
         metalLayer.drawableSize = CGSize(width: w, height: h)
         CATransaction.commit()
     }
@@ -679,6 +686,44 @@ extension MetalPageView {
             lastScale = sv.magnification
             scale = sv.magnification
             onMagnificationChanged?(sv.magnification)
+            recenterIfContentFits()
+        }
+
+        /// In single/double-page layouts, re-centre the documentView within
+        /// the clipView whenever zooming leaves the content smaller than the
+        /// viewport. Called after magnificationDidChange and from the cmd-
+        /// scroll-wheel monitor. Vertical modes are skipped — they intentionally
+        /// allow the user to scroll freely.
+        func recenterIfContentFits() {
+            guard let sv = scrollView, let doc = sv.documentView else { return }
+            switch layout {
+            case .verticalStack: return
+            case .singlePage, .doubleSpread: break
+            }
+            let clip = sv.contentView
+            // clipView.bounds is in documentView-local coords, scaled by
+            // `magnification`. An unzoomed single-page document has the same
+            // width as the clipView; when zoomed out, the clipView bounds are
+            // LARGER than the document — negative origin centres visually by
+            // default in NSScrollView, but the doc can also drift when the
+            // user scrolled and then zoomed back out.
+            let docSize = doc.frame.size
+            let visibleSize = clip.bounds.size
+            var newOrigin = clip.bounds.origin
+            if visibleSize.width > docSize.width {
+                newOrigin.x = (docSize.width - visibleSize.width) / 2
+            } else {
+                newOrigin.x = max(0, min(newOrigin.x, docSize.width - visibleSize.width))
+            }
+            if visibleSize.height > docSize.height {
+                newOrigin.y = (docSize.height - visibleSize.height) / 2
+            } else {
+                newOrigin.y = max(0, min(newOrigin.y, docSize.height - visibleSize.height))
+            }
+            if newOrigin != clip.bounds.origin {
+                clip.scroll(to: newOrigin)
+                sv.reflectScrolledClipView(clip)
+            }
         }
 
         // MARK: - Loupe
@@ -725,6 +770,7 @@ extension MetalPageView {
                 let clamped = min(max(newMag, scrollView.minMagnification), scrollView.maxMagnification)
                 scrollView.magnification = clamped
                 self.onMagnificationChanged?(clamped)
+                self.recenterIfContentFits()
                 return nil // consume the event
             }
         }
@@ -760,6 +806,7 @@ extension MetalPageView {
                     scrollView.animator().magnification = 1.0
                 }
                 self.onMagnificationChanged?(1.0)
+                self.recenterIfContentFits()
                 return nil
             }
         }
