@@ -61,6 +61,7 @@ struct ReaderView: View {
                     Color.black
                     modeContent(containerSize: geo.size)
                 }
+                .clipped()   // prevent NSScrollView content from bleeding above the top bar at magnification > 1
                 .onChange(of: geo.size) { _, newSize in vm.containerSize = newSize }
                 .onAppear { vm.containerSize = geo.size }
             }

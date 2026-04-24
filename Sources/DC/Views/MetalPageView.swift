@@ -46,6 +46,14 @@ struct MetalPageView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
+        // Ensure the scroll view and its clip view never bleed outside the
+        // frame SwiftUI has allocated, even when magnification > 1. Without
+        // this the zoomed content can overflow upward into the reader top bar
+        // under .fullSizeContentView / .hiddenTitleBar window styling.
+        scrollView.wantsLayer = true
+        scrollView.layer?.masksToBounds = true
+        scrollView.contentView.wantsLayer = true
+        scrollView.contentView.layer?.masksToBounds = true
         // Vertical modes: vertical scroller only. Single/double: both axes —
         // a zoomed page can overhang in either direction, so both scrollers
         // must be available. autohidesScrollers keeps the chrome clean.
