@@ -67,10 +67,25 @@ struct MetalPageView: NSViewRepresentable {
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.contentView.drawsBackground = false
+        // Vertical modes use NSScrollView's native magnification (fast CALayer
+        // transform). Single/double use frame-resize zoom — NSScrollView's
+        // magnification transform is NOT safe with CAMetalLayer because the
+        // direct-to-surface Metal drawable bypasses ancestor layer clipping
+        // when a scale transform is present on the clipView. Instead, zoom
+        // is achieved by scaling the documentView frame in `rebuildLayout`.
         scrollView.allowsMagnification = true
-        scrollView.minMagnification = 0.25
-        scrollView.maxMagnification = 8.0
-        scrollView.magnification = scale
+        switch layout {
+        case .verticalStack:
+            scrollView.minMagnification = 0.1
+            scrollView.maxMagnification = 8.0
+            scrollView.magnification = scale
+        case .singlePage, .doubleSpread:
+            // Magnification stays at 1.0. `scale` drives documentView resize
+            // in the layout path.
+            scrollView.minMagnification = 1.0
+            scrollView.maxMagnification = 1.0
+            scrollView.magnification = 1.0
+        }
 
         let metalView = MetalCanvasView(frame: .zero)
         metalView.translatesAutoresizingMaskIntoConstraints = false
@@ -129,6 +144,7 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.installLoupeMonitor()
         context.coordinator.installZoomWheelMonitor()
         context.coordinator.installDoubleClickMonitor()
+        context.coordinator.installPinchMonitor()
 
         return scrollView
     }
@@ -143,7 +159,8 @@ struct MetalPageView: NSViewRepresentable {
             pagesPerRow: pagesPerRow,
             pages: pages,
             layout: layout,
-            currentPage: currentPage
+            currentPage: currentPage,
+            scale: scale
         )
 
         if needsRebuild {
@@ -160,7 +177,15 @@ struct MetalPageView: NSViewRepresentable {
         if abs(context.coordinator.lastScale - scale) > 0.001 {
             context.coordinator.lastScale = scale
             context.coordinator.scale = scale
-            scrollView.magnification = scale
+            switch layout {
+            case .verticalStack:
+                scrollView.magnification = scale
+            case .singlePage, .doubleSpread:
+                // Scale drives frame resize via rebuildLayout; already
+                // triggered above when needsRebuild detected the scale-induced
+                // layout change. Nothing more to do here.
+                break
+            }
         }
 
         context.coordinator.updateVisibleRange()
@@ -321,6 +346,7 @@ extension MetalPageView {
         private var loupeEventMonitor: Any?
         private var zoomWheelMonitor: Any?
         private var doubleClickMonitor: Any?
+        private var pinchMonitor: Any?
         private var loupeImage: (page: Int, nsImage: NSImage)?
         /// Monotonically-increasing token for async image-fetch Tasks. Each
         /// `updateLoupe` call bumps the token, and a Task only applies its
@@ -350,18 +376,23 @@ extension MetalPageView {
             if let monitor = doubleClickMonitor {
                 NSEvent.removeMonitor(monitor)
             }
+            if let monitor = pinchMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
             if cursorHidden { NSCursor.unhide() }
         }
 
-        func needsRebuild(containerWidth: CGFloat, pagesPerRow: Int, pages: [ComicPage], layout: ReadingLayout, currentPage: Int) -> Bool {
+        func needsRebuild(containerWidth: CGFloat, pagesPerRow: Int, pages: [ComicPage], layout: ReadingLayout, currentPage: Int, scale: CGFloat) -> Bool {
             if abs(lastContainerWidth - containerWidth) > 1 { return true }
             if lastPagesPerRow != pagesPerRow { return true }
             if lastLayout != layout { return true }
-            // For non-vertical layouts, a page-turn requires a layout rebuild
-            // because pagePositions / pageYOffsets must reflect the new page.
+            // For non-vertical layouts, a page-turn or scale change requires a
+            // layout rebuild because pagePositions / pageYOffsets must reflect
+            // the new page / zoomed frame size.
             switch layout {
             case .singlePage, .doubleSpread:
                 if lastCurrentPage != currentPage { return true }
+                if abs(lastScale - scale) > 0.001 { return true }
             case .verticalStack:
                 break
             }
@@ -456,9 +487,11 @@ extension MetalPageView {
             metalView.frame = CGRect(x: 0, y: 0, width: totalWidth, height: totalHeight)
         }
 
-        /// One page fits to the viewport width at natural aspect ratio.
-        /// `pagePositions` and `pageYOffsets` contain exactly one entry.
-        /// Document view bounds equal the page rect size.
+        /// One page fits to the viewport width (at `scale = 1.0`) at natural
+        /// aspect ratio. Zoom is achieved by scaling the documentView frame
+        /// so NSScrollView treats the zoomed size as the real document size —
+        /// this avoids CAMetalLayer compositing issues that `magnification`
+        /// introduces on macOS.
         private func rebuildSinglePage() {
             guard let metalView = metalView else { return }
             guard currentPage >= 0 && currentPage < pages.count else {
@@ -466,26 +499,64 @@ extension MetalPageView {
                 return
             }
             let page = pages[currentPage]
-            let pageWidth = containerWidth
+            let baseWidth = containerWidth
             let pageAR = page.naturalSize.height / max(page.naturalSize.width, 1)
-            let pageHeight = pageWidth * pageAR
+            let scaledWidth = baseWidth * scale
+            let scaledHeight = scaledWidth * pageAR
 
-            let rect = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
+            let rect = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)
             pagePositions[page.id] = rect
             pageYOffsets.append(0)
 
-            metalView.frame = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
+            metalView.frame = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)
         }
 
-        /// Stub for Phase A-2 — Task 6 fills this in. Until then, fall through
-        /// to the vertical-stack branch with `pagesPerRow == 2` as a temporary
-        /// fallback; this keeps the build green if a caller accidentally sets
-        /// `.doubleSpread` during the migration.
+        /// One or two pages side-by-side for a double-page spread. If the
+        /// current page is a natural spread (`.isSpread`), it fills the
+        /// document full-width and there is no right page. Otherwise the
+        /// current page occupies the left slot and `currentPage + 1` (if
+        /// it exists and isn't itself a spread) occupies the right slot.
+        /// Zoom via frame-resize (no magnification transform).
         private func rebuildDoubleSpread() {
-            let savedPagesPerRow = pagesPerRow
-            pagesPerRow = 2
-            rebuildVerticalStack()
-            pagesPerRow = savedPagesPerRow
+            guard let metalView = metalView else { return }
+            guard currentPage >= 0 && currentPage < pages.count else {
+                metalView.frame = CGRect(x: 0, y: 0, width: max(1, containerWidth), height: 1)
+                return
+            }
+
+            let leftPage = pages[currentPage]
+            let totalWidth = containerWidth * scale
+
+            if leftPage.isSpread {
+                let ar = leftPage.naturalSize.height / max(leftPage.naturalSize.width, 1)
+                let h = totalWidth * ar
+                let rect = CGRect(x: 0, y: 0, width: totalWidth, height: h)
+                pagePositions[leftPage.id] = rect
+                pageYOffsets.append(0)
+                metalView.frame = CGRect(x: 0, y: 0, width: totalWidth, height: h)
+                return
+            }
+
+            let pageWidth = (totalWidth - 2) / 2
+            let leftAR = leftPage.naturalSize.height / max(leftPage.naturalSize.width, 1)
+            let leftH = pageWidth * leftAR
+            let leftRect = CGRect(x: 0, y: 0, width: pageWidth, height: leftH)
+            pagePositions[leftPage.id] = leftRect
+            pageYOffsets.append(0)
+
+            var rightH: CGFloat = leftH
+            let rightIdx = currentPage + 1
+            if rightIdx < pages.count && !pages[rightIdx].isSpread {
+                let rightPage = pages[rightIdx]
+                let rightAR = rightPage.naturalSize.height / max(rightPage.naturalSize.width, 1)
+                rightH = pageWidth * rightAR
+                let rightRect = CGRect(x: pageWidth + 2, y: 0, width: pageWidth, height: rightH)
+                pagePositions[rightPage.id] = rightRect
+                pageYOffsets.append(0)
+            }
+
+            let spreadHeight = max(leftH, rightH)
+            metalView.frame = CGRect(x: 0, y: 0, width: totalWidth, height: spreadHeight)
         }
 
         func scrollToPage(_ page: Int) {
@@ -691,10 +762,18 @@ extension MetalPageView {
 
         @objc func magnificationDidChange(_ notification: Notification) {
             guard let sv = scrollView else { return }
-            lastScale = sv.magnification
-            scale = sv.magnification
-            onMagnificationChanged?(sv.magnification)
-            recenterIfContentFits()
+            switch layout {
+            case .verticalStack:
+                lastScale = sv.magnification
+                scale = sv.magnification
+                onMagnificationChanged?(sv.magnification)
+                recenterIfContentFits()
+            case .singlePage, .doubleSpread:
+                // We don't use magnification for these layouts; if a
+                // notification ever arrives (e.g. magnification forced to 1
+                // via range clamping), ignore it.
+                break
+            }
         }
 
         /// In single/double-page layouts, re-centre the documentView within
@@ -750,10 +829,11 @@ extension MetalPageView {
             }
         }
 
-        /// ⌘+scroll-wheel adjusts NSScrollView.magnification in non-vertical
-        /// layouts. Un-modified scroll-wheel is left alone — NSScrollView
-        /// handles it as pan. In `.verticalStack`, un-modified scroll-wheel
-        /// moves the reader up/down (native NSScrollView behaviour).
+        /// ⌘+scroll-wheel adjusts zoom. In single/double layouts zoom is
+        /// applied via `onMagnificationChanged` → `vm.scale` → frame-resize
+        /// (never via scrollView.magnification, which causes CAMetalLayer
+        /// compositing to bypass ancestor clipping). In vertical mode the
+        /// event is passed through so NSScrollView handles it natively.
         func installZoomWheelMonitor() {
             guard zoomWheelMonitor == nil else { return }
             zoomWheelMonitor = NSEvent.addLocalMonitorForEvents(
@@ -765,26 +845,24 @@ extension MetalPageView {
                       event.modifierFlags.contains(.command) else {
                     return event
                 }
-                // Only intercept in zoom-pan layouts — vertical modes keep
-                // native NSScrollView behaviour even with ⌘ held.
                 switch self.layout {
                 case .singlePage, .doubleSpread: break
                 case .verticalStack: return event
                 }
-                // Adjust magnification proportionally to the wheel delta.
-                // 0.01 step per wheel tick matches SwiftUI's old behaviour.
+                // Apply a proportional step to our own `scale` state (flows
+                // through ReaderViewModel → SwiftUI → rebuildLayout). We do
+                // NOT touch scrollView.magnification in single/double modes.
                 let step: CGFloat = 1 + CGFloat(event.scrollingDeltaY) * 0.01
-                let newMag = scrollView.magnification * step
-                let clamped = min(max(newMag, scrollView.minMagnification), scrollView.maxMagnification)
-                scrollView.magnification = clamped
+                let newScale = self.scale * step
+                let clamped = min(max(newScale, 0.25), 8.0)
                 self.onMagnificationChanged?(clamped)
-                self.recenterIfContentFits()
                 return nil // consume the event
             }
         }
 
-        /// Double-click inside the metal view toggles fit-to-width ↔ reset.
-        /// Matches the old SwiftUI `TapGesture(count: 2)` handler.
+        /// Double-click inside the metal view resets zoom to 1.0.
+        /// Drives scale via `onMagnificationChanged` → `vm.scale` → frame-resize
+        /// rather than scrollView.magnification (single/double modes only).
         func installDoubleClickMonitor() {
             guard doubleClickMonitor == nil else { return }
             doubleClickMonitor = NSEvent.addLocalMonitorForEvents(
@@ -803,18 +881,33 @@ extension MetalPageView {
                 // Ensure the click is inside the scroll area (not on toolbar).
                 let svLocal = scrollView.convert(event.locationInWindow, from: nil)
                 guard scrollView.bounds.contains(svLocal) else { return event }
-                // Toggle: zoomed-in → reset; otherwise → fit-to-width (mag = 1).
-                if scrollView.magnification > 1.05 {
-                    scrollView.animator().magnification = 1.0
-                } else {
-                    // "Fit to width" for a layout whose documentView width
-                    // already equals the container width is magnification = 1.
-                    // If the document is taller than the viewport we let
-                    // NSScrollView scroll naturally.
-                    scrollView.animator().magnification = 1.0
-                }
+                // Reset zoom via the scale binding rather than magnification.
                 self.onMagnificationChanged?(1.0)
-                self.recenterIfContentFits()
+                return nil
+            }
+        }
+
+        /// Trackpad pinch gesture → updates `vm.scale` via the onMagnificationChanged
+        /// callback. Replaces the NSScrollView.magnification pinch path for
+        /// single/double layouts, which don't use NSScrollView magnification.
+        func installPinchMonitor() {
+            guard pinchMonitor == nil else { return }
+            pinchMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: .magnify
+            ) { [weak self] event in
+                guard let self = self,
+                      let scrollView = self.scrollView,
+                      event.window === scrollView.window else {
+                    return event
+                }
+                switch self.layout {
+                case .singlePage, .doubleSpread: break
+                case .verticalStack: return event
+                }
+                let step: CGFloat = 1 + event.magnification
+                let newScale = self.scale * step
+                let clamped = min(max(newScale, 0.25), 8.0)
+                self.onMagnificationChanged?(clamped)
                 return nil
             }
         }
