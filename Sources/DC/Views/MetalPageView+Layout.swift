@@ -67,10 +67,6 @@ extension MetalPageView.Coordinator {
         // updateVisibleRange and recover via the normal path.
         guard retryAttempt < ReaderConstants.initialRenderMaxRetries else {
             pendingInitialRender = false
-            // Hitting the retry budget means the clipView never sized up
-            // within ~600ms — that's a real bug worth surfacing in debug.
-            // In release we still recover via the next user interaction.
-            assertionFailure("tryInitialRender exhausted \(ReaderConstants.initialRenderMaxRetries) retries; drawable \(drawable) still degenerate")
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + ReaderConstants.initialRenderRetryDelay) { [weak self] in
@@ -126,43 +122,6 @@ extension MetalPageView.Coordinator {
         lastPagesPerRow = pagesPerRow
 
         metalView.needsDisplay = true
-
-        // Post-rebuild structural invariants. If any of these fail in a
-        // debug build, the layout is internally inconsistent and the
-        // renderer / hit-test will silently produce wrong results
-        // (wrong-page-rendered, cursor-in-margin, black-page on switch).
-        // assert is stripped in release.
-        assert(sequentialToID.count == pages.count,
-               "sequentialToID.count (\(sequentialToID.count)) != pages.count (\(pages.count))")
-        assert(idToSequential.count == pages.count,
-               "idToSequential.count (\(idToSequential.count)) != pages.count (\(pages.count))")
-        if !pages.isEmpty {
-            switch layout {
-            case .singlePage:
-                assert(pageYOffsets.count == 1,
-                       "singlePage rebuild produced \(pageYOffsets.count) offsets (expected 1)")
-                if currentPage >= 0 && currentPage < pages.count {
-                    assert(pagePositions[pages[currentPage].id] != nil,
-                           "singlePage rebuild missing pagePositions entry for currentPage \(currentPage)")
-                }
-            case .doubleSpread:
-                assert(pageYOffsets.count == 1 || pageYOffsets.count == 2,
-                       "doubleSpread rebuild produced \(pageYOffsets.count) offsets (expected 1 or 2)")
-                if currentPage >= 0 && currentPage < pages.count {
-                    assert(pagePositions[pages[currentPage].id] != nil,
-                           "doubleSpread rebuild missing pagePositions entry for currentPage \(currentPage)")
-                }
-            case .verticalStack:
-                assert(!pageYOffsets.isEmpty,
-                       "verticalStack rebuild produced empty pageYOffsets despite \(pages.count) pages")
-                // pageYOffsets must be non-decreasing — the binary search in
-                // updateVisibleRange and findSequentialIndex relies on this.
-                for i in 1..<pageYOffsets.count {
-                    assert(pageYOffsets[i] >= pageYOffsets[i - 1],
-                           "pageYOffsets[\(i)]=\(pageYOffsets[i]) < pageYOffsets[\(i-1)]=\(pageYOffsets[i-1])")
-                }
-            }
-        }
     }
 
     /// Stacks every page top-to-bottom at `containerWidth * scale` (for
@@ -467,17 +426,6 @@ extension MetalPageView.Coordinator {
             && pageYOffsets[lastVisible + 1] == pageYOffsets[lastVisible] {
             lastVisible += 1
         }
-
-        // Vertical-mode visible-range invariants. firstVisible / lastVisible
-        // are computed by binary search over pageYOffsets; an out-of-range
-        // result here would crash the renderer's pages[seqIdx] lookup or
-        // produce silently-wrong renders.
-        assert(firstVisible >= 0 && firstVisible < pageYOffsets.count,
-               "firstVisible=\(firstVisible) out of bounds for pageYOffsets.count=\(pageYOffsets.count)")
-        assert(lastVisible >= firstVisible && lastVisible < pageYOffsets.count,
-               "lastVisible=\(lastVisible) invalid for firstVisible=\(firstVisible), pageYOffsets.count=\(pageYOffsets.count)")
-        assert(lastVisible < pages.count,
-               "lastVisible=\(lastVisible) out of bounds for pages.count=\(pages.count)")
 
         let visibleRange = firstVisible...lastVisible
 

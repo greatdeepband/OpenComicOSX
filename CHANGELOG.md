@@ -1,15 +1,5 @@
 # DC Reader — Changelog
 
-## v0.10.3 — 2026-04-25 — Debug-build invariant assertions
-
-### Added
-- **Structural invariants in `rebuildLayout`** — after every rebuild, assert that `sequentialToID.count == pages.count`, `idToSequential.count == pages.count`, the layout-specific `pageYOffsets` count is right, `pagePositions` has an entry for `currentPage` (single/double), and that vertical `pageYOffsets` is non-decreasing. Catches the silent inconsistency class of bug — wrong-page rendered, cursor-in-margin, sorting violation — at the moment the layout breaks rather than when the renderer downstream produces visibly wrong output.
-- **Visible-range invariant in vertical `updateVisibleRange`** — assert that the binary-search-derived `firstVisible` / `lastVisible` are in bounds for both `pageYOffsets` and `pages`. Would have caught the prefetch-out-of-range and pages-array indexing bugs from earlier sessions.
-- **Drawable-budget assertion in `tryInitialRender`** — when the ~600ms retry budget is exhausted with the drawable still degenerate, `assertionFailure` surfaces it loudly in debug builds. Release behavior unchanged (recovers via the next user interaction).
-- **Visible-range bounds assertion in `render`** — `lowerBound >= 0`, `upperBound < pages.count`. Loud-fail on out-of-range visibleRanges before they index into `pages[]`.
-
-All assertions use `assert` / `assertionFailure` and are stripped in release builds.
-
 ## v0.10.2 — 2026-04-25 — Reader-wide named constants + MetalPageView file split
 
 ### Changed
