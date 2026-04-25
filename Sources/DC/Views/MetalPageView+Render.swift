@@ -82,8 +82,22 @@ extension MetalPageView.Coordinator {
         guard let metalView = metalView,
               let renderer = renderer else { return }
 
+        // Visible range must address valid pages. Hitting this means an
+        // earlier path (updateVisibleRange / lastVisibleRange) handed us
+        // garbage; rendering would index into pages[] out of bounds or
+        // upload textures for non-existent pages.
+        assert(visibleRange.lowerBound >= 0,
+               "render called with negative lowerBound \(visibleRange.lowerBound)")
+        assert(visibleRange.upperBound < pages.count || pages.isEmpty,
+               "render visibleRange \(visibleRange) out of bounds for pages.count=\(pages.count)")
+
         metalView.updateMetalLayerFrame()
 
+        // Drawable / metalLayer-frame can be transiently degenerate during
+        // the 3-stage retry burst that fires on mode switch — those are
+        // expected races, not bugs (the retry is precisely the fix). The
+        // canonical "drawable never came up" case is asserted in
+        // tryInitialRender once the retry budget is exhausted.
         guard let drawable = metalView.metalLayer.nextDrawable() else { return }
 
         guard let commandBuffer = renderer.commandQueue.makeCommandBuffer() else { return }
