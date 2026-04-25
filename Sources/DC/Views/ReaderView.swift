@@ -41,6 +41,12 @@ struct ReaderView: View {
     @EnvironmentObject var library: LibraryViewModel
     @StateObject private var vm: ReaderViewModel
 
+    /// SwiftUI loupe overlay state. MetalPageView's Coordinator emits a
+    /// `LoupeOverlayState?` on every drag frame; we render the circle here
+    /// as a SwiftUI MagnifierView so the reader's ZStack bounds naturally
+    /// clip the loupe to the reader frame.
+    @State private var metalLoupe: LoupeOverlayState? = nil
+
     init(comic: Comic) {
         _vm = StateObject(wrappedValue: ReaderViewModel(comic: comic))
     }
@@ -60,12 +66,27 @@ struct ReaderView: View {
                     // applying SwiftUI padding frames the NSScrollView at
                     // Y=topBarHeight, which defeats the macOS 26 Tahoe
                     // scroll-into-header workaround (the scroll view must
-                    // stretch top-to-bottom of the window). Metal-backed
-                    // branches use NSScrollView.contentInsets instead;
-                    // SwiftUI-only branches (SpreadView, for now) apply their
-                    // own top padding internally.
+                    // stretch top-to-bottom of the window).
+                    // MetalPageView reserves the top-bar band internally
+                    // via NSScrollView.contentInsets.
                     modeContent(containerSize: geo.size)
+                    // Loupe overlay — sits in the same ZStack so the top bar
+                    // (rendered above in the outer ZStack) covers it as the
+                    // cursor approaches the top, and the window edge clips
+                    // the circle on every other side.
+                    if let loupe = metalLoupe {
+                        MagnifierView(
+                            image: loupe.image,
+                            cursorInImageView: loupe.cursorInImage,
+                            imageViewSize: loupe.imageViewSize
+                        )
+                        .position(x: loupe.position.x, y: loupe.position.y)
+                        .allowsHitTesting(false)
+                    }
                 }
+                // .clipped() removed — was suspected to cause black state on
+                // mode switch. The window itself clips, and the loupe overlay
+                // is naturally bounded by the SwiftUI hierarchy.
                 .onChange(of: geo.size) { _, newSize in vm.containerSize = newSize }
                 .onAppear { vm.containerSize = geo.size }
             }
@@ -84,8 +105,8 @@ struct ReaderView: View {
 
     /// Height of the reader top bar. Used to inset `modeContent`'s top edge
     /// so the page doesn't render behind the bar. Must match the bar's
-    /// intrinsic height — currently 38pt per `readerTopBar`.
-    private var readerTopBarHeight: CGFloat { 38 }
+    /// intrinsic height — currently sourced from `ReaderConstants.topBarHeight`.
+    private var readerTopBarHeight: CGFloat { ReaderConstants.topBarHeight }
 
     private func handleKey(_ key: MonitoredKey) {
         let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble
@@ -144,7 +165,8 @@ struct ReaderView: View {
             onOffsetChanged: { _ in /* single-page ignores scroll fraction */ },
             onMagnificationChanged: { newScale in
                 vm.setScaleFromScrollView(newScale)
-            }
+            },
+            onLoupeOverlay: { state in metalLoupe = state }
         )
     }
 
@@ -152,34 +174,24 @@ struct ReaderView: View {
 
     @ViewBuilder
     private func doublePageView(containerSize: CGSize) -> some View {
-        let _ = vm.cacheVersion  // creates SwiftUI dependency — re-evaluates when a page decode completes
-        let leftIsSpread = vm.currentPage < vm.pageCount && vm.comic.pages[vm.currentPage].isSpread
-        let leftImage  = vm.currentImage
-        // Spread pages occupy the full slot alone — no right page.
-        let rightImage: NSImage? = leftIsSpread ? nil : {
-            let next = vm.currentPage + 1
-            guard next < vm.pageCount else { return nil }
-            return vm.image(for: next)
-        }()
-
-        SpreadView(
-            leftImage: leftImage,
-            rightImage: rightImage,
-            leftIsSpread: leftIsSpread,
-            scale: $vm.scale,
-            offset: $vm.offset,
-            minScale: vm.minScale,
-            maxScale: vm.maxScale,
-            containerSize: containerSize,
-            onDoubleTap: {
-                if vm.scale > 1.05 { vm.resetZoom() }
-                else { vm.fitToWidth(containerWidth: containerSize.width) }
-            }
+        MetalPageView(
+            pages: vm.comic.pages,
+            layout: .doubleSpread,
+            currentPage: vm.currentPage,
+            pagesPerRow: 2,
+            scale: vm.scale,
+            containerWidth: containerSize.width,
+            restorePage: vm.currentPage,
+            restoreOffset: nil,
+            pageManager: vm.pageManager,
+            topContentInset: readerTopBarHeight,
+            onPageChanged: { _ in /* double-page advances via keyboard, not scroll */ },
+            onOffsetChanged: { _ in /* double-page ignores scroll fraction */ },
+            onMagnificationChanged: { newScale in
+                vm.setScaleFromScrollView(newScale)
+            },
+            onLoupeOverlay: { state in metalLoupe = state }
         )
-        // SpreadView is still SwiftUI-rendered in phase A-1; reserve top-bar
-        // space via SwiftUI padding. Phase A-2 will migrate this to
-        // MetalPageView + topContentInset.
-        .padding(.top, readerTopBarHeight)
     }
 
     // MARK: - Vertical Scroll (single or double column)
@@ -195,14 +207,35 @@ struct ReaderView: View {
                 scale: vm.scale,
                 containerWidth: containerSize.width,
                 restorePage: vm.currentPage,
-                restoreOffset: vm.savedScrollOffset,
+                // Live in-session offset (vm.scrollOffsetFraction) is what we
+                // use to remember position across mode switches. Falls back
+                // to the on-disk savedScrollOffset on first comic open. The
+                // saved fraction is only valid for the same pagesPerRow it
+                // was captured under — switching between vertical-single (1)
+                // and vertical-double (2) changes the doc height, so the
+                // fraction would land the user on the wrong page. In that
+                // case, pass nil so the page-based restore takes over.
+                restoreOffset: {
+                    if vm.scrollOffsetPagesPerRow == pagesPerRow,
+                       vm.scrollOffsetFraction != 0 {
+                        return vm.scrollOffsetFraction
+                    }
+                    if vm.scrollOffsetFraction == 0 {
+                        return vm.savedScrollOffset
+                    }
+                    return nil
+                }(),
                 pageManager: vm.pageManager,
                 topContentInset: readerTopBarHeight,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
-                onOffsetChanged: { fraction in vm.scrollOffsetFraction = fraction },
+                onOffsetChanged: { fraction in
+                    vm.scrollOffsetFraction = fraction
+                    vm.scrollOffsetPagesPerRow = pagesPerRow
+                },
                 onMagnificationChanged: { newScale in
                     vm.setScaleFromScrollView(newScale)
-                }
+                },
+                onLoupeOverlay: { state in metalLoupe = state }
             )
             // Note: NSScrollView handles scroll-wheel zoom natively via its own
             // magnification system — no SwiftUI .onScrollWheel intercept needed.
@@ -335,174 +368,6 @@ struct ReaderView: View {
     }
 }
 
-// MARK: - Spread view (Double Page — side-by-side with spread support)
-
-/// Renders two pages side by side. When `leftIsSpread` is true, renders the
-/// left image full-width (double-scan spread page). Right-click loupe shows
-/// a magnified crop of the hovered page.
-struct SpreadView: View {
-    let leftImage:  NSImage?
-    let rightImage: NSImage?
-    let leftIsSpread: Bool
-    @Binding var scale: CGFloat
-    @Binding var offset: CGSize
-    let minScale: CGFloat
-    let maxScale: CGFloat
-    let containerSize: CGSize
-    let onDoubleTap: () -> Void
-
-    @State private var showLoupe = false
-    @State private var loupePosition: CGPoint = .zero
-    @State private var loupeImage: NSImage? = nil
-    @State private var loupeImageViewSize: CGSize = .zero
-    @State private var loupeCursorInImage: CGPoint = .zero
-
-    var body: some View {
-        let scaledTotal = containerSize.width * scale
-        let pageW = (scaledTotal - 2) / 2
-        let pageH = containerSize.height * scale
-
-        ZStack {
-            if leftIsSpread {
-                if let img = leftImage {
-                    Image(nsImage: img)
-                        .resizable()
-                        .interpolation(.high)
-                        .scaledToFit()
-                        .frame(width: scaledTotal, height: pageH)
-                        .offset(x: offset.width, y: offset.height)
-                }
-            } else {
-                HStack(spacing: 2) {
-                    if let img = leftImage {
-                        Image(nsImage: img)
-                            .resizable()
-                            .interpolation(.high)
-                            .scaledToFit()
-                            .frame(width: pageW, height: pageH)
-                    }
-                    if let img = rightImage {
-                        Image(nsImage: img)
-                            .resizable()
-                            .interpolation(.high)
-                            .scaledToFit()
-                            .frame(width: pageW, height: pageH)
-                    } else {
-                        Spacer().frame(width: pageW)
-                    }
-                }
-                .frame(width: scaledTotal)
-                .offset(x: offset.width, y: offset.height)
-            }
-
-            // Loupe overlay
-            if showLoupe, let img = loupeImage {
-                MagnifierView(
-                    image: img,
-                    cursorInImageView: loupeCursorInImage,
-                    imageViewSize: loupeImageViewSize
-                )
-                .position(x: loupePosition.x, y: loupePosition.y)
-                .allowsHitTesting(false)
-            }
-
-            // MouseCatcher handles pan + loupe
-            MouseCatcher(
-                onLeftDragBegan: { _ in },
-                onLeftDragMoved: { delta in
-                    guard scale > 1.0 else { return }
-                    let spreadWidth  = containerSize.width  * scale
-                    let spreadHeight = containerSize.height * scale
-                    let maxX = max(0, (spreadWidth  - containerSize.width)  / 2)
-                    let maxY = max(0, (spreadHeight - containerSize.height) / 2)
-                    offset = CGSize(
-                        width:  (offset.width  + delta.width) .clamped(to: -maxX...maxX),
-                        height: (offset.height + delta.height).clamped(to: -maxY...maxY)
-                    )
-                },
-                onLeftDragEnded: { _ in },
-                onRightBegan: { pos in
-                    loupePosition = pos
-                    computeLoupe(at: pos)
-                    showLoupe = true
-                },
-                onRightMoved: { pos in
-                    loupePosition = pos
-                    computeLoupe(at: pos)
-                },
-                onRightEnded: { showLoupe = false }
-            )
-            .allowsHitTesting(true)
-        }
-        .frame(width: containerSize.width, height: containerSize.height)
-        .clipped()
-        .contentShape(Rectangle())
-        .onScrollWheel { event in
-            let factor: CGFloat = event.deltaY > 0 ? 0.95 : 1.05
-            let newScale = (scale * factor).clamped(to: minScale...maxScale)
-            scale = newScale
-            if newScale <= 1.0 { offset = .zero }
-        }
-        .gesture(MagnifyGesture()
-            .onEnded { v in
-                let newScale = (scale * v.magnification).clamped(to: minScale...maxScale)
-                scale = newScale
-                if newScale <= 1.0 { offset = .zero }
-            }
-        )
-        .onTapGesture(count: 2) { onDoubleTap() }
-    }
-
-    /// Compute loupe parameters for the page under the cursor.
-    /// Spread mode: single full-width image. Normal mode: split at midX.
-    private func computeLoupe(at pos: CGPoint) {
-        let scaledTotal = containerSize.width * scale
-        let spreadOrigin = (containerSize.width - scaledTotal) / 2 + offset.width
-        let midX = spreadOrigin + scaledTotal / 2
-
-        let isRight = pos.x >= midX && !leftIsSpread && rightImage != nil
-        let img: NSImage
-        let pageW: CGFloat
-
-        if leftIsSpread {
-            guard let left = leftImage else { return }
-            img = left
-            pageW = scaledTotal
-        } else if isRight {
-            guard let r = rightImage else { return }
-            img = r
-            pageW = (scaledTotal - 2) / 2
-        } else {
-            guard let l = leftImage else { return }
-            img = l
-            pageW = (scaledTotal - 2) / 2
-        }
-
-        let spreadH = containerSize.height * scale
-        let localX: CGFloat
-        if isRight && !leftIsSpread {
-            localX = pos.x - midX
-        } else {
-            localX = pos.x - spreadOrigin
-        }
-        let localPos = CGPoint(x: localX, y: pos.y - (containerSize.height - spreadH) / 2 - offset.height)
-
-        let pageContainerSize = CGSize(width: pageW, height: spreadH)
-        let imgAR = img.size.width / img.size.height
-        let conAR = pageContainerSize.width / pageContainerSize.height
-        let ivSize: CGSize = imgAR > conAR
-            ? CGSize(width: pageContainerSize.width, height: pageContainerSize.width / imgAR)
-            : CGSize(width: pageContainerSize.height * imgAR, height: pageContainerSize.height)
-
-        let ox = (pageContainerSize.width - ivSize.width) / 2
-        let oy = (pageContainerSize.height - ivSize.height) / 2
-        let cursorInIV = CGPoint(x: localPos.x - ox, y: localPos.y - oy)
-
-        loupeImage = img
-        loupeImageViewSize = ivSize
-        loupeCursorInImage = cursorInIV
-    }
-}
 
 // MARK: - Global key monitor (singleton)
 

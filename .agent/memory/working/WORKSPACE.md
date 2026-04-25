@@ -1,15 +1,40 @@
 # Workspace
 
 ## Current task
-_none_ — v0.4.0 Metal GPU pipeline complete (2026-04-20).
+**v0.10.0 ready.** Phase A-1 + A-2 + A-3 cleanup complete. All four reading modes render through Metal, dead code removed, CHANGELOG consolidated, README updated.
 
-## Completed this session
-- Tasks 3-9 of the Metal reader plan
-- `VerticalComicScrollView` commented out
-- `MetalPageView` wired into `ReaderView` for `.verticalScroll` and `.verticalDouble`
-- `.app` built at `build/Open Comic.app`
-- `dc-reading-room-debug` skill updated with Metal architecture
-- `opencomic-project-state` skill updated with v0.4.0 state
+## What shipped in v0.10.0 (2026-04-25)
+- All four reading modes now route through `MetalPageView`.
+- `SpreadView`, `ZoomableImageView`, `MouseCatcher`, `ScrollWheelModifier`, and `View.onScrollWheel` deleted.
+- `ReaderViewModel` cleaned: `currentImage`, `image(for:)`, `cacheVersion`, `offset`, and `pageManager.onPageReadyNSImage` callback removed (the SwiftUI Image rendering plumbing is no longer needed).
+- Mode-switch fixes: `prefetchInFlightRange` dedupe, 3-stage render retry, `magnification` reset on layout change, `layoutSubtreeIfNeeded` after `rebuildLayout`, scroll-position restore via `restoreOffset`/`restorePage` in `updateNSView`.
+- Loupe rewritten to a SwiftUI overlay (`LoupeOverlayState` + `onLoupeOverlay` callback), naturally clipped by ZStack bounds.
+- Top-bar bleed fixed (carve `topInset` from `visible` before intersecting `docFrame`).
+- Shader uniforms now use `metalLayer.frame` directly (added `viewportOriginX`).
+
+## Known limitations to revisit if needed
+- The 3-stage render retry on layout change (1ms / 50ms / 150ms) is a pragmatic workaround for a CAMetalLayer drawable-rotation race. Principled alternative: `CAMetalLayer.presentsWithTransaction = true`. Try if the retry approach ever feels janky.
+- SwiftUI reuses the Coordinator across mode switches (same struct type at same view-tree position). State that should reset on mode change must be reset explicitly in `updateNSView` (we do this for `magnification`, scroll position, etc.).
+
+## Files touched in 2026-04-25 session (full scope)
+- `Sources/DC/Views/MetalPageView.swift` — major; phases A-1/A-2 + many follow-up fixes.
+- `Sources/DC/Views/MetalPageRenderer.swift` — uniforms now `(originX, originY, width, height)`.
+- `Sources/DC/Shaders.metal` — `viewportOriginX` added; `viewX` subtracts it.
+- `Sources/DC/Views/ReaderView.swift` — `metalLoupe @State`, all four modes Metal, SpreadView struct deleted.
+- `Sources/DC/ViewModels/ReaderViewModel.swift` — dead Image-rendering plumbing removed.
+- `Sources/DC/Views/ZoomableImageView.swift` — deleted.
+- `CHANGELOG.md` — consolidated five "Unreleased" entries into v0.10.0.
+- `README.md` — updated to reflect Metal-everywhere architecture.
 
 ## Next step
-None — all 9 tasks complete. User (Kunle) approved the Metal reader. Ready for new work.
+Decide whether to commit + tag v0.10.0, or hold for additional polish (loupe edge cases, the brief render-retry burst that fires on every mode switch, etc.).
+
+## v0.10.1 shipped (2026-04-25)
+- **Single-page off-centre after switching from double-page** — fixed via doc-padding in `rebuildSinglePage` / `rebuildDoubleSpread`. Pad documentView to `max(scaledSize, usableViewport)`, place pageRect centred within the doc. NSClipView no longer needs to accept negative bounds origins. Centring block in `updateNSView` simplified to a single non-negative scroll-origin computation.
+- **Vertical-single ↔ vertical-double scroll-position jump** — fixed by tracking `vm.scrollOffsetPagesPerRow` alongside `scrollOffsetFraction`. When the count differs from the current vertical mode, fall through to page-based restore (a fraction saved against one doc height is meaningless against another).
+- Diagnostic SWITCH-tagged DCLogger calls added during debugging — removed before final build.
+
+## v0.10.2 shipped (2026-04-25)
+- **Named constants** — new `Sources/DC/ReaderConstants.swift` gathers every previously-bare numeric constant (top-bar height, page gap, spread gutter, magnification range, wheel-zoom step + clamp, scale epsilon, aspect-ratio floor, render-retry delays, initial-render retry budget, Metal max-texture-dim, prefetch lookahead). Each value carries the *why*. Replaces ~15 magic numbers across MetalPageView, ReaderView, ReaderViewModel.
+- **MetalPageView file split** — 1500-line monolith carved into MetalPageView.swift (NSViewRepresentable + MetalCanvasView + Coordinator class declaration), MetalPageView+Layout.swift (rebuild/scroll/visible-range/recentre/hit-test), +Render.swift (render/prefetch), +Loupe.swift (loupe monitor/updateLoupe), +Zoom.swift (wheel/double-click/pinch). Coordinator stored properties bumped from private to internal so sibling extensions can reach them; encapsulation otherwise unchanged.
+- Hard-backup of pre-refactor v0.10.1: `/Volumes/Media/DC_dev_lib_backups/DC_dev_lib_v0.10.1_2026-04-25_1938.tar.gz` (147 MB, sha256 16d6f37d640a776ac75f34296d3133c93c62ab8611e3014d711d4aa6e5867e18).

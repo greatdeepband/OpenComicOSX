@@ -1,41 +1,88 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
-// MARK: - LibraryView
+// MARK: - LibraryView (NavigationSplitView shell)
 
 struct LibraryView: View {
     @EnvironmentObject var library: LibraryViewModel
     @StateObject private var memoryMonitor = MemoryMonitor.shared
 
-    /// Controls the Create Gallery sheet.
     @State private var showCreateGallery = false
-    /// Controls the Rename sheet — holds the gallery being renamed.
     @State private var renamingGallery: Gallery? = nil
     @State private var renameText = ""
-    /// REMOVED: edit mode was removed per user request 2026-04-17 — 3-dots context menu restored
-    /// When true, the debug memory bar is shown and polling is active.
     @State private var debugMode = false
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var isDropTargeted = false
 
-    private let columns = [
-        GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 16)
+    private static let comicExtensions: Set<String> = [
+        "cbz", "cbr", "cb7", "cbt", "pdf"
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-
-            if library.isLoading {
-                Spacer()
-                ProgressView("Loading…")
-                Spacer()
-            } else if let error = library.errorMessage {
-                errorView(error)
-            } else {
-                mainContent
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            LibrarySidebar(
+                renamingGallery: $renamingGallery,
+                renameText: $renameText,
+                showCreateGallery: $showCreateGallery
+            )
+            .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 340)
+        } detail: {
+            LibraryDetail(debugMode: $debugMode)
+                .navigationSplitViewColumnWidth(min: 500, ideal: 900)
+                .frame(minWidth: 500, minHeight: 400)
+        }
+        .frame(minWidth: 900, minHeight: 560)
+        .sheet(isPresented: $showCreateGallery) {
+            CreateGallerySheet().environmentObject(library)
+        }
+        .sheet(item: $renamingGallery) { gallery in
+            RenameGallerySheet(gallery: gallery, text: $renameText) {
+                library.renameGallery(id: gallery.id, newName: renameText)
+                renamingGallery = nil
+            } onCancel: { renamingGallery = nil }
+        }
+        .overlay(alignment: .bottom) {
+            if debugMode {
+                DebugMemoryBar(monitor: memoryMonitor)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .frame(minWidth: 600, minHeight: 400)
+        .overlay(alignment: .top) {
+            if let error = library.errorMessage {
+                ErrorBanner(message: error) { library.errorMessage = nil }
+                    .padding(.top, 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .overlay {
+            if library.isLoading {
+                LoadingOverlay()
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: library.isLoading)
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [8, 6]))
+                    .background(Color.accentColor.opacity(0.08))
+                    .overlay {
+                        Label("Drop comics to add to your library", systemImage: "tray.and.arrow.down")
+                            .font(.title2.bold())
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .background(.thinMaterial, in: Capsule())
+                    }
+                    .padding(8)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: isDropTargeted)
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleLibraryDrop(providers: providers)
+        }
         .onChange(of: debugMode) {
             if debugMode {
                 MemoryMonitor.shared.start(library: library, interval: 5)
@@ -43,537 +90,1126 @@ struct LibraryView: View {
                 MemoryMonitor.shared.stop()
             }
         }
-        .sheet(isPresented: $showCreateGallery) {
-            CreateGallerySheet()
-                .environmentObject(library)
-        }
-        .sheet(item: $renamingGallery) { gallery in
-            RenameGallerySheet(gallery: gallery, text: $renameText) {
-                library.renameGallery(id: gallery.id, newName: renameText)
-                renamingGallery = nil
-            } onCancel: {
-                renamingGallery = nil
-            }
-        }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        VStack(spacing: 0) {
-            HStack {
-                HStack(spacing: 24) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Comics")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("\(library.totalComics)")
-                            .font(.title2.bold())
-                            .foregroundStyle(.primary)
-                    }
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Pages Read")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text("\(library.totalPages)")
-                            .font(.title2.bold())
-                            .foregroundStyle(.primary)
-                    }
-                }
-
-                Spacer()
-
-                // Centered search bar
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(.secondary)
-                        .font(.system(size: 13))
-                    TextField("Search comics", text: $library.searchQuery)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13))
-                        .frame(width: 220)
-                    if !library.searchQuery.isEmpty {
-                        Button(action: { library.searchQuery = "" }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-
-                Spacer()
-
-                Button(action: { showCreateGallery = true }) {
-                    Text("Create Gallery")
-                }
-                .buttonStyle(.bordered)
-
-                Button(action: { library.openFilePicker() }) {
-                    Label("Open Comic", systemImage: "folder.badge.plus")
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut("o", modifiers: .command)
-
-                // Debug toggle
-                Button(action: { debugMode.toggle() }) {
-                    Image(systemName: debugMode ? "memorychip.fill" : "memorychip")
-                        .foregroundStyle(debugMode ? .orange : .secondary)
-                        .font(.system(size: 15))
-                }
-                .buttonStyle(.plain)
-                .help(debugMode ? "Debug mode ON — click to disable" : "Enable memory debug mode")
-            }
-            .padding()
-
-            // Debug bar — only visible when debugMode is on
-            if debugMode {
-                debugBar
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-        }
         .animation(.easeInOut(duration: 0.2), value: debugMode)
     }
 
-    // MARK: - Debug bar
-
-    private var debugBar: some View {
-        HStack(spacing: 20) {
-            Label(memoryMonitor.residentFormatted, systemImage: "memorychip")
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(memoryBarColor)
-
-            Divider().frame(height: 14)
-
-            Label("\(memoryMonitor.cacheCount) cached", systemImage: "photo.stack")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-
-            Divider().frame(height: 14)
-
-            Label("\(memoryMonitor.diskCount) on disk", systemImage: "internaldrive")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-
-            Divider().frame(height: 14)
-
-            Text("sampled \(memoryMonitor.lastSampleTime.formatted(date: .omitted, time: .standard))")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.tertiary)
-
-            Spacer()
-
-            Button("Sample now") {
-                MemoryMonitor.shared.start(library: library, interval: 5)
-            }
-            .font(.system(size: 11))
-            .buttonStyle(.plain)
-            .foregroundStyle(.orange)
+    private func handleLibraryDrop(providers: [NSItemProvider]) -> Bool {
+        // Eagerly accept any drop that claims to be a file URL — the real
+        // extension check happens in the async callback and opens the comic.
+        // Returning the async result would always be `false` because this
+        // method returns before the callback fires, which made SwiftUI show a
+        // rejection cursor even though the load actually proceeded.
+        guard providers.contains(where: { $0.hasItemConformingToTypeIdentifier("public.file-url") }) else {
+            return false
         }
-        .padding(.horizontal)
-        .padding(.vertical, 6)
-        .background(.orange.opacity(0.08))
-    }
-
-    /// Colour-codes the RAM reading: green < 300 MB, yellow < 700 MB, red above.
-    private var memoryBarColor: Color {
-        let mb = Double(memoryMonitor.residentBytes) / (1024 * 1024)
-        if mb < 300 { return .green }
-        if mb < 700 { return .yellow }
-        return .red
-    }
-
-    // MARK: - Main content
-
-    private var mainContent: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-
-                    // Flat search results — shown instead of gallery sections when a query is active
-                    if !library.searchQuery.isEmpty {
-                        if library.searchResults.isEmpty {
-                            Text("No results for \"\(library.searchQuery)\"")
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                                .padding(.top, 60)
-                        } else {
-                            LazyVGrid(columns: columns, spacing: 16) {
-                                ForEach(library.searchResults, id: \.self) { url in
-                                    let title = url.deletingPathExtension().lastPathComponent
-                                    ComicCard(url: url, title: title, readingProgress: nil)
-                                        .id(url)
-                                        .onTapGesture { Task { await library.load(url: url) } }
-                                        .contextMenu {
-                                            Button("Open") { Task { await library.load(url: url) } }
-                                        }
-                                }
-                            }
-                            .padding(.horizontal)
-                            .padding(.vertical, 16)
-                        }
-                    } else {
-
-                    // Favorites section
-                    if !library.favoriteURLs.isEmpty {
-                        GallerySectionHeader(
-                            title: "Favorites",
-                            key: "favorites",
-                            collapsed: $library.collapsedSections
-                        )
-                        .id("header:favorites")
-                        if !library.collapsedSections.contains("favorites") {
-                            LazyVGrid(columns: columns, spacing: 16) {
-                                ForEach(library.favoriteURLs, id: \.self) { url in
-                                    let title = url.deletingPathExtension().lastPathComponent
-                                    ComicCard(url: url, title: title, readingProgress: nil)
-                                        .id(url)
-                                        .onTapGesture { Task { await library.load(url: url) } }
-                                        .contextMenu {
-                                            Button("Open") { Task { await library.load(url: url) } }
-                                            Divider()
-                                            Button("Remove from Favorites", role: .destructive) {
-                                                library.toggleFavorite(url: url)
-                                            }
-                                        }
-                                }
-                            }
-                            .padding(.horizontal)
-                            .padding(.bottom, 20)
-                        }
-                    }
-
-                    // Recent section
-                    if !library.filteredRecentComics.isEmpty {
-                        GallerySectionHeader(
-                            title: "Recent",
-                            key: "recent",
-                            collapsed: $library.collapsedSections
-                        )
-                        .id("header:recent")
-                        if !library.collapsedSections.contains("recent") {
-                            LazyVGrid(columns: columns, spacing: 16) {
-                                ForEach(library.filteredRecentComics) { recent in
-                                    ComicCard(url: recent.url, title: recent.title, readingProgress: recent.readingProgress)
-                                        .id(recent.url)
-                                        .onTapGesture { Task { await library.load(url: recent.url) } }
-                                        .contextMenu {
-                                            Button("Open") { Task { await library.load(url: recent.url) } }
-                                            Divider()
-                                            Button("Remove from Recents", role: .destructive) {
-                                                library.removeRecent(recent)
-                                            }
-                                        }
-                                }
-                            }
-                            .padding(.horizontal)
-                            .padding(.bottom, 20)
-                        }
-                    }
-
-                    // Gallery sections
-                    ForEach(library.filteredGalleries) { gallery in
-                        GallerySectionHeader(
-                            title: gallery.name,
-                            key: gallery.id.uuidString,
-                            collapsed: $library.collapsedSections,
-                            menuContent: AnyView(galleryMenu(for: gallery))
-                        )
-                        .id("header:" + gallery.id.uuidString)
-                        if !library.collapsedSections.contains(gallery.id.uuidString) {
-                            if gallery.comics.isEmpty {
-                                emptyGalleryPlaceholder(for: gallery)
-                            } else {
-                                DraggableComicGrid(
-                                    gallery: gallery,
-                                    columns: columns
-                                )
-                            }
-                        }
-                    }
-
-                    // Empty state when no recents and no galleries
-                    if library.recentComics.isEmpty && library.galleries.isEmpty {
-                        emptyState
-                    }
-
-                    } // end else (no search query)
-                }
-            }
-            .onAppear {
-                if !library.hasLaunched {
-                    // Cold launch: collapse all sections.
-                    var keys: Set<String> = ["favorites", "recent"]
-                    for g in library.galleries { keys.insert(g.id.uuidString) }
-                    library.collapsedSections = keys
-                    library.hasLaunched = true
-                }
-            }
-            .onChange(of: library.openComic) { oldComic, newComic in
-                // Only act when transitioning from reader back to library (non-nil → nil).
-                guard oldComic != nil, newComic == nil, let url = library.lastOpenedURL else { return }
-                // Expand the gallery that contains this comic so the card is in the view tree.
-                let inGallery = library.galleries.contains(where: { $0.comics.contains(url) })
-                let inFavorites = library.favoriteURLs.contains(url)
-                if inGallery {
-                    for g in library.galleries where g.comics.contains(url) {
-                        library.collapsedSections.remove(g.id.uuidString)
-                    }
-                } else if inFavorites {
-                    library.collapsedSections.remove("favorites")
-                } else if library.recentComics.contains(where: { $0.url == url }) {
-                    library.collapsedSections.remove("recent")
-                }
-                // Scroll directly to the card — .center anchor means no scroll if already visible.
-                // The card has .id(url) set in both the Recents grid and DraggableComicGrid.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    withAnimation(.easeInOut(duration: 0.3)) { proxy.scrollTo(url, anchor: .center) }
-                }
-            }
-            .onChange(of: library.galleries.count) {
-                // Collapse any newly added gallery (only applies during the session).
-                for g in library.galleries where !library.collapsedSections.contains(g.id.uuidString) {
-                    library.collapsedSections.insert(g.id.uuidString)
+        for provider in providers {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                let ext = url.pathExtension.lowercased()
+                guard Self.comicExtensions.contains(ext) else { return }
+                Task { @MainActor in
+                    await library.load(url: url)
                 }
             }
         }
-    }
-
-    // MARK: - Gallery context menu
-
-    private func galleryMenu(for gallery: Gallery) -> some View {
-        Group {
-            Button("Add Folders…") { pickFolders { urls in library.addFolders(urls, to: gallery.id) } }
-            Button("Rename…") { renameText = gallery.name; renamingGallery = gallery }
-            Divider()
-            Button("Reset to Alphabetical Order") { library.resetGalleryOrder(id: gallery.id) }
-            Divider()
-            Button("Delete Gallery", role: .destructive) { library.deleteGallery(id: gallery.id) }
-        }
-    }
-
-    // MARK: - Empty gallery placeholder
-
-    private func emptyGalleryPlaceholder(for gallery: Gallery) -> some View {
-        HStack {
-            Button("Add Folders…") {
-                pickFolders { urls in library.addFolders(urls, to: gallery.id) }
-            }
-            .buttonStyle(.bordered)
-            .padding(.horizontal)
-            .padding(.bottom, 16)
-            Spacer()
-        }
-    }
-
-    // MARK: - Empty state
-
-    private var emptyState: some View {
-        VStack(spacing: 16) {
-            Spacer(minLength: 60)
-            Image(systemName: "book.closed")
-                .font(.system(size: 64))
-                .foregroundStyle(.tertiary)
-            Text("No comics yet")
-                .font(.title2)
-                .foregroundStyle(.secondary)
-            Text("Open a CBZ, PDF, CBR, CB7, or CBT file to get started, or create a Gallery.")
-                .foregroundStyle(.tertiary)
-                .multilineTextAlignment(.center)
-            HStack(spacing: 12) {
-                Button("Open Comic…") { library.openFilePicker() }
-                    .buttonStyle(.borderedProminent)
-                Button("Create Gallery") { showCreateGallery = true }
-                    .buttonStyle(.bordered)
-            }
-            Spacer(minLength: 60)
-        }
-        .padding()
-        .frame(maxWidth: .infinity)
-    }
-
-    // MARK: - Error view
-
-    private func errorView(_ error: String) -> some View {
-        VStack(spacing: 8) {
-            Spacer()
-            Image(systemName: "exclamationmark.triangle")
-                .font(.largeTitle)
-                .foregroundStyle(.orange)
-            Text(error)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-            Button("Dismiss") { library.errorMessage = nil }
-            Spacer()
-        }
-        .padding()
-    }
-
-    // MARK: - Folder picker helper
-
-    private func pickFolders(_ completion: @escaping ([URL]) -> Void) {
-        let panel = NSOpenPanel()
-        panel.title = "Choose Folders"
-        panel.message = "Select one or more folders containing comic files"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = true
-        if panel.runModal() == .OK {
-            completion(panel.urls)
-        }
+        return true
     }
 }
 
-// MARK: - Draggable Comic Grid
+// MARK: - LibrarySidebar
 
-/// A grid of comic cards for a single gallery that supports drag-to-reorder.
-struct DraggableComicGrid: View {
-    let gallery: Gallery
-    let columns: [GridItem]
+struct LibrarySidebar: View {
     @EnvironmentObject var library: LibraryViewModel
+    @Binding var renamingGallery: Gallery?
+    @Binding var renameText: String
+    @Binding var showCreateGallery: Bool
 
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 16) {
-            ForEach(Array(gallery.comics.enumerated()), id: \.element) { index, url in
-                ComicCard(
-                    url: url,
-                    title: url.deletingPathExtension().lastPathComponent,
-                    readingProgress: nil
-                )
-                .id(url)
-                .onTapGesture { Task { await library.load(url: url) } }
-                .contextMenu {
-                    Button("Open") { Task { await library.load(url: url) } }
-                    Divider()
-                    Button("Remove from Gallery", role: .destructive) {
-                        library.removeComics([url], from: gallery.id)
+        List(selection: $library.selectedSection) {
+            Section {
+                SidebarRow(section: .home, systemImage: "house",
+                           title: "Home", count: nil)
+                SidebarRow(section: .favorites, systemImage: "heart",
+                           title: "Favorites", count: library.favoriteURLs.count)
+                SidebarRow(section: .recents, systemImage: "clock",
+                           title: "Recents", count: library.recentComics.count)
+                SidebarRow(section: .allComics, systemImage: "books.vertical",
+                           title: "All Comics", count: library.totalComics)
+            }
+
+            if !library.galleries.isEmpty {
+                Section("Galleries") {
+                    ForEach(library.galleries) { gallery in
+                        SidebarRow(
+                            section: .gallery(gallery.id),
+                            systemImage: "folder",
+                            title: gallery.name,
+                            count: gallery.comics.count
+                        )
+                        .contextMenu {
+                            galleryMenu(for: gallery)
+                        }
+                        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                            handleDrop(providers: providers, galleryID: gallery.id)
+                        }
                     }
                 }
-                .onDrag {
-                    NSItemProvider(object: url.path as NSString)
-                }
-                .onDrop(of: [.plainText], delegate: ComicDropDelegate(
-                    targetIndex: index,
-                    galleryID: gallery.id,
-                    library: library
-                ))
             }
         }
-        .padding(.horizontal)
-        .padding(.bottom, 20)
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) {
+            Button {
+                showCreateGallery = true
+            } label: {
+                Label("New Gallery", systemImage: "plus.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .padding(10)
+        }
     }
-}
 
-// MARK: - Drop Delegate for comic reordering
+    @ViewBuilder
+    private func galleryMenu(for gallery: Gallery) -> some View {
+        Button("Rename…") {
+            renameText = gallery.name
+            renamingGallery = gallery
+        }
+        Button("Add Folders…") {
+            pickFolders { urls in library.addFolders(urls, to: gallery.id) }
+        }
+        Button("Reset to Alphabetical Order") {
+            library.resetGalleryOrder(id: gallery.id)
+        }
+        Divider()
+        Button("Delete Gallery", role: .destructive) {
+            library.deleteGallery(id: gallery.id)
+        }
+    }
 
-struct ComicDropDelegate: DropDelegate {
-    let targetIndex: Int
-    let galleryID: UUID
-    let library: LibraryViewModel
-
-    func performDrop(info: DropInfo) -> Bool {
-        guard let item = info.itemProviders(for: [.plainText]).first else { return false }
-        item.loadItem(forTypeIdentifier: "public.plain-text", options: nil) { data, _ in
-            guard let data = data as? Data,
-                  let path = String(data: data, encoding: .utf8),
-                  let gallery = library.galleries.first(where: { $0.id == galleryID }),
-                  let sourceIndex = gallery.comics.firstIndex(where: { $0.path == path })
-            else { return }
-            DispatchQueue.main.async {
-                library.moveComics(in: galleryID, from: IndexSet(integer: sourceIndex), to: targetIndex)
+    private func handleDrop(providers: [NSItemProvider], galleryID: UUID) -> Bool {
+        // Eagerly accept — async callback moves the comic onto the receiving
+        // gallery. Returning the async result sync always produced `false`,
+        // showing a rejection cursor despite the move succeeding.
+        guard providers.contains(where: { $0.hasItemConformingToTypeIdentifier("public.file-url") }) else {
+            return false
+        }
+        for provider in providers {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                Task { @MainActor in
+                    library.moveComic(url, toGallery: galleryID)
+                }
             }
         }
         return true
     }
 
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .move)
+    private func pickFolders(_ completion: @escaping ([URL]) -> Void) {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Folders"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        if panel.runModal() == .OK { completion(panel.urls) }
     }
 }
 
-// MARK: - Gallery Section Header
-// Layout: [Title]  [▾/▸]  [⋯]
-
-struct GallerySectionHeader: View {
+private struct SidebarRow: View {
+    let section: LibrarySection
+    let systemImage: String
     let title: String
-    let key: String
-    @Binding var collapsed: Set<String>
-    var menuContent: AnyView? = nil
-    /// When true, shows a drag handle indicator (actual drag handled by parent LazyVStack.onMove).
-    var showDragHandle: Bool = false
-
-    private var isCollapsed: Bool { collapsed.contains(key) }
+    let count: Int?
 
     var body: some View {
         HStack(spacing: 6) {
-            Text(title)
-                .font(.headline)
-                .foregroundStyle(.secondary)
+            Label(title, systemImage: systemImage)
                 .lineLimit(1)
-
-            Spacer()
-
-            // Collapse chevron — first on the right
-            Button(action: toggleCollapse) {
-                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+            Spacer(minLength: 4)
+            if let count, count > 0 {
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .font(.caption.weight(.semibold))
-            }
-            .buttonStyle(.plain)
-
-            // Options menu — second on the right (only for galleries)
-            if let menu = menuContent {
-                Menu {
-                    menu
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .foregroundStyle(.secondary)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
             }
         }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
-        .contentShape(Rectangle())
-        .onTapGesture { toggleCollapse() }
-    }
-
-    private func toggleCollapse() {
-        if isCollapsed { collapsed.remove(key) } else { collapsed.insert(key) }
+        .tag(section)
     }
 }
 
-// MARK: - Comic Card
+// MARK: - LibraryDetail (router)
+
+struct LibraryDetail: View {
+    @EnvironmentObject var library: LibraryViewModel
+    @Binding var debugMode: Bool
+
+    var body: some View {
+        switch library.selectedSection ?? .home {
+        case .home:
+            LibraryHome(debugMode: $debugMode)
+        case .favorites:
+            LibraryGridPane(
+                section: .favorites,
+                title: "Favorites",
+                emptyTitle: "No favorites yet",
+                emptyHint: "Tap the heart on any comic to favorite it.",
+                sourceURLs: library.favoriteURLs,
+                debugMode: $debugMode
+            )
+        case .recents:
+            LibraryGridPane(
+                section: .recents,
+                title: "Recents",
+                emptyTitle: "No recent comics",
+                emptyHint: "Open a comic to start a recent list.",
+                sourceURLs: library.recentComics.map { $0.url },
+                debugMode: $debugMode
+            )
+        case .allComics:
+            LibraryGridPane(
+                section: .allComics,
+                title: "All Comics",
+                emptyTitle: "Your library is empty",
+                emptyHint: "Open a comic or create a gallery from one or more folders.",
+                sourceURLs: library.allComicURLs,
+                debugMode: $debugMode
+            )
+        case .gallery(let id):
+            if let gallery = library.galleries.first(where: { $0.id == id }) {
+                LibraryGalleryPane(gallery: gallery, debugMode: $debugMode)
+            } else {
+                // The selected gallery was deleted or never existed. Snap the
+                // sidebar back to Home so the user isn't stuck on a dead pane.
+                Color.clear
+                    .onAppear { library.selectedSection = .home }
+            }
+        }
+    }
+}
+
+// MARK: - LibraryGridPane (generic grid for Favorites/Recents/All)
+
+struct LibraryGridPane: View {
+    @EnvironmentObject var library: LibraryViewModel
+
+    let section: LibrarySection
+    let title: String
+    let emptyTitle: String
+    let emptyHint: String
+    let sourceURLs: [URL]
+    @Binding var debugMode: Bool
+
+    @State private var selectedURL: URL?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            PaneToolbar(section: section, title: title, debugMode: $debugMode)
+            Divider()
+            if filteredURLs.isEmpty {
+                EmptyPane(title: emptyTitle, hint: emptyHint)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 16) {
+                        ForEach(filteredURLs, id: \.self) { url in
+                            let titleStr = url.deletingPathExtension().lastPathComponent
+                            ComicCard(
+                                url: url,
+                                title: titleStr,
+                                readingProgress: progress(for: url),
+                                cardSize: library.cardSize,
+                                isSelected: selectedURL == url
+                            )
+                            .onTapGesture(count: 2) { Task { await library.load(url: url) } }
+                            .onTapGesture { selectedURL = url }
+                            .contextMenu {
+                                Button("Open") { Task { await library.load(url: url) } }
+                                Divider()
+                                Button(removeLabel, role: .destructive) {
+                                    remove(url)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 16)
+                }
+                // Background click clears selection so users can escape without pressing escape.
+                .background(
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { selectedURL = nil }
+                )
+            }
+        }
+        // Invisible button binds the Delete key. Disabled when nothing is selected.
+        .background(deleteShortcutButton)
+    }
+
+    private var deleteShortcutButton: some View {
+        Button {
+            if let url = selectedURL { remove(url) }
+        } label: { EmptyView() }
+        .keyboardShortcut(.delete, modifiers: [])
+        .disabled(selectedURL == nil)
+        .opacity(0)
+        .accessibilityHidden(true)
+    }
+
+    private var removeLabel: String {
+        switch section {
+        case .favorites: return "Remove from Favorites"
+        case .recents:   return "Remove from Recents"
+        case .allComics: return "Remove from Library"
+        default:         return "Remove"
+        }
+    }
+
+    private func remove(_ url: URL) {
+        switch section {
+        case .favorites:
+            library.toggleFavorite(url: url)
+        case .recents:
+            if let recent = library.recentComics.first(where: { $0.url == url }) {
+                library.removeRecent(recent)
+            }
+        case .allComics:
+            library.removeFromLibrary(url: url)
+        default:
+            break
+        }
+        if selectedURL == url { selectedURL = nil }
+    }
+
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: library.cardSize.minimum,
+                            maximum: library.cardSize.maximum), spacing: 16)]
+    }
+
+    private func progress(for url: URL) -> Double? {
+        library.recentComics.first(where: { $0.url == url })?.readingProgress
+    }
+
+    private var filteredURLs: [URL] {
+        let order = library.sortOrder(for: section)
+        let filtered: [URL]
+        if library.searchQuery.isEmpty {
+            filtered = sourceURLs
+        } else {
+            let q = library.searchQuery
+            filtered = sourceURLs.filter {
+                $0.deletingPathExtension().lastPathComponent
+                    .localizedCaseInsensitiveContains(q)
+            }
+        }
+        return LibrarySort.apply(order, to: filtered, library: library)
+    }
+}
+
+// MARK: - LibraryGalleryPane (gallery-specific grid with drag-reorder)
+
+struct LibraryGalleryPane: View {
+    @EnvironmentObject var library: LibraryViewModel
+    let gallery: Gallery
+    @Binding var debugMode: Bool
+
+    @State private var selectedURL: URL?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            PaneToolbar(
+                section: .gallery(gallery.id),
+                title: gallery.name,
+                debugMode: $debugMode,
+                trailing: {
+                    Button {
+                        pickComicsOrFolders { urls in addToGallery(urls) }
+                    } label: {
+                        Label("Add", systemImage: "plus.circle.fill")
+                    }
+                    .help("Add comics or folders to this gallery")
+                }
+            )
+            Divider()
+
+            if gallery.comics.isEmpty {
+                EmptyPane(
+                    title: "Empty Gallery",
+                    hint: "Add comic files or folders to populate this gallery.",
+                    actionLabel: "Add Comics or Folders…",
+                    action: { pickComicsOrFolders { urls in addToGallery(urls) } }
+                )
+            } else if library.sortOrder(for: .gallery(gallery.id)) == .manual
+                      && library.searchQuery.isEmpty {
+                ScrollView {
+                    DraggableComicGrid(
+                        gallery: gallery,
+                        columns: columns,
+                        selectedURL: $selectedURL
+                    )
+                    .padding(.horizontal)
+                    .padding(.vertical, 16)
+                }
+                .background(
+                    Color.clear.contentShape(Rectangle()).onTapGesture { selectedURL = nil }
+                )
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, spacing: 16) {
+                        ForEach(sortedFilteredURLs, id: \.self) { url in
+                            let title = url.deletingPathExtension().lastPathComponent
+                            ComicCard(
+                                url: url,
+                                title: title,
+                                readingProgress: nil,
+                                cardSize: library.cardSize,
+                                isSelected: selectedURL == url
+                            )
+                            .onTapGesture(count: 2) { Task { await library.load(url: url) } }
+                            .onTapGesture { selectedURL = url }
+                            .contextMenu {
+                                Button("Open") { Task { await library.load(url: url) } }
+                                Divider()
+                                Button("Remove from Gallery", role: .destructive) {
+                                    remove(url)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 16)
+                }
+                .background(
+                    Color.clear.contentShape(Rectangle()).onTapGesture { selectedURL = nil }
+                )
+            }
+        }
+        .background(deleteShortcutButton)
+    }
+
+    private var deleteShortcutButton: some View {
+        Button {
+            if let url = selectedURL { remove(url) }
+        } label: { EmptyView() }
+        .keyboardShortcut(.delete, modifiers: [])
+        .disabled(selectedURL == nil)
+        .opacity(0)
+        .accessibilityHidden(true)
+    }
+
+    private func remove(_ url: URL) {
+        library.removeComics([url], from: gallery.id)
+        if selectedURL == url { selectedURL = nil }
+    }
+
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: library.cardSize.minimum,
+                            maximum: library.cardSize.maximum), spacing: 16)]
+    }
+
+    private var sortedFilteredURLs: [URL] {
+        let q = library.searchQuery
+        let filtered: [URL] = q.isEmpty
+            ? gallery.comics
+            : gallery.comics.filter {
+                $0.deletingPathExtension().lastPathComponent
+                    .localizedCaseInsensitiveContains(q)
+            }
+        let order = library.sortOrder(for: .gallery(gallery.id))
+        return LibrarySort.apply(order, to: filtered, library: library)
+    }
+
+    /// Unified picker: files + folders + multi-select. Returns the raw URL
+    /// list; `addToGallery` is responsible for splitting files vs folders.
+    private func pickComicsOrFolders(_ completion: @escaping ([URL]) -> Void) {
+        let panel = NSOpenPanel()
+        panel.title = "Add to Gallery"
+        panel.message = "Choose comic files and/or folders."
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowedContentTypes = [.pdf]
+            + ["cbz", "cbr", "cb7", "cbt"].compactMap { UTType(filenameExtension: $0) }
+        if panel.runModal() == .OK { completion(panel.urls) }
+    }
+
+    /// Splits a raw URL list from the unified picker into files vs folders
+    /// and routes each through the appropriate LibraryViewModel method.
+    private func addToGallery(_ urls: [URL]) {
+        var files: [URL] = []
+        var folders: [URL] = []
+        for url in urls {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                folders.append(url)
+            } else {
+                files.append(url)
+            }
+        }
+        if !folders.isEmpty { library.addFolders(folders, to: gallery.id) }
+        if !files.isEmpty   { library.addComicFiles(files, to: gallery.id) }
+    }
+}
+
+// MARK: - PaneToolbar (per-pane toolbar: title, search, zoom, sort)
+
+struct PaneToolbar<Trailing: View>: View {
+    @EnvironmentObject var library: LibraryViewModel
+    let section: LibrarySection
+    let title: String
+    @Binding var debugMode: Bool
+    @ViewBuilder let trailing: () -> Trailing
+
+    init(section: LibrarySection, title: String,
+         debugMode: Binding<Bool>,
+         @ViewBuilder trailing: @escaping () -> Trailing = { EmptyView() }) {
+        self.section = section
+        self.title = title
+        self._debugMode = debugMode
+        self.trailing = trailing
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.title2.bold())
+            Text("\(countForSection)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(.quaternary, in: Capsule())
+
+            Spacer(minLength: 12)
+
+            searchField
+            sortMenu
+            zoomStepper
+            trailing()
+
+            Divider().frame(height: 18)
+
+            Button {
+                debugMode.toggle()
+            } label: {
+                Image(systemName: debugMode ? "memorychip.fill" : "memorychip")
+                    .foregroundStyle(debugMode ? .orange : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help(debugMode ? "Disable memory debug" : "Enable memory debug")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private var countForSection: Int {
+        switch section {
+        case .home:        return library.totalComics
+        case .favorites:   return library.favoriteURLs.count
+        case .recents:     return library.recentComics.count
+        case .allComics:   return library.allComicURLs.count
+        case .gallery(let id):
+            return library.galleries.first(where: { $0.id == id })?.comics.count ?? 0
+        }
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 12))
+            TextField("Search", text: $library.searchQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .frame(width: 180)
+            if !library.searchQuery.isEmpty {
+                Button {
+                    library.searchQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            ForEach(availableSorts, id: \.self) { order in
+                Button {
+                    library.setSortOrder(order, for: section)
+                } label: {
+                    let current = library.sortOrder(for: section)
+                    Label(order.label,
+                          systemImage: order == current ? "checkmark" : "")
+                }
+            }
+        } label: {
+            Label("Sort", systemImage: "arrow.up.arrow.down")
+                .labelStyle(.iconOnly)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 30)
+        .help("Sort: \(library.sortOrder(for: section).label)")
+    }
+
+    private var availableSorts: [LibrarySortOrder] {
+        // "Custom Order" only meaningful for galleries.
+        if case .gallery = section {
+            return LibrarySortOrder.allCases
+        }
+        return LibrarySortOrder.allCases.filter { $0 != .manual }
+    }
+
+    private var zoomStepper: some View {
+        Menu {
+            ForEach(CardSize.allCases, id: \.self) { size in
+                Button {
+                    library.cardSize = size
+                } label: {
+                    Label(sizeLabel(size),
+                          systemImage: library.cardSize == size ? "checkmark" : "")
+                }
+            }
+        } label: {
+            Label("Size", systemImage: zoomIcon)
+                .labelStyle(.iconOnly)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 30)
+        .help("Card size: \(sizeLabel(library.cardSize))")
+    }
+
+    private var zoomIcon: String {
+        switch library.cardSize {
+        case .small:      return "square.grid.4x3.fill"
+        case .medium:     return "square.grid.3x3.fill"
+        case .large:      return "square.grid.2x2.fill"
+        case .extraLarge: return "square.fill"
+        }
+    }
+
+    private func sizeLabel(_ s: CardSize) -> String {
+        switch s {
+        case .small: return "Small"
+        case .medium: return "Medium"
+        case .large: return "Large"
+        case .extraLarge: return "Extra Large"
+        }
+    }
+}
+
+// MARK: - EmptyPane
+
+struct EmptyPane: View {
+    let title: String
+    let hint: String
+    var actionLabel: String? = nil
+    var action: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Spacer(minLength: 40)
+            Image(systemName: "book.closed")
+                .font(.system(size: 52))
+                .foregroundStyle(.tertiary)
+            Text(title)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            Text(hint)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+            if let actionLabel, let action {
+                Button(actionLabel, action: action)
+                    .buttonStyle(.borderedProminent)
+            }
+            Spacer(minLength: 40)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+// MARK: - Sorting
+
+enum LibrarySort {
+    /// Main-actor-confined mtime cache. Avoids thousands of synchronous
+    /// `FileManager.attributesOfItem` stats on every re-render when sorting
+    /// by Recently Added. Values persist for the lifetime of the process;
+    /// file modification time is effectively static for the comic library
+    /// during a session, so a process-lifetime cache is safe.
+    @MainActor private static var mtimeCache: [URL: Date] = [:]
+
+    @MainActor
+    static func apply(_ order: LibrarySortOrder,
+                      to urls: [URL],
+                      library: LibraryViewModel) -> [URL] {
+        switch order {
+        case .manual:
+            return urls
+        case .alphabetical:
+            return urls.sorted {
+                $0.deletingPathExtension().lastPathComponent
+                    .localizedCaseInsensitiveCompare(
+                        $1.deletingPathExtension().lastPathComponent
+                    ) == .orderedAscending
+            }
+        case .recentlyAdded:
+            return urls.sorted { lhs, rhs in
+                (mtime(lhs) ?? .distantPast) > (mtime(rhs) ?? .distantPast)
+            }
+        case .recentlyRead:
+            let recentOrder = Dictionary(
+                uniqueKeysWithValues: library.recentComics.enumerated()
+                    .map { ($0.element.url, $0.offset) }
+            )
+            return urls.sorted {
+                (recentOrder[$0] ?? .max) < (recentOrder[$1] ?? .max)
+            }
+        case .progress:
+            let progressByURL: [URL: Double] = Dictionary(
+                uniqueKeysWithValues: library.recentComics.compactMap { recent in
+                    recent.readingProgress.map { (recent.url, $0) }
+                }
+            )
+            return urls.sorted {
+                (progressByURL[$0] ?? -1) < (progressByURL[$1] ?? -1)
+            }
+        case .format:
+            return urls.sorted {
+                $0.pathExtension.lowercased() < $1.pathExtension.lowercased()
+            }
+        }
+    }
+
+    @MainActor
+    private static func mtime(_ url: URL) -> Date? {
+        if let cached = mtimeCache[url] { return cached }
+        let date = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        if let date { mtimeCache[url] = date }
+        return date
+    }
+}
+
+// MARK: - Home view (hero + rails)
+
+struct LibraryHome: View {
+    @EnvironmentObject var library: LibraryViewModel
+    @Binding var debugMode: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            PaneToolbar(section: .home, title: "Home", debugMode: $debugMode)
+            Divider()
+            content
+        }
+    }
+
+    private var content: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                if let resumeURL = library.continueReadingURL() {
+                    ContinueReadingHero(url: resumeURL)
+                        .padding(.horizontal, 24)
+                        .padding(.top, 20)
+                } else {
+                    WelcomeHero()
+                        .padding(.horizontal, 24)
+                        .padding(.top, 20)
+                }
+
+                if !recentlyAdded.isEmpty {
+                    Rail(
+                        title: "Recently Added",
+                        urls: recentlyAdded,
+                        progressLookup: { _ in nil },
+                        seeAllSection: .allComics
+                    )
+                }
+
+                if !library.favoriteURLs.isEmpty {
+                    Rail(
+                        title: "Favorites",
+                        urls: Array(library.favoriteURLs.prefix(12)),
+                        progressLookup: { _ in nil },
+                        seeAllSection: .favorites
+                    )
+                }
+
+                if !library.recentComics.isEmpty {
+                    Rail(
+                        title: "Continue Reading",
+                        urls: library.recentComics.prefix(12).map { $0.url },
+                        progressLookup: { url in
+                            library.recentComics.first(where: { $0.url == url })?.readingProgress
+                        },
+                        seeAllSection: .recents
+                    )
+                }
+
+                Spacer(minLength: 40)
+            }
+        }
+    }
+
+    private var recentlyAdded: [URL] {
+        // Take all comic URLs and sort by file mtime, top 12.
+        let sorted = LibrarySort.apply(.recentlyAdded, to: library.allComicURLs, library: library)
+        return Array(sorted.prefix(12))
+    }
+}
+
+// MARK: - ContinueReadingHero
+
+struct ContinueReadingHero: View {
+    @EnvironmentObject var library: LibraryViewModel
+    let url: URL
+
+    @State private var renderToken = UUID()
+
+    var body: some View {
+        let _ = renderToken
+        let thumb = library.cachedThumbnail(for: url)
+        let title = url.deletingPathExtension().lastPathComponent
+        let progress = library.recentComics.first(where: { $0.url == url })?.readingProgress
+
+        HStack(alignment: .center, spacing: 24) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.secondary.opacity(0.12))
+                if let thumb {
+                    Image(nsImage: thumb)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFill()
+                } else {
+                    Image(systemName: "book.pages")
+                        .font(.system(size: 52))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: 180, height: 260)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.3), radius: 10, x: 0, y: 6)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Continue Reading")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                Text(title)
+                    .font(.title.bold())
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+
+                if let progress {
+                    HStack(spacing: 8) {
+                        ProgressView(value: progress)
+                            .progressViewStyle(.linear)
+                            .frame(width: 240)
+                        Text("\(Int(progress * 100))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    Button {
+                        Task { await library.load(url: url) }
+                    } label: {
+                        Label("Resume", systemImage: "play.fill")
+                            .font(.body.weight(.semibold))
+                            .padding(.horizontal, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+
+                    Button {
+                        library.toggleFavorite(url: url)
+                    } label: {
+                        Image(systemName: library.isFavorite(url: url) ? "heart.fill" : "heart")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .help(library.isFavorite(url: url) ? "Remove from Favorites" : "Add to Favorites")
+                }
+                .padding(.top, 4)
+            }
+            Spacer(minLength: 0)
+        }
+        .onAppear { library.requestThumbnail(for: url) }
+        .onChange(of: library.updatedThumbnailURLs) { _, urls in
+            if urls.contains(url) { renderToken = UUID() }
+        }
+    }
+}
+
+struct WelcomeHero: View {
+    @EnvironmentObject var library: LibraryViewModel
+
+    var body: some View {
+        HStack(spacing: 20) {
+            Image(systemName: "books.vertical.fill")
+                .font(.system(size: 68))
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Welcome to Open Comic")
+                    .font(.title.bold())
+                Text("Open a CBZ, CBR, CB7, CBT, or PDF — or create a gallery to organise a folder of comics.")
+                    .foregroundStyle(.secondary)
+                    .font(.body)
+                HStack(spacing: 8) {
+                    Button("Open Comic…") { library.openFilePicker() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(.top, 6)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 10)
+    }
+}
+
+// MARK: - Rail (horizontal card strip)
+
+struct Rail: View {
+    @EnvironmentObject var library: LibraryViewModel
+    let title: String
+    let urls: [URL]
+    let progressLookup: (URL) -> Double?
+    let seeAllSection: LibrarySection
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title)
+                    .font(.title3.bold())
+                Spacer()
+                Button("See All") { library.selectedSection = seeAllSection }
+                    .buttonStyle(.plain)
+                    .font(.subheadline)
+                    .foregroundStyle(.tint)
+            }
+            .padding(.horizontal, 24)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 16) {
+                    ForEach(urls, id: \.self) { url in
+                        let cardTitle = url.deletingPathExtension().lastPathComponent
+                        ComicCard(
+                            url: url,
+                            title: cardTitle,
+                            readingProgress: progressLookup(url),
+                            cardSize: .medium
+                        )
+                        .frame(width: CardSize.medium.minimum)
+                        .onTapGesture { Task { await library.load(url: url) } }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 4)
+            }
+        }
+    }
+}
+
+// MARK: - LoadingOverlay
+
+struct LoadingOverlay: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.large)
+            Text("Opening comic…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(28)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.25), radius: 14, x: 0, y: 6)
+    }
+}
+
+// MARK: - ErrorBanner
+
+struct ErrorBanner: View {
+    let message: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text(message)
+                .lineLimit(3)
+            Spacer(minLength: 8)
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
+        .padding(.horizontal, 20)
+    }
+}
+
+// MARK: - DebugMemoryBar
+
+struct DebugMemoryBar: View {
+    @ObservedObject var monitor: MemoryMonitor
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Label(monitor.residentFormatted, systemImage: "memorychip")
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(color)
+            Divider().frame(height: 14)
+            Label("\(monitor.cacheCount) cached", systemImage: "photo.stack")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Divider().frame(height: 14)
+            Label("\(monitor.diskCount) on disk", systemImage: "internaldrive")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(monitor.lastSampleTime.formatted(date: .omitted, time: .standard))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(.ultraThinMaterial)
+    }
+
+    private var color: Color {
+        let mb = Double(monitor.residentBytes) / (1024 * 1024)
+        if mb < 300 { return .green }
+        if mb < 700 { return .yellow }
+        return .red
+    }
+}
+
+// MARK: - Draggable Comic Grid (preserved from previous library)
+
+/// A grid of comic cards for a single gallery that supports drag-to-reorder.
+struct DraggableComicGrid: View {
+    let gallery: Gallery
+    let columns: [GridItem]
+    @Binding var selectedURL: URL?
+
+    @EnvironmentObject var library: LibraryViewModel
+    @State private var draggingURL: URL? = nil
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 16) {
+            ForEach(gallery.comics, id: \.self) { url in
+                let title = url.deletingPathExtension().lastPathComponent
+                ComicCard(
+                    url: url,
+                    title: title,
+                    readingProgress: nil,
+                    cardSize: library.cardSize,
+                    isSelected: selectedURL == url
+                )
+                .id(url)
+                .opacity(draggingURL == url ? 0.4 : 1.0)
+                .onDrag {
+                    draggingURL = url
+                    return NSItemProvider(object: url as NSURL)
+                }
+                .onDrop(
+                    of: [.fileURL],
+                    delegate: ComicDropDelegate(
+                        target: url,
+                        gallery: gallery,
+                        library: library,
+                        draggingURL: $draggingURL
+                    )
+                )
+                .onTapGesture(count: 2) { Task { await library.load(url: url) } }
+                .onTapGesture { selectedURL = url }
+                .contextMenu {
+                    Button("Open") { Task { await library.load(url: url) } }
+                    Divider()
+                    Button("Remove from Gallery", role: .destructive) {
+                        library.removeComics([url], from: gallery.id)
+                        if selectedURL == url { selectedURL = nil }
+                    }
+                    Divider()
+                    Button("Reset to Alphabetical Order") {
+                        library.resetGalleryOrder(id: gallery.id)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ComicDropDelegate: DropDelegate {
+    let target: URL
+    let gallery: Gallery
+    let library: LibraryViewModel
+    @Binding var draggingURL: URL?
+
+    func dropEntered(info: DropInfo) {
+        guard let src = draggingURL, src != target else { return }
+        guard let fromIdx = gallery.comics.firstIndex(of: src),
+              let toIdx   = gallery.comics.firstIndex(of: target) else { return }
+        let destIdx = fromIdx < toIdx ? toIdx + 1 : toIdx
+        library.moveComics(in: gallery.id, from: IndexSet(integer: fromIdx), to: destIdx)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingURL = nil
+        return true
+    }
+}
+
+// MARK: - ComicCard
 
 struct ComicCard: View {
     let url: URL
     let title: String
     let readingProgress: Double?
+    let cardSize: CardSize
+    var isSelected: Bool = false
 
     @EnvironmentObject var library: LibraryViewModel
-
-    /// Bumping this token forces SwiftUI to re-evaluate body, which re-reads
-    /// cachedThumbnail(for: url) and picks up the newly loaded image.
-    /// Calling requestThumbnail from onChange was wrong — it returns early
-    /// (cache already populated) and never causes a re-render.
     @State private var renderToken: UUID = UUID()
+    @State private var isHovering = false
 
     var body: some View {
-        // Reference renderToken so body depends on it — any change forces a re-render.
         let _ = renderToken
-        // Read the thumbnail directly from the NSCache on every render pass.
-        // No @State NSImage means no strong reference in the view — NSCache is the
-        // sole owner and can evict freely under memory pressure.
         let thumbnail = library.cachedThumbnail(for: url)
 
         VStack(alignment: .leading, spacing: 6) {
             coverImage(thumbnail)
                 .aspectRatio(0.7, contentMode: .fit)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .shadow(color: .black.opacity(0.25), radius: 4, x: 0, y: 2)
+                .shadow(color: .black.opacity(isHovering ? 0.45 : 0.25),
+                        radius: isHovering ? 8 : 4, x: 0, y: isHovering ? 4 : 2)
+                .scaleEffect(isHovering ? 1.03 : 1.0)
+                .overlay {
+                    if isSelected {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.accentColor, lineWidth: 3)
+                    }
+                }
                 .overlay(alignment: .bottomLeading) {
                     if let progress = readingProgress, progress > 0.02 {
                         progressBadge(progress)
@@ -581,28 +1217,36 @@ struct ComicCard: View {
                 }
                 .overlay(alignment: .bottomTrailing) {
                     let fav = library.isFavorite(url: url)
-                    Button(action: { library.toggleFavorite(url: url) }) {
-                        Image(systemName: fav ? "heart.fill" : "heart")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(fav ? Color.red : Color.white)
-                            .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
-                            .padding(7)
+                    if isHovering || fav {
+                        Button {
+                            library.toggleFavorite(url: url)
+                        } label: {
+                            Image(systemName: fav ? "heart.fill" : "heart")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(fav ? Color.red : Color.white)
+                                .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                                .padding(7)
+                        }
+                        .buttonStyle(.plain)
+                        .transition(.opacity)
                     }
-                    .buttonStyle(.plain)
                 }
+                .animation(.easeOut(duration: 0.12), value: isHovering)
+                .animation(.easeOut(duration: 0.12), value: isSelected)
 
             Text(title)
-                .font(.caption)
+                .font(.system(size: cardSize.titleFontSize))
                 .lineLimit(2)
                 .truncationMode(.middle)
-                .frame(height: 32, alignment: .topLeading)
+                .frame(height: cardSize.titleFontSize * 2.6, alignment: .topLeading)
+                .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
         }
         .contentShape(Rectangle())
+        .onHover { hovering in
+            isHovering = hovering
+        }
         .onAppear { library.requestThumbnail(for: url) }
-        // When this card's URL appears in updatedThumbnailURLs, bump renderToken.
-        // This forces SwiftUI to re-evaluate body, which re-reads cachedThumbnail
-        // and displays the image. Only fires for this card's URL — O(1) check.
-        .onChange(of: library.updatedThumbnailURLs) { urls in
+        .onChange(of: library.updatedThumbnailURLs) { _, urls in
             if urls.contains(url) { renderToken = UUID() }
         }
     }
@@ -628,7 +1272,7 @@ struct ComicCard: View {
     private func progressBadge(_ progress: Double) -> some View {
         ZStack {
             Capsule()
-                .fill(.black.opacity(0.6))
+                .fill(.black.opacity(0.65))
                 .frame(width: 44, height: 18)
             Text("\(Int(progress * 100))%")
                 .font(.system(size: 10, weight: .semibold))
@@ -644,43 +1288,42 @@ struct CreateGallerySheet: View {
     @EnvironmentObject var library: LibraryViewModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var name = ""
+    @State private var galleryName: String = ""
     @State private var selectedFolders: [URL] = []
 
-    private var nameIsValid: Bool {
-        !name.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("Create Gallery")
                 .font(.title2.bold())
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Name").font(.headline)
-                TextField("e.g. Batman, Marvel 90s…", text: $name)
+            Form {
+                TextField("Gallery Name", text: $galleryName)
                     .textFieldStyle(.roundedBorder)
-            }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Source Folders").font(.headline)
-
-                if selectedFolders.isEmpty {
-                    Text("No folders selected yet.")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
-                } else {
-                    VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Source Folders")
+                        Spacer()
+                        Button("Add Folder…") { pickFolders() }
+                            .buttonStyle(.bordered)
+                    }
+                    if selectedFolders.isEmpty {
+                        Text("No folders selected")
+                            .font(.callout)
+                            .foregroundStyle(.tertiary)
+                    } else {
                         ForEach(selectedFolders, id: \.self) { url in
                             HStack {
                                 Image(systemName: "folder")
                                     .foregroundStyle(.secondary)
                                 Text(url.path)
-                                    .font(.caption)
+                                    .font(.callout)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                 Spacer()
-                                Button(action: { selectedFolders.removeAll { $0 == url } }) {
+                                Button {
+                                    selectedFolders.removeAll { $0 == url }
+                                } label: {
                                     Image(systemName: "xmark.circle.fill")
                                         .foregroundStyle(.secondary)
                                 }
@@ -688,47 +1331,34 @@ struct CreateGallerySheet: View {
                             }
                         }
                     }
-                    .padding(8)
-                    .background(Color.secondary.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
-
-                Button("Add Folders…") { pickFolders() }
-                    .buttonStyle(.bordered)
             }
 
-            Spacer()
-
             HStack {
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.escape)
                 Spacer()
+                Button("Cancel") { dismiss() }
                 Button("Create") {
-                    library.createGallery(
-                        name: name.trimmingCharacters(in: .whitespaces),
-                        folders: selectedFolders
-                    )
+                    library.createGallery(name: galleryName.trimmingCharacters(in: .whitespaces),
+                                          folders: selectedFolders)
                     dismiss()
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!nameIsValid)
+                .keyboardShortcut(.defaultAction)
+                .disabled(galleryName.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
         .padding(24)
-        .frame(width: 480, height: 380)
+        .frame(minWidth: 480)
     }
 
     private func pickFolders() {
         let panel = NSOpenPanel()
-        panel.title = "Choose Folders"
-        panel.message = "Select one or more folders containing comic files"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = true
         if panel.runModal() == .OK {
-            let existing = Set(selectedFolders.map { $0.path })
-            let newOnes = panel.urls.filter { !existing.contains($0.path) }
-            selectedFolders.append(contentsOf: newOnes)
+            for u in panel.urls where !selectedFolders.contains(u) {
+                selectedFolders.append(u)
+            }
         }
     }
 }
@@ -738,26 +1368,25 @@ struct CreateGallerySheet: View {
 struct RenameGallerySheet: View {
     let gallery: Gallery
     @Binding var text: String
-    let onConfirm: () -> Void
+    let onCommit: () -> Void
     let onCancel: () -> Void
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("Rename Gallery")
                 .font(.title2.bold())
-            TextField("Gallery name", text: $text)
+            TextField("Name", text: $text)
                 .textFieldStyle(.roundedBorder)
+                .onSubmit { onCommit() }
             HStack {
-                Button("Cancel", action: onCancel)
-                    .keyboardShortcut(.escape)
                 Spacer()
-                Button("Rename", action: onConfirm)
-                    .buttonStyle(.borderedProminent)
+                Button("Cancel") { onCancel() }
+                Button("Rename") { onCommit() }
+                    .keyboardShortcut(.defaultAction)
                     .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty)
-                    .keyboardShortcut(.return)
             }
         }
         .padding(24)
-        .frame(width: 320)
+        .frame(minWidth: 360)
     }
 }

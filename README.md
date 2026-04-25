@@ -12,11 +12,11 @@ A native macOS comic book reader built with SwiftUI, AppKit, and Metal. Designed
 - **Fast library load:** background parallel thumbnail extraction with an `NSCache` + disk-backed fallback keyed by FNV-1a content hash.
 - **Per-comic persistence:** remembers page index, reading mode, exact scroll offset, and page count in `UserDefaults`.
 - **Magnifier loupe:** left-click and hold on any page (all four reading modes) for a 1.45× circular loupe centred on the cursor.
-- **GPU-accelerated vertical reader:** Metal render pipeline with two LRU rings (decoded `CVPixelBuffer`s and uploaded `MTLTexture`s, 10 entries each) and native `NSScrollView.magnification` for zoom.
+- **GPU-accelerated rendering across every reading mode:** Metal pipeline with two LRU rings (decoded `CVPixelBuffer`s and uploaded `MTLTexture`s, 10 entries each). Vertical modes use native `NSScrollView.magnification` for zoom; single/double use frame-resize zoom with the documentView sized to fit the viewport.
 
 ## Architecture
 
-SwiftUI for library, chrome, and state; AppKit (`NSScrollView`) for pixel-accurate scrolling in every reader mode; Metal for page rendering in three of four modes. `MetalPageView` (NSViewRepresentable wrapping `NSScrollView` + a `CAMetalLayer` sublayer) backs single-page, vertical, and vertical-double. Double-page still uses `SpreadView` (SwiftUI) — scheduled to migrate to `MetalPageView(layout: .doubleSpread)` in Step A phase A-2.
+SwiftUI for library, chrome, and state; AppKit (`NSScrollView`) for pixel-accurate scrolling; Metal for page rendering in **all four reading modes**. `MetalPageView` (NSViewRepresentable wrapping `NSScrollView` + a `CAMetalLayer` sublayer) backs single-page, double-page, vertical, and vertical-double — branching on a `ReadingLayout` enum. The decode cache (`MetalPageManager`) and texture ring (`MetalPageRenderer`) are shared across modes; SwiftUI swaps the `layout` parameter and the same `Coordinator` rebuilds the document.
 
 ### Core components
 
@@ -56,13 +56,12 @@ SwiftUI for library, chrome, and state; AppKit (`NSScrollView`) for pixel-accura
 | `readerTopBar` | 38-pt strip at the very top of the window, background = `TitlebarEffectView` (NSVisualEffectView `.titlebar`). Internally a ZStack: `HStack { [72 pt traffic-light gutter]; backButton; Spacer; trailingCluster }` with the transport cluster layered on top at the ZStack's default `.center` alignment — geometrically centred at the window midpoint regardless of back/trailing widths. |
 | `TitlebarEffectView` | NSViewRepresentable → `NSVisualEffectView` with `material = .titlebar`, `blendingMode = .behindWindow`, `state = .followsWindowActiveState`. Pixel-identical to AppKit's own title-bar chrome. |
 | `FullSizeTitleBarConfigurator` | NSViewRepresentable attached to `ContentView.background(...)`. On appear, reaches up to the hosting NSWindow and sets `titlebarAppearsTransparent = true` + `styleMask.insert(.fullSizeContentView)` + `titleVisibility = .hidden` — without this the 28-pt title-bar slab stays above the content. Paired with `.windowStyle(.hiddenTitleBar)` in `DCApp`. |
-| `MetalPageView` | Single-page, Vertical, Vertical Double. Hosts `NSScrollView` with a flipped `MetalCanvasView` as `documentView`; renders visible pages via Metal. Layout branches on `ReadingLayout`. |
+| `MetalPageView` | All four reading modes. Hosts `NSScrollView` with a flipped `MetalCanvasView` as `documentView`; renders visible pages via Metal. Layout branches on `ReadingLayout`. |
 | `ReadingLayout` | Enum in `MetalPageView.swift`: `.verticalStack(pagesPerRow:)` · `.singlePage` · `.doubleSpread`. Drives all layout/scroller/zoom branching in `Coordinator.rebuildLayout()`. |
-| `SpreadView` | Double-page mode. Legacy SwiftUI; scheduled for removal in Step A phase A-3 once double-page migrates to `MetalPageView(layout: .doubleSpread, …)`. |
-| `ZoomableImageView` | **Dead code** as of Step A phase A-1 — single-page has moved to `MetalPageView`. File still present; deletion in phase A-3. |
+| `LoupeOverlayState` | Struct passed via `MetalPageView.onLoupeOverlay` callback. `ReaderView` keeps a `@State LoupeOverlayState?` and renders a SwiftUI `MagnifierView` from it; the loupe is naturally clipped by the reader's ZStack bounds. |
 | `MetalCanvasView` | `NSScrollView.documentView` with a plain `CALayer` as backing and a `CAMetalLayer` **sublayer** pinned to `clipView.bounds` on scroll (see "Why a sublayer" below). |
-| `MetalPageRenderer` | `MTLRenderPipelineState`, `TextureRingBuffer` (10-entry LRU), `render(viewport:scrollOriginY:visibleRange:pagePositions:…)`. |
-| `MetalPageManager` | Actor holding decoded `CVPixelBuffer`s (10-entry LRU) + parallel nonisolated `NSCache<NSNumber, NSImage>` (cap 10). Shared across all reading modes since v0.9.0. `nsImage(for:)` fast-path for SwiftUI render paths; `prefetch(around:pages:)` fires `onPageReadyNSImage` on completion. |
+| `MetalPageRenderer` | `MTLRenderPipelineState`, `TextureRingBuffer` (10-entry LRU), `render(viewport:visibleRange:pagePositions:…)`. Shader uniforms carry `(viewportOriginX, Y, Width, Height)` matching the metalLayer frame. |
+| `MetalPageManager` | Actor holding decoded `CVPixelBuffer`s (10-entry LRU) + parallel nonisolated `NSCache<NSNumber, NSImage>` (cap 10). Shared across all reading modes. `nsImage(for:)` fast-path for the loupe; `prefetch(around:pages:)` decodes the surrounding window. |
 | `MagnifierView` | SwiftUI Canvas loupe (1.45×, circular, top-left-origin cursor coords). |
 
 ### Reader top-bar layout
@@ -95,16 +94,17 @@ When a prefetch decode lands, `onTextureReady(seqIdx)` re-renders if the page is
 
 ### Loupe
 
-Single and double page use `ZoomableImageView` → `MagnifierView`. Vertical and vertical-double use the same `MagnifierView`, fed by:
+The loupe is one unified `MagnifierView` instance across all four reading modes, driven by `MetalPageView`'s Coordinator and rendered as a SwiftUI overlay in `ReaderView`. Key mechanics:
 
-- A window-local `NSEvent.addLocalMonitorForEvents` monitor for `.leftMouseDown/Dragged/Up` (matching single/double page's left-click gesture) — observes events without consuming them, so scroll / pinch / wheel continue to work.
-- Coordinate resolution via `scrollView.documentView.convert(windowPt, from: nil)` — single-step conversion through the flipped documentView, no manual `clipView.bounds` arithmetic.
-- A borderless non-activating child `NSPanel` attached via `window.addChildWindow(_:ordered:)`. SwiftUI's `WindowGroup`-managed `contentView` strips foreign subviews during its own layout passes; a child panel sidesteps that entirely.
-- A brand-new `NSHostingView<AnyView>` is installed whenever the page under the cursor changes (tracked by `loupeHostPage`). `MagnifierView` is also tagged `.id(page)`. Belt-and-suspenders against stale SwiftUI Canvas state bleeding across pages.
-- NSImage source priority: 1-entry cache of the last cursored page; `PageImageCache.image(for:)` if the page was decoded in single/double mode; else async snapshot from the `CVPixelBuffer` in `MetalPageManager` via `CGContext.makeImage()`, with a `decodePage` fallback if the prefetch hasn't reached the page yet.
-- Async fetches use a `loupeTaskID` generation counter; late-arriving Tasks from prior drag positions are silently dropped.
+- A window-local `NSEvent.addLocalMonitorForEvents` monitor for `.leftMouseDown/Dragged/Up` observes events without consuming them, so scroll / pinch / wheel continue to work.
+- Coordinate resolution via `scrollView.documentView.convert(windowPt, from: nil)` — single-step conversion through the flipped documentView.
+- The Coordinator emits a `LoupeOverlayState?` via `onLoupeOverlay` callback. `ReaderView` keeps the state in `@State` and renders the `MagnifierView` inside its inner ZStack, where SwiftUI's natural bounds clip the circle to the reader frame.
+- Position is translated from AppKit's bottom-left window coords to SwiftUI's top-left coords inside the Coordinator: `swiftuiY = window.frame.height - windowPt.y`.
+- For the page under the cursor, the Coordinator hit-tests `pagePositions` directly (single/double-page) or via `pageYOffsets` binary search (vertical). Falls back to `currentPage` / `lastVisibleRange.lowerBound` when the cursor is in margin/padding — the `MagnifierView` paints black for off-image regions, so the loupe stays alive in dead zones.
+- NSImage source priority: 1-entry per-page cache (`loupeImage`); `MetalPageManager.nsImage(for:)` (synchronous, hits the nonisolated `NSCache`); else async snapshot from the `CVPixelBuffer` via `CGContext.makeImage()`, with a `decodePage` fallback.
+- Async fetches use a `loupeTaskID` generation counter; late-arriving Tasks from prior drag positions are silently dropped. While a fetch is in flight, the Coordinator emits a fallback state using the last cached image so the loupe position keeps tracking the cursor.
 - `scrollDidChange` re-triggers `updateLoupe` using `NSEvent.mouseLocation` so trackpad scrolls (no `rightMouseDragged` event) still refresh the loupe as pages move under a stationary cursor.
-- Cursor hide/show is balanced via a `cursorHidden` tracker; `NSCursor.hide()` is re-asserted on every drag and scroll refresh because macOS auto-unhides when the cursor crosses the app window boundary.
+- Cursor hide/show is balanced via a `cursorHidden` tracker; if the panel intersection with the window goes empty (cursor dragged off-window) the loupe hides and the cursor returns. Drag back in → cursor re-hides, loupe re-appears.
 
 ### Caching layers (memory budget)
 

@@ -59,12 +59,6 @@ final class LibraryViewModel: ObservableObject {
     /// The URL of the last comic opened — used to scroll the library back to that card.
     @Published var lastOpenedURL: URL? = nil
 
-    /// True after the first cold launch — survives LibraryView re-creation.
-    var hasLaunched: Bool = false
-
-    /// Collapsed gallery section keys — survives LibraryView re-creation.
-    @Published var collapsedSections: Set<String> = []
-
     /// Set of URLs whose thumbnails were just updated.
     /// Cards observe this and re-render only when their own URL is present,
     /// eliminating the O(n) full-grid re-render caused by a global counter.
@@ -81,42 +75,166 @@ final class LibraryViewModel: ObservableObject {
     /// Ordered list of favorited comic URLs (most recently favorited first).
     @Published var favoriteURLs: [URL] = []
 
-    /// Recent comics filtered by searchQuery (case-insensitive substring match on title).
-    var filteredRecentComics: [RecentComic] {
-        guard !searchQuery.isEmpty else { return recentComics }
-        return recentComics.filter { $0.title.localizedCaseInsensitiveContains(searchQuery) }
+    // MARK: - New library UI state
+
+    /// Currently selected sidebar row. Optional because SwiftUI `List`
+    /// single-selection bindings are typed as `Selection?`; nil is treated as
+    /// "Home" for rendering purposes. Persisted to UserDefaults so the app
+    /// restores the same view on relaunch.
+    @Published var selectedSection: LibrarySection? = .home {
+        didSet { saveSelectedSection() }
     }
 
-    /// Flat deduplicated list of all comics matching searchQuery across recents and all galleries.
-    var searchResults: [URL] {
-        guard !searchQuery.isEmpty else { return [] }
+    /// Grid card size, persisted.
+    @Published var cardSize: CardSize = .medium {
+        didSet { UserDefaults.standard.set(cardSize.rawValue, forKey: "library.cardSize") }
+    }
+
+    /// Sort order per sidebar section, keyed by `LibrarySection.storageKey`.
+    @Published var sortPreferences: [String: LibrarySortOrder] = [:] {
+        didSet { saveSortPreferences() }
+    }
+
+    /// Returns the sort order for the given section, falling back to sensible
+    /// per-section defaults.
+    func sortOrder(for section: LibrarySection) -> LibrarySortOrder {
+        if let stored = sortPreferences[section.storageKey] { return stored }
+        switch section {
+        case .home:        return .recentlyRead
+        case .favorites:   return .recentlyAdded
+        case .recents:     return .recentlyRead
+        case .allComics:   return .alphabetical
+        case .gallery:     return .manual
+        }
+    }
+
+    func setSortOrder(_ order: LibrarySortOrder, for section: LibrarySection) {
+        sortPreferences[section.storageKey] = order
+    }
+
+    // MARK: - Derived collections for the new library
+
+    /// Memoised flat deduplicated list of every comic URL across all galleries
+    /// plus orphan recents. Published-property invalidation is triggered by a
+    /// coarse signature (sum of gallery comic counts + recents count) that
+    /// changes whenever a comic is added/removed anywhere. Lookup is O(1)
+    /// between invalidations; recompute is O(n+m).
+    private var _allComicURLs: [URL] = []
+    private var _allComicURLsSignature: Int = -1
+
+    var allComicURLs: [URL] {
+        let signature = galleries.reduce(0) { $0 + $1.comics.count } + recentComics.count
+        if signature == _allComicURLsSignature { return _allComicURLs }
+
         var seen = Set<URL>()
-        var results: [URL] = []
-        let allURLs = recentComics.map { $0.url }
-            + galleries.flatMap { $0.comics }
-        for url in allURLs {
-            guard !seen.contains(url) else { continue }
-            let title = url.deletingPathExtension().lastPathComponent
-            if title.localizedCaseInsensitiveContains(searchQuery) {
+        var result: [URL] = []
+        for gallery in galleries {
+            for url in gallery.comics where !seen.contains(url) {
                 seen.insert(url)
-                results.append(url)
+                result.append(url)
             }
         }
-        return results
+        for recent in recentComics where !seen.contains(recent.url) {
+            seen.insert(recent.url)
+            result.append(recent.url)
+        }
+        _allComicURLs = result
+        _allComicURLsSignature = signature
+        return result
     }
 
-    /// Galleries filtered by searchQuery — each gallery's comic list is also filtered.
-    var filteredGalleries: [Gallery] {
-        guard !searchQuery.isEmpty else { return galleries }
-        return galleries.compactMap { gallery in
-            let filtered = gallery.comics.filter {
-                $0.deletingPathExtension().lastPathComponent.localizedCaseInsensitiveContains(searchQuery)
+    /// The "continue reading" candidate for the Home hero: the most-recently-
+    /// opened comic whose reading progress is strictly between 0 and 1. Falls
+    /// back to the most recently opened comic if none qualifies.
+    func continueReadingURL() -> URL? {
+        for recent in recentComics {
+            if let p = recent.readingProgress, p > 0.02, p < 0.98 { return recent.url }
+        }
+        return recentComics.first?.url
+    }
+
+    /// Fully removes a URL from the library: every gallery, recents, and
+    /// favorites. Used by the "Remove from Library" action in the All Comics
+    /// pane. The underlying file on disk is untouched.
+    func removeFromLibrary(url: URL) {
+        var changed = false
+        for idx in galleries.indices {
+            if let removeIdx = galleries[idx].comics.firstIndex(of: url) {
+                galleries[idx].comics.remove(at: removeIdx)
+                changed = true
             }
-            // Only include the gallery if it has matching comics.
-            guard !filtered.isEmpty else { return nil }
-            var copy = gallery
-            copy.comics = filtered
-            return copy
+        }
+        if let recent = recentComics.first(where: { $0.url == url }) {
+            removeRecent(recent)
+        }
+        if favoriteURLs.contains(url) {
+            favoriteURLs.removeAll { $0 == url }
+            saveFavorites()
+        }
+        if changed { saveGalleries() }
+    }
+
+    /// Appends individual comic files to a gallery without scanning source
+    /// folders. Used by the per-gallery unified picker when the user selects
+    /// loose files (as opposed to folders). De-duplicates silently.
+    func addComicFiles(_ urls: [URL], to galleryID: UUID) {
+        guard let idx = galleries.firstIndex(where: { $0.id == galleryID }) else { return }
+        var changed = false
+        for url in urls where !galleries[idx].comics.contains(url) {
+            galleries[idx].comics.append(url)
+            changed = true
+        }
+        if changed { saveGalleries() }
+    }
+
+    /// Moves a comic from whichever gallery currently contains it into the
+    /// target gallery. No-op if the comic is already in the target or the
+    /// target doesn't exist. Used for drag-onto-sidebar-row reordering.
+    func moveComic(_ url: URL, toGallery targetID: UUID) {
+        guard galleries.contains(where: { $0.id == targetID }) else { return }
+        var changed = false
+        for idx in galleries.indices where galleries[idx].id != targetID {
+            if let removeIdx = galleries[idx].comics.firstIndex(of: url) {
+                galleries[idx].comics.remove(at: removeIdx)
+                changed = true
+            }
+        }
+        if let targetIdx = galleries.firstIndex(where: { $0.id == targetID }),
+           !galleries[targetIdx].comics.contains(url) {
+            galleries[targetIdx].comics.append(url)
+            changed = true
+        }
+        if changed { saveGalleries() }
+    }
+
+    // MARK: - Persistence helpers for new UI state
+
+    private func saveSelectedSection() {
+        guard let value = selectedSection,
+              let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: "library.selectedSection")
+    }
+
+    private func saveSortPreferences() {
+        let dict: [String: String] = sortPreferences.mapValues { $0.rawValue }
+        UserDefaults.standard.set(dict, forKey: "library.sortPreferences")
+    }
+
+    func loadNewLibraryState() {
+        if let data = UserDefaults.standard.data(forKey: "library.selectedSection"),
+           let decoded = try? JSONDecoder().decode(LibrarySection.self, from: data) {
+            selectedSection = decoded
+        }
+        if let raw = UserDefaults.standard.string(forKey: "library.cardSize"),
+           let size = CardSize(rawValue: raw) {
+            cardSize = size
+        }
+        if let dict = UserDefaults.standard.dictionary(forKey: "library.sortPreferences") as? [String: String] {
+            var prefs: [String: LibrarySortOrder] = [:]
+            for (k, v) in dict {
+                if let order = LibrarySortOrder(rawValue: v) { prefs[k] = order }
+            }
+            sortPreferences = prefs
         }
     }
 
@@ -167,6 +285,7 @@ final class LibraryViewModel: ObservableObject {
         loadRecents()
         loadGalleries()
         loadFavorites()
+        loadNewLibraryState()
         // One-time migration: wipe the entire thumbnail cache on first launch after
         // switching from Swift's non-deterministic hashValue to FNV-1a.
         // All old files have names that don't match any FNV-1a key, so purgeOrphanedThumbnails
@@ -534,6 +653,11 @@ final class LibraryViewModel: ObservableObject {
     func deleteGallery(id: UUID) {
         galleries.removeAll { $0.id == id }
         saveGalleries()
+        // If the deleted gallery was the active sidebar selection, snap the
+        // detail pane back to Home so it doesn't end up on a dead route.
+        if case .gallery(let selected) = selectedSection, selected == id {
+            selectedSection = .home
+        }
     }
 
     func moveGallery(from source: IndexSet, to destination: Int) {

@@ -2,6 +2,19 @@ import SwiftUI
 import AppKit
 import Metal
 
+// MARK: - LoupeOverlayState
+/// State for the SwiftUI loupe overlay. The loupe is a SwiftUI MagnifierView
+/// placed inside the reader's container; natural SwiftUI clipping bounds the
+/// circle to the reader frame. Position is in SwiftUI top-left coords within
+/// the reader's outer ZStack (same space as `geo.size` from the
+/// GeometryReader).
+struct LoupeOverlayState {
+    var position: CGPoint
+    var image: NSImage
+    var imageViewSize: CGSize
+    var cursorInImage: CGPoint
+}
+
 // MARK: - ReadingLayout
 
 /// How `MetalPageView` should lay out its pages in the NSScrollView.
@@ -21,6 +34,17 @@ enum ReadingLayout: Equatable {
 /// Metal-backed reader view using NSScrollView for scroll math
 /// and CAMetalLayer for GPU rendering. Replaces the NSStackView
 /// + NSImage pipeline for vertical and vertical-double modes.
+///
+/// Coordinator behaviour is split across sibling extension files:
+///   - `MetalPageView+Layout.swift` — rebuild, scroll, visible-range, recentre, hit-test
+///   - `MetalPageView+Render.swift` — render, prefetch, onTextureReady
+///   - `MetalPageView+Loupe.swift`  — loupe NSEvent monitor + overlay state
+///   - `MetalPageView+Zoom.swift`   — ⌘+wheel / double-click / pinch zoom monitors
+///
+/// This file holds the NSViewRepresentable struct, the MetalCanvasView NSView
+/// subclass, and the Coordinator class declaration with stored properties +
+/// init/deinit. Stored properties on Coordinator are package-internal so the
+/// sibling extensions can read/write them.
 struct MetalPageView: NSViewRepresentable {
     let pages: [ComicPage]
     let layout: ReadingLayout
@@ -41,12 +65,18 @@ struct MetalPageView: NSViewRepresentable {
     var onPageChanged: (Int) -> Void
     var onOffsetChanged: (Double) -> Void
     var onMagnificationChanged: ((CGFloat) -> Void)?
+    /// Fires whenever the loupe state changes. Pass `nil` to hide the overlay
+    /// (cursor-off-window, left-mouse-up, off-page with no fallback, etc.).
+    /// ReaderView drives a SwiftUI MagnifierView overlay from this state so
+    /// the loupe is naturally clipped to the reader frame.
+    var onLoupeOverlay: ((LoupeOverlayState?) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onPageChanged: onPageChanged,
             onOffsetChanged: onOffsetChanged,
-            onMagnificationChanged: onMagnificationChanged
+            onMagnificationChanged: onMagnificationChanged,
+            onLoupeOverlay: onLoupeOverlay
         )
     }
 
@@ -100,8 +130,8 @@ struct MetalPageView: NSViewRepresentable {
         scrollView.allowsMagnification = true
         switch layout {
         case .verticalStack:
-            scrollView.minMagnification = 0.1
-            scrollView.maxMagnification = 8.0
+            scrollView.minMagnification = ReaderConstants.nativeMagnificationMin
+            scrollView.maxMagnification = ReaderConstants.nativeMagnificationMax
             scrollView.magnification = scale
         case .singlePage, .doubleSpread:
             // Magnification stays at 1.0. `scale` drives documentView resize
@@ -149,6 +179,25 @@ struct MetalPageView: NSViewRepresentable {
             name: NSScrollView.didEndLiveMagnifyNotification,
             object: scrollView
         )
+        // Watch the clipView for size changes. On mode switch, SwiftUI hands
+        // us a scrollView whose clipView hasn't been sized yet — MetalCanvas
+        // View.layout() fires before the clipView has settled, so drawableSize
+        // stays 0 and the pending render can't paint. When the clipView's
+        // bounds eventually change to non-zero, we retry the pending render.
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        scrollView.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.clipViewGeometryChanged(_:)),
+            name: NSView.frameDidChangeNotification,
+            object: scrollView.contentView
+        )
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.clipViewGeometryChanged(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
 
         // Restore scroll position
         if let page = restorePage {
@@ -159,6 +208,16 @@ struct MetalPageView: NSViewRepresentable {
             DispatchQueue.main.async {
                 context.coordinator.scrollToFraction(offset)
             }
+        }
+
+        // Wire the layout-completed hook so we can retry the initial render
+        // after the scrollView has actually sized the clipView. Without this
+        // retry, switching to single/double-page mode lands a render() call
+        // BEFORE drawableSize is set (because clip.bounds is still 0×0), so
+        // nextDrawable() returns nil and nothing gets drawn until the user
+        // triggers another update (e.g. a page turn).
+        metalView.onLayoutCompleted = { [weak coordinator = context.coordinator] in
+            coordinator?.handleLayoutCompleted()
         }
 
         // Install the right-mouse loupe monitor. Using an NSEvent local
@@ -177,6 +236,7 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.onPageChanged = onPageChanged
         context.coordinator.onOffsetChanged = onOffsetChanged
         context.coordinator.onMagnificationChanged = onMagnificationChanged
+        context.coordinator.onLoupeOverlay = onLoupeOverlay
 
         let needsRebuild = context.coordinator.needsRebuild(
             containerWidth: containerWidth,
@@ -187,7 +247,19 @@ struct MetalPageView: NSViewRepresentable {
             scale: scale
         )
 
+        // Update the coordinator's scale BEFORE rebuildLayout runs — otherwise
+        // rebuildSinglePage/rebuildDoubleSpread reads the previous-cycle scale
+        // and builds a documentView frame one zoom step behind the real value.
+        let oldScale = context.coordinator.lastScale
+        let scaleChanged = abs(oldScale - scale) > ReaderConstants.scaleEqualityEpsilon
+
+        if scaleChanged {
+            context.coordinator.lastScale = scale
+            context.coordinator.scale = scale
+        }
+
         if needsRebuild {
+            let layoutChanged = context.coordinator.lastLayout != layout
             context.coordinator.pages = pages
             context.coordinator.pagesPerRow = pagesPerRow
             context.coordinator.containerWidth = containerWidth
@@ -196,19 +268,101 @@ struct MetalPageView: NSViewRepresentable {
             context.coordinator.rebuildLayout()
             context.coordinator.lastLayout = layout
             context.coordinator.lastCurrentPage = currentPage
+
+            if layoutChanged {
+                let coord = context.coordinator
+                // Reset the scrollView's magnification to match the new
+                // layout's zoom semantics. Vertical uses native magnification
+                // (range nativeMagnificationMin–nativeMagnificationMax);
+                // single/double pin it at 1.0 (zoom is implemented via
+                // frame-resize). Without this reset, a stale magnification
+                // from a previous vertical session makes the clipView report
+                // a scaled-down bounds.size, throwing off the centre math.
+                switch layout {
+                case .singlePage, .doubleSpread:
+                    scrollView.minMagnification = 1.0
+                    scrollView.maxMagnification = 1.0
+                    scrollView.magnification = 1.0
+                case .verticalStack:
+                    scrollView.minMagnification = ReaderConstants.nativeMagnificationMin
+                    scrollView.maxMagnification = ReaderConstants.nativeMagnificationMax
+                    scrollView.magnification = scale
+                }
+
+                // Force a synchronous layout pass so the metalView's frame
+                // change from rebuildLayout commits before any render fires.
+                // Without this, the new layout's first render runs against
+                // the previous layout's metalLayer frame — visible as a
+                // stale frame on screen when returning from single/double
+                // back to vertical (and vice-versa).
+                coord.metalView?.layoutSubtreeIfNeeded()
+                coord.metalView?.updateMetalLayerFrame()
+
+                // Restore scroll position from the model. On mode switch,
+                // makeNSView's one-shot restore doesn't fire (SwiftUI reuses
+                // the Coordinator), so we need to do it here. For vertical
+                // we use the saved fraction (preserves mid-page position);
+                // for single/double we just snap to currentPage.
+                switch layout {
+                case .verticalStack:
+                    if let offset = restoreOffset {
+                        DispatchQueue.main.async { [weak coord] in
+                            coord?.scrollToFraction(offset)
+                        }
+                    } else if let page = restorePage {
+                        DispatchQueue.main.async { [weak coord] in
+                            coord?.scrollToPage(page)
+                        }
+                    }
+                case .singlePage, .doubleSpread:
+                    // currentPage is already in the coordinator; rebuildSinglePage
+                    // / rebuildDoubleSpread laid out for that page. Recentre via
+                    // the existing centre-on-rebuild block below.
+                    break
+                }
+
+                // 3-stage render retry to walk CAMetalLayer's drawable chain
+                // past whatever stale frame is queued from the previous
+                // layout. Without this, the first render after rebuild
+                // races with the layout commit and presents a black frame.
+                for delay in ReaderConstants.modeSwitchRenderRetryDelays {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak coord] in
+                        coord?.render(visibleRange: coord?.lastVisibleRange ?? 0...0)
+                    }
+                }
+            }
         }
 
-        if abs(context.coordinator.lastScale - scale) > 0.001 {
-            context.coordinator.lastScale = scale
-            context.coordinator.scale = scale
-            switch layout {
-            case .verticalStack:
-                scrollView.magnification = scale
-            case .singlePage, .doubleSpread:
-                // Scale drives frame resize via rebuildLayout; already
-                // triggered above when needsRebuild detected the scale-induced
-                // layout change. Nothing more to do here.
-                break
+        if scaleChanged, case .verticalStack = layout {
+            // Vertical modes use NSScrollView's native magnification transform
+            // (CALayer-level); single/double resize the documentView in
+            // rebuildLayout above, so no additional action is needed.
+            scrollView.magnification = scale
+        }
+
+        // Single/double-page: after initial layout, any page turn, or any
+        // zoom step, recentre the documentView so the image centre lands at
+        // the viewport centre. The doc is now intrinsically padded to ≥ clip
+        // (rebuildSinglePage / rebuildDoubleSpread), so the centred scroll
+        // origin is always non-negative — NSClipView won't clamp it back.
+        let isSingleOrDouble = (layout == .singlePage || layout == .doubleSpread)
+        if isSingleOrDouble, (needsRebuild || scaleChanged) {
+            if let doc = scrollView.documentView {
+                let clip = scrollView.contentView
+                let topInset = scrollView.contentInsets.top
+                let usableH = max(0, clip.bounds.size.height - topInset)
+                let usableW = clip.bounds.size.width
+                // Place doc-centre at usable-viewport-centre. doc.midY -
+                // (topInset + usableH/2) collapses to -topInset when
+                // doc.height == usableH (the fit-to-window case), which
+                // NSClipView accepts because contentInsets.top extends the
+                // legal scroll range upward by exactly that amount.
+                let newOrigin = CGPoint(
+                    x: max(0, doc.bounds.size.width / 2 - usableW / 2),
+                    y: max(-topInset, doc.bounds.size.height / 2 - (topInset + usableH / 2))
+                )
+                clip.scroll(to: newOrigin)
+                scrollView.reflectScrolledClipView(clip)
             }
         }
 
@@ -236,6 +390,12 @@ struct MetalPageView: NSViewRepresentable {
 /// vertical-scroll and vertical-double modes.
 final class MetalCanvasView: NSView {
     var metalLayer: CAMetalLayer!
+    /// Fires after every `layout()` completion. The Coordinator hooks this so
+    /// it can trigger the first render AFTER the scrollView has committed
+    /// layout — before that, clipView.bounds may still be (0,0) and
+    /// CAMetalLayer's drawableSize will be zero, which makes nextDrawable()
+    /// return nil and the page render silently no-op.
+    var onLayoutCompleted: (() -> Void)?
 
     /// CRITICAL: use a flipped coordinate system (y=0 at top, increasing downward).
     /// The rest of the reader code — `pageYOffsets` (ascending from 0 for page 0),
@@ -273,23 +433,33 @@ final class MetalCanvasView: NSView {
     func updateMetalLayerFrame() {
         guard let metalLayer = metalLayer else { return }
         let visible: CGRect
-        if let clipView = enclosingScrollView?.contentView {
+        let topInset: CGFloat
+        if let scrollView = enclosingScrollView {
             // clipView.bounds.origin is the scroll offset in documentView coords.
             // Since this view is isFlipped, y increases downward and clipView.bounds
             // maps directly to the visible region of our coordinate space.
-            visible = clipView.bounds
+            visible = scrollView.contentView.bounds
+            topInset = scrollView.contentInsets.top
         } else {
             visible = bounds
+            topInset = 0
         }
         let scale = metalLayer.contentsScale
-        let maxDim: CGFloat = 16384
-        // Clamp the sublayer frame to the documentView's own bounds. If the
-        // clipView is larger than the documentView (zoomed out / small page),
-        // clipView.bounds can have a negative origin — drawing there would put
-        // the sublayer off the documentView, which visually leaks over sibling
-        // chrome like the reader top bar. Intersect with documentView bounds.
+        let maxDim: CGFloat = ReaderConstants.maxTextureDimension
+        // Carve the top-inset band out of the visible rect before intersecting
+        // with the documentView. The inset band lives visually at clipView Y
+        // [0, topInset], which maps to doc Y [origin.y, origin.y + topInset].
+        // CAMetalLayer's direct-to-surface compositing bypasses clipView
+        // masksToBounds clipping, so if we leave the metalLayer frame covering
+        // this band it bleeds over the SwiftUI top-bar overlay as soon as the
+        // user scrolls the zoomed content past origin.y = -topInset.
+        var safeVisible = visible
+        if topInset > 0 {
+            safeVisible.origin.y += topInset
+            safeVisible.size.height -= topInset
+        }
         let docFrame = CGRect(origin: .zero, size: bounds.size)
-        let clamped = visible.intersection(docFrame)
+        let clamped = safeVisible.intersection(docFrame)
         let w = max(1, min(clamped.width * scale, maxDim))
         let h = max(1, min(clamped.height * scale, maxDim))
         guard w > 0, h > 0, clamped.width > 0, clamped.height > 0 else { return }
@@ -306,10 +476,16 @@ final class MetalCanvasView: NSView {
     override func layout() {
         super.layout()
         updateMetalLayerFrame()
+        onLayoutCompleted?()
     }
 }
 
+// MARK: - Coordinator
+
 extension MetalPageView {
+    /// Coordinator for `MetalPageView`. Stored properties live here; method
+    /// implementations are split across sibling extension files (Layout,
+    /// Render, Loupe, Zoom) to keep each concern in a focused, navigable file.
     @MainActor
     final class Coordinator: NSObject {
         weak var scrollView: NSScrollView?
@@ -326,13 +502,29 @@ extension MetalPageView {
         /// event would otherwise spawn a new Task that keeps decoding already-
         /// obsolete pages; cancelling the previous one lets the actor serve the
         /// current visible range first.
-        private var prefetchTask: Task<Void, Never>?
+        var prefetchTask: Task<Void, Never>?
+
+        /// The page-index range the in-flight prefetch task is decoding for.
+        /// Used to dedupe identical re-triggers — when `updateVisibleRange`
+        /// fires repeatedly during initial layout (multiple bounds-change
+        /// notifications, layout-completed retries, etc.) for the same
+        /// visible range, we must NOT cancel and respawn the task each time.
+        /// Each cancel kills decode mid-flight and the texture never lands;
+        /// dedupe lets the first task run to completion.
+        var prefetchInFlightRange: ClosedRange<Int>?
 
         /// The visible range of the most-recent `updateVisibleRange()` call.
         /// Used by `onTextureReady()` to re-render after a prefetch upload
         /// completes (so pages that decode AFTER the last scroll event still
         /// get drawn without the user having to scroll again).
-        private var lastVisibleRange: ClosedRange<Int> = 0...0
+        var lastVisibleRange: ClosedRange<Int> = 0...0
+
+        /// True while we still owe an initial render for the current layout.
+        /// Set by `rebuildLayout` and consumed by `handleLayoutCompleted` —
+        /// lets us retry the first render after the scrollView has sized
+        /// its clipView / drawable, otherwise nextDrawable() returns nil
+        /// and the page silently fails to paint on mode switch.
+        var pendingInitialRender: Bool = false
 
         var sequentialToID: [Int] = []
         var idToSequential: [Int: Int] = [:]
@@ -350,44 +542,41 @@ extension MetalPageView {
         var onPageChanged: (Int) -> Void = { _ in }
         var onOffsetChanged: (Double) -> Void = { _ in }
         var onMagnificationChanged: ((CGFloat) -> Void)?
+        var onLoupeOverlay: ((LoupeOverlayState?) -> Void)?
 
         // MARK: - Loupe state
-        /// Hosts the MagnifierView inside a borderless child NSPanel.
-        /// Using a panel (rather than a subview of window.contentView) avoids
-        /// having SwiftUI's WindowGroup-managed hosting view clobber the
-        /// loupe during its own layout passes.
-        private var loupePanel: NSPanel?
-        private var loupeHost: NSHostingView<AnyView>?
+        /// Loupe is now rendered as a SwiftUI overlay inside the reader's
+        /// clipped ZStack via `onLoupeOverlay`. The Coordinator only tracks
+        /// the last-decoded image (to avoid redecoding per drag frame), the
+        /// cursor-hide balance, and the NSEvent monitor itself.
+        ///
         /// Tracks whether we currently hold the NSCursor.hide balance. Kept so
         /// hide/unhide calls stay paired — macOS auto-unhides the cursor when
         /// it moves outside the app window, which breaks naive pairing.
-        private var cursorHidden: Bool = false
-        /// The page index the loupe panel currently hosts. Used to decide
-        /// whether to replace the hosting view wholesale when the page
-        /// changes (belt-and-suspenders around NSHostingView/AnyView rootView
-        /// updates occasionally retaining stale SwiftUI state).
-        private var loupeHostPage: Int?
-        private var loupeEventMonitor: Any?
-        private var zoomWheelMonitor: Any?
-        private var doubleClickMonitor: Any?
-        private var pinchMonitor: Any?
-        private var loupeImage: (page: Int, nsImage: NSImage)?
+        var cursorHidden: Bool = false
+        var loupeEventMonitor: Any?
+        var zoomWheelMonitor: Any?
+        var doubleClickMonitor: Any?
+        var pinchMonitor: Any?
+        var loupeImage: (page: Int, nsImage: NSImage)?
         /// Monotonically-increasing token for async image-fetch Tasks. Each
         /// `updateLoupe` call bumps the token, and a Task only applies its
         /// result if the token still matches — so fast drags don't let a
         /// late-resolving stale Task paint over the newest request.
-        private var loupeTaskID: UInt64 = 0
-        private var loupeTask: Task<Void, Never>?
-        private let loupeRadius: CGFloat = 270
+        var loupeTaskID: UInt64 = 0
+        var loupeTask: Task<Void, Never>?
+        let loupeRadius: CGFloat = 270
 
         init(
             onPageChanged: @escaping (Int) -> Void,
             onOffsetChanged: @escaping (Double) -> Void,
-            onMagnificationChanged: ((CGFloat) -> Void)?
+            onMagnificationChanged: ((CGFloat) -> Void)?,
+            onLoupeOverlay: ((LoupeOverlayState?) -> Void)?
         ) {
             self.onPageChanged = onPageChanged
             self.onOffsetChanged = onOffsetChanged
             self.onMagnificationChanged = onMagnificationChanged
+            self.onLoupeOverlay = onLoupeOverlay
         }
 
         deinit {
@@ -404,783 +593,6 @@ extension MetalPageView {
                 NSEvent.removeMonitor(monitor)
             }
             if cursorHidden { NSCursor.unhide() }
-        }
-
-        func needsRebuild(containerWidth: CGFloat, pagesPerRow: Int, pages: [ComicPage], layout: ReadingLayout, currentPage: Int, scale: CGFloat) -> Bool {
-            if abs(lastContainerWidth - containerWidth) > 1 { return true }
-            if lastPagesPerRow != pagesPerRow { return true }
-            if lastLayout != layout { return true }
-            // For non-vertical layouts, a page-turn or scale change requires a
-            // layout rebuild because pagePositions / pageYOffsets must reflect
-            // the new page / zoomed frame size.
-            switch layout {
-            case .singlePage, .doubleSpread:
-                if lastCurrentPage != currentPage { return true }
-                if abs(lastScale - scale) > 0.001 { return true }
-            case .verticalStack:
-                break
-            }
-            return false
-        }
-
-        func rebuildLayout() {
-            guard let metalView = metalView else { return }
-
-            pagePositions.removeAll()
-            pageYOffsets.removeAll()
-
-            sequentialToID = pages.map { $0.id }
-            idToSequential.removeAll()
-            for (seqIdx, pageID) in sequentialToID.enumerated() {
-                idToSequential[pageID] = seqIdx
-            }
-
-            switch layout {
-            case .verticalStack:
-                rebuildVerticalStack()
-            case .singlePage:
-                rebuildSinglePage()
-            case .doubleSpread:
-                rebuildDoubleSpread()
-            }
-
-            lastContainerWidth = containerWidth
-            lastPagesPerRow = pagesPerRow
-
-            metalView.needsDisplay = true
-        }
-
-        /// Stacks every page top-to-bottom at `containerWidth * scale` (for
-        /// `pagesPerRow == 1`) or split side-by-side honoring `.isSpread`
-        /// (for `pagesPerRow == 2`). Matches the pre-step-A behaviour exactly.
-        private func rebuildVerticalStack() {
-            guard let metalView = metalView else { return }
-            let totalWidth = pagesPerRow == 1 ? containerWidth * scale : containerWidth
-            var y: CGFloat = 0
-
-            if pagesPerRow == 1 {
-                for i in 0..<pages.count {
-                    let page = pages[i]
-                    let ar = page.naturalSize.height / max(page.naturalSize.width, 1)
-                    let h = totalWidth * ar
-                    let rect = CGRect(x: 0, y: y, width: totalWidth, height: h)
-                    pagePositions[page.id] = rect
-                    pageYOffsets.append(y)
-                    y += h + 4
-                }
-            } else {
-                var i = 0
-                while i < pages.count {
-                    let page = pages[i]
-
-                    if page.isSpread {
-                        let ar = page.naturalSize.height / max(page.naturalSize.width, 1)
-                        let h = totalWidth * ar
-                        let rect = CGRect(x: 0, y: y, width: totalWidth, height: h)
-                        pagePositions[page.id] = rect
-                        pageYOffsets.append(y)
-                        y += h + 4
-                        i += 1
-                    } else {
-                        let pageWidth = (totalWidth - 2) / 2
-                        let leftAR = page.naturalSize.height / max(page.naturalSize.width, 1)
-                        let leftH = pageWidth * leftAR
-                        let leftRect = CGRect(x: 0, y: y, width: pageWidth, height: leftH)
-                        pagePositions[page.id] = leftRect
-                        pageYOffsets.append(y)
-
-                        var rightH: CGFloat = leftH
-                        if i + 1 < pages.count && !pages[i + 1].isSpread {
-                            let rightPage = pages[i + 1]
-                            let rightAR = rightPage.naturalSize.height / max(rightPage.naturalSize.width, 1)
-                            rightH = pageWidth * rightAR
-                            let rightRect = CGRect(x: pageWidth + 2, y: y, width: pageWidth, height: rightH)
-                            pagePositions[rightPage.id] = rightRect
-                            pageYOffsets.append(y)
-                            i += 2
-                        } else {
-                            i += 1
-                        }
-
-                        y += max(leftH, rightH) + 4
-                    }
-                }
-            }
-
-            let totalHeight = y
-            metalView.frame = CGRect(x: 0, y: 0, width: totalWidth, height: totalHeight)
-        }
-
-        /// One page fits to the viewport width (at `scale = 1.0`) at natural
-        /// aspect ratio. Zoom is achieved by scaling the documentView frame
-        /// so NSScrollView treats the zoomed size as the real document size —
-        /// this avoids CAMetalLayer compositing issues that `magnification`
-        /// introduces on macOS.
-        private func rebuildSinglePage() {
-            guard let metalView = metalView else { return }
-            guard currentPage >= 0 && currentPage < pages.count else {
-                metalView.frame = CGRect(x: 0, y: 0, width: max(1, containerWidth), height: 1)
-                return
-            }
-            let page = pages[currentPage]
-            let baseWidth = containerWidth
-            let pageAR = page.naturalSize.height / max(page.naturalSize.width, 1)
-            let scaledWidth = baseWidth * scale
-            let scaledHeight = scaledWidth * pageAR
-
-            let rect = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)
-            pagePositions[page.id] = rect
-            pageYOffsets.append(0)
-
-            metalView.frame = CGRect(x: 0, y: 0, width: scaledWidth, height: scaledHeight)
-        }
-
-        /// One or two pages side-by-side for a double-page spread. If the
-        /// current page is a natural spread (`.isSpread`), it fills the
-        /// document full-width and there is no right page. Otherwise the
-        /// current page occupies the left slot and `currentPage + 1` (if
-        /// it exists and isn't itself a spread) occupies the right slot.
-        /// Zoom via frame-resize (no magnification transform).
-        private func rebuildDoubleSpread() {
-            guard let metalView = metalView else { return }
-            guard currentPage >= 0 && currentPage < pages.count else {
-                metalView.frame = CGRect(x: 0, y: 0, width: max(1, containerWidth), height: 1)
-                return
-            }
-
-            let leftPage = pages[currentPage]
-            let totalWidth = containerWidth * scale
-
-            if leftPage.isSpread {
-                let ar = leftPage.naturalSize.height / max(leftPage.naturalSize.width, 1)
-                let h = totalWidth * ar
-                let rect = CGRect(x: 0, y: 0, width: totalWidth, height: h)
-                pagePositions[leftPage.id] = rect
-                pageYOffsets.append(0)
-                metalView.frame = CGRect(x: 0, y: 0, width: totalWidth, height: h)
-                return
-            }
-
-            let pageWidth = (totalWidth - 2) / 2
-            let leftAR = leftPage.naturalSize.height / max(leftPage.naturalSize.width, 1)
-            let leftH = pageWidth * leftAR
-            let leftRect = CGRect(x: 0, y: 0, width: pageWidth, height: leftH)
-            pagePositions[leftPage.id] = leftRect
-            pageYOffsets.append(0)
-
-            var rightH: CGFloat = leftH
-            let rightIdx = currentPage + 1
-            if rightIdx < pages.count && !pages[rightIdx].isSpread {
-                let rightPage = pages[rightIdx]
-                let rightAR = rightPage.naturalSize.height / max(rightPage.naturalSize.width, 1)
-                rightH = pageWidth * rightAR
-                let rightRect = CGRect(x: pageWidth + 2, y: 0, width: pageWidth, height: rightH)
-                pagePositions[rightPage.id] = rightRect
-                pageYOffsets.append(0)
-            }
-
-            let spreadHeight = max(leftH, rightH)
-            metalView.frame = CGRect(x: 0, y: 0, width: totalWidth, height: spreadHeight)
-        }
-
-        func scrollToPage(_ page: Int) {
-            guard let sv = scrollView, let doc = sv.documentView else { return }
-            guard page >= 0 && page < pageYOffsets.count else { return }
-            let targetY = pageYOffsets[page]
-            doc.scroll(CGPoint(x: 0, y: targetY))
-            sv.reflectScrolledClipView(sv.contentView)
-            updateVisibleRange()
-        }
-
-        func scrollToFraction(_ fraction: Double) {
-            guard let sv = scrollView, let doc = sv.documentView else { return }
-            let maxY = doc.bounds.height - sv.contentView.bounds.height
-            guard maxY > 0 else { return }
-            let targetY = CGFloat(fraction) * maxY
-            doc.scroll(CGPoint(x: 0, y: targetY))
-            sv.reflectScrolledClipView(sv.contentView)
-            updateVisibleRange()
-        }
-
-        func updateVisibleRange() {
-            guard let sv = scrollView, let doc = sv.documentView else { return }
-            let docH = doc.bounds.height
-            let visH = sv.contentView.bounds.height
-            let maxY = docH - visH
-            let fraction = maxY > 0 ? Double(sv.contentView.bounds.origin.y / maxY) : 0
-            onOffsetChanged(fraction)
-
-            let currentY = sv.contentView.bounds.origin.y
-            let bottomY = currentY + visH
-
-            var lo = 0, hi = pageYOffsets.count - 1
-            while lo < hi {
-                let mid = (lo + hi + 1) / 2
-                if pageYOffsets[mid] <= currentY { lo = mid } else { hi = mid - 1 }
-            }
-            // Walk left over duplicate Ys (vertical-double: left+right pages
-            // share the same Y) so `firstVisible` is the leftmost page of its row.
-            var firstVisible = lo
-            while firstVisible > 0 && pageYOffsets[firstVisible - 1] == pageYOffsets[firstVisible] {
-                firstVisible -= 1
-            }
-
-            var lo2 = firstVisible, hi2 = pageYOffsets.count - 1
-            while lo2 < hi2 {
-                let mid = (lo2 + hi2 + 1) / 2
-                if pageYOffsets[mid] < bottomY { lo2 = mid } else { hi2 = mid - 1 }
-            }
-            // Walk right over duplicate Ys so `lastVisible` is the rightmost
-            // page of its row. Without this, the right page of the last visible
-            // row would be skipped in double-page mode.
-            var lastVisible = lo2
-            while lastVisible + 1 < pageYOffsets.count
-                && pageYOffsets[lastVisible + 1] == pageYOffsets[lastVisible] {
-                lastVisible += 1
-            }
-
-            let visibleRange = firstVisible...lastVisible
-
-            onPageChanged(firstVisible)
-            lastVisibleRange = visibleRange
-            triggerPrefetch(first: firstVisible, last: lastVisible)
-
-            // Reposition the CAMetalLayer sublayer to cover the visible clipView
-            // area before rendering — the sublayer moves with scroll, so the
-            // drawable always composites 1:1 against the visible viewport.
-            metalView?.updateMetalLayerFrame()
-
-            // Defer the render call by one runloop tick. This ensures the NSScrollView
-            // layout pass has fully completed and committed the CAMetalLayer before we
-            // call nextDrawable(). Without this defer, Metal can abort with "failed to
-            // create drawable texture" because the layer hasn't been presented yet.
-            DispatchQueue.main.async { [weak self] in
-                self?.render(visibleRange: visibleRange)
-            }
-        }
-
-        func triggerPrefetch(first: Int, last: Int) {
-            guard let manager = pageManager, !pages.isEmpty else { return }
-            let lookahead = 3
-            let firstIdx = max(0, first - lookahead)
-            let lastIdx = min(pages.count - 1, last + lookahead)
-
-            // Visible pages first, then lookahead fanning outward. This way the
-            // actually on-screen pages decode before any prefetch neighbour,
-            // and stale lookahead work from a prior scroll can't delay them.
-            var order: [Int] = []
-            for i in first...last where i >= 0 && i < pages.count { order.append(i) }
-            var offset = 1
-            while order.count < (lastIdx - firstIdx + 1) {
-                let after = last + offset
-                let before = first - offset
-                if after <= lastIdx { order.append(after) }
-                if before >= firstIdx { order.append(before) }
-                offset += 1
-            }
-
-            // Cancel any in-flight prefetch — its remaining pages may already be
-            // off-screen, and we don't want it competing with the new order on
-            // the actor's queue.
-            prefetchTask?.cancel()
-
-            prefetchTask = Task { [weak self] in
-                for seqIdx in order {
-                    if Task.isCancelled { return }
-                    guard let self = self, seqIdx < self.pages.count else { continue }
-                    let page = self.pages[seqIdx]
-                    // Skip if already uploaded — avoids re-decode cost.
-                    if self.renderer?.texture(for: seqIdx) != nil { continue }
-                    guard let buffer = await manager.decodePage(pageIndex: seqIdx, from: page.source) else {
-                        continue
-                    }
-                    if Task.isCancelled { return }
-                    if self.renderer?.texture(for: seqIdx) == nil {
-                        _ = self.renderer?.upload(pixelBuffer: buffer, for: seqIdx)
-                    }
-                    // Re-render the current visible range so pages whose uploads
-                    // landed AFTER the last scroll-driven render still appear.
-                    // Hops back to @MainActor; only does real work if the page
-                    // is still in the visible range at the time the render runs.
-                    await MainActor.run {
-                        self.onTextureReady(seqIdx)
-                    }
-                }
-            }
-        }
-
-        /// Called on the main actor when a prefetch upload completes. If the
-        /// uploaded page is still within the most-recent visible range, we
-        /// trigger a render so the user sees the page without needing to
-        /// scroll again.
-        func onTextureReady(_ seqIdx: Int) {
-            guard lastVisibleRange.contains(seqIdx) else { return }
-            render(visibleRange: lastVisibleRange)
-        }
-
-        @MainActor
-        func render(visibleRange: ClosedRange<Int>) {
-            guard let metalView = metalView,
-                  let renderer = renderer else { return }
-
-            // Ensure the CAMetalLayer sublayer is positioned over the current
-            // visible viewport and sized to match, so nextDrawable() gives us a
-            // texture matching the on-screen region. updateMetalLayerFrame
-            // handles both the frame (position) and drawableSize (in pixels).
-            metalView.updateMetalLayerFrame()
-
-            guard let drawable = metalView.metalLayer.nextDrawable() else { return }
-
-            guard let commandBuffer = renderer.commandQueue.makeCommandBuffer() else { return }
-
-            let renderPassDescriptor = MTLRenderPassDescriptor()
-            renderPassDescriptor.colorAttachments[0].texture = drawable.texture
-            renderPassDescriptor.colorAttachments[0].loadAction = .clear
-            renderPassDescriptor.colorAttachments[0].storeAction = .store
-            renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-
-            var renderPositions: [Int: CGRect] = [:]
-            for seqIdx in visibleRange {
-                guard seqIdx < pages.count else { continue }
-                let pageID = pages[seqIdx].id
-                if let rect = pagePositions[pageID] {
-                    renderPositions[seqIdx] = rect
-                }
-            }
-
-            let clipView = scrollView?.contentView
-            let viewportRect = clipView?.bounds ?? metalView.bounds
-            let scrollOriginY = clipView?.bounds.origin.y ?? 0
-
-            renderer.render(
-                viewport: viewportRect,
-                scrollOriginY: scrollOriginY,
-                visibleRange: visibleRange,
-                pagePositions: renderPositions,
-                renderPassDescriptor: renderPassDescriptor,
-                commandBuffer: commandBuffer
-            )
-
-            commandBuffer.present(drawable)
-            commandBuffer.commit()
-        }
-
-        @objc func scrollDidChange(_ notification: Notification) {
-            updateVisibleRange()
-
-            // If the loupe is active and the user scrolled without moving the
-            // mouse, no leftMouseDragged event fires — so the page under the
-            // (fixed-on-screen) cursor has changed but the loupe still shows
-            // the old page. Refresh explicitly using the live cursor location.
-            guard loupePanel != nil,
-                  let scrollView = scrollView,
-                  let window = scrollView.window else { return }
-            let screenPt = NSEvent.mouseLocation
-            let windowPt = window.convertPoint(fromScreen: screenPt)
-            let svLocal = scrollView.convert(windowPt, from: nil)
-            guard scrollView.bounds.contains(svLocal) else { return }
-            // Reassert cursor hidden in case anything between events unhid it.
-            hideCursorIfNeeded()
-            updateLoupe(at: windowPt, in: window)
-        }
-
-        @objc func magnificationDidChange(_ notification: Notification) {
-            guard let sv = scrollView else { return }
-            switch layout {
-            case .verticalStack:
-                lastScale = sv.magnification
-                scale = sv.magnification
-                onMagnificationChanged?(sv.magnification)
-                recenterIfContentFits()
-            case .singlePage, .doubleSpread:
-                // We don't use magnification for these layouts; if a
-                // notification ever arrives (e.g. magnification forced to 1
-                // via range clamping), ignore it.
-                break
-            }
-        }
-
-        /// In single/double-page layouts, re-centre the documentView within
-        /// the clipView whenever zooming leaves the content smaller than the
-        /// viewport. Called after magnificationDidChange and from the cmd-
-        /// scroll-wheel monitor. Vertical modes are skipped — they intentionally
-        /// allow the user to scroll freely.
-        func recenterIfContentFits() {
-            guard let sv = scrollView, let doc = sv.documentView else { return }
-            switch layout {
-            case .verticalStack: return
-            case .singlePage, .doubleSpread: break
-            }
-            let clip = sv.contentView
-            // clipView.bounds is in documentView-local coords, scaled by
-            // `magnification`. An unzoomed single-page document has the same
-            // width as the clipView; when zoomed out, the clipView bounds are
-            // LARGER than the document — negative origin centres visually by
-            // default in NSScrollView, but the doc can also drift when the
-            // user scrolled and then zoomed back out.
-            let docSize = doc.frame.size
-            let visibleSize = clip.bounds.size
-            var newOrigin = clip.bounds.origin
-            if visibleSize.width > docSize.width {
-                newOrigin.x = (docSize.width - visibleSize.width) / 2
-            } else {
-                newOrigin.x = max(0, min(newOrigin.x, docSize.width - visibleSize.width))
-            }
-            if visibleSize.height > docSize.height {
-                newOrigin.y = (docSize.height - visibleSize.height) / 2
-            } else {
-                newOrigin.y = max(0, min(newOrigin.y, docSize.height - visibleSize.height))
-            }
-            if newOrigin != clip.bounds.origin {
-                clip.scroll(to: newOrigin)
-                sv.reflectScrolledClipView(clip)
-            }
-        }
-
-        // MARK: - Loupe
-
-        /// Installs a window-local left-mouse monitor. Unlike an overlay
-        /// view, the monitor doesn't consume events — scroll/pinch still work.
-        /// Left-click-and-hold activates the loupe to match the single/double
-        /// page modes (ZoomableImageView also routes left-click to the loupe).
-        func installLoupeMonitor() {
-            guard loupeEventMonitor == nil else { return }
-            loupeEventMonitor = NSEvent.addLocalMonitorForEvents(
-                matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
-            ) { [weak self] event in
-                self?.handleLoupeEvent(event)
-                return event
-            }
-        }
-
-        /// ⌘+scroll-wheel adjusts zoom. In single/double layouts zoom is
-        /// applied via `onMagnificationChanged` → `vm.scale` → frame-resize
-        /// (never via scrollView.magnification, which causes CAMetalLayer
-        /// compositing to bypass ancestor clipping). In vertical mode the
-        /// event is passed through so NSScrollView handles it natively.
-        func installZoomWheelMonitor() {
-            guard zoomWheelMonitor == nil else { return }
-            zoomWheelMonitor = NSEvent.addLocalMonitorForEvents(
-                matching: .scrollWheel
-            ) { [weak self] event in
-                guard let self = self,
-                      let scrollView = self.scrollView,
-                      event.window === scrollView.window,
-                      event.modifierFlags.contains(.command) else {
-                    return event
-                }
-                switch self.layout {
-                case .singlePage, .doubleSpread: break
-                case .verticalStack: return event
-                }
-                // Apply a proportional step to our own `scale` state (flows
-                // through ReaderViewModel → SwiftUI → rebuildLayout). We do
-                // NOT touch scrollView.magnification in single/double modes.
-                let step: CGFloat = 1 + CGFloat(event.scrollingDeltaY) * 0.01
-                let newScale = self.scale * step
-                let clamped = min(max(newScale, 0.25), 8.0)
-                self.onMagnificationChanged?(clamped)
-                return nil // consume the event
-            }
-        }
-
-        /// Double-click inside the metal view resets zoom to 1.0.
-        /// Drives scale via `onMagnificationChanged` → `vm.scale` → frame-resize
-        /// rather than scrollView.magnification (single/double modes only).
-        func installDoubleClickMonitor() {
-            guard doubleClickMonitor == nil else { return }
-            doubleClickMonitor = NSEvent.addLocalMonitorForEvents(
-                matching: .leftMouseDown
-            ) { [weak self] event in
-                guard let self = self,
-                      let scrollView = self.scrollView,
-                      event.clickCount == 2,
-                      event.window === scrollView.window else {
-                    return event
-                }
-                switch self.layout {
-                case .singlePage, .doubleSpread: break
-                case .verticalStack: return event
-                }
-                // Ensure the click is inside the scroll area (not on toolbar).
-                let svLocal = scrollView.convert(event.locationInWindow, from: nil)
-                guard scrollView.bounds.contains(svLocal) else { return event }
-                // Reset zoom via the scale binding rather than magnification.
-                self.onMagnificationChanged?(1.0)
-                return nil
-            }
-        }
-
-        /// Trackpad pinch gesture → updates `vm.scale` via the onMagnificationChanged
-        /// callback. Replaces the NSScrollView.magnification pinch path for
-        /// single/double layouts, which don't use NSScrollView magnification.
-        func installPinchMonitor() {
-            guard pinchMonitor == nil else { return }
-            pinchMonitor = NSEvent.addLocalMonitorForEvents(
-                matching: .magnify
-            ) { [weak self] event in
-                guard let self = self,
-                      let scrollView = self.scrollView,
-                      event.window === scrollView.window else {
-                    return event
-                }
-                switch self.layout {
-                case .singlePage, .doubleSpread: break
-                case .verticalStack: return event
-                }
-                let step: CGFloat = 1 + event.magnification
-                let newScale = self.scale * step
-                let clamped = min(max(newScale, 0.25), 8.0)
-                self.onMagnificationChanged?(clamped)
-                return nil
-            }
-        }
-
-        private func handleLoupeEvent(_ event: NSEvent) {
-            guard let scrollView = scrollView,
-                  let window = scrollView.window,
-                  event.window === window else { return }
-
-            // Only react when the cursor is over the scrollView area.
-            let svLocal = scrollView.convert(event.locationInWindow, from: nil)
-            guard scrollView.bounds.contains(svLocal) else {
-                // Still tear down on mouse-up if the user dragged off the
-                // scroll area before releasing.
-                if event.type == .leftMouseUp {
-                    showCursorIfNeeded()
-                    hideLoupe()
-                }
-                return
-            }
-
-            switch event.type {
-            case .leftMouseDown:
-                hideCursorIfNeeded()
-                updateLoupe(at: event.locationInWindow, in: window)
-            case .leftMouseDragged:
-                // Defensive re-hide: macOS can auto-unhide the cursor on certain
-                // focus or panel events during a drag, so keep asserting hidden
-                // while the user is still holding the left button.
-                hideCursorIfNeeded()
-                updateLoupe(at: event.locationInWindow, in: window)
-            case .leftMouseUp:
-                showCursorIfNeeded()
-                hideLoupe()
-            default:
-                break
-            }
-        }
-
-        private func hideCursorIfNeeded() {
-            guard !cursorHidden else { return }
-            NSCursor.hide()
-            cursorHidden = true
-        }
-
-        private func showCursorIfNeeded() {
-            guard cursorHidden else { return }
-            NSCursor.unhide()
-            cursorHidden = false
-        }
-
-        /// Resolves the page under the cursor, fetches its NSImage, and shows
-        /// the loupe. Coordinates are derived by asking the documentView itself
-        /// to convert the window-local point — this avoids every manual
-        /// flip/offset calculation and matches whatever coordinate system the
-        /// documentView is using (isFlipped = true here).
-        private func updateLoupe(at windowPt: CGPoint, in window: NSWindow) {
-            guard let scrollView = scrollView,
-                  let documentView = scrollView.documentView else { return }
-
-            loupeTaskID &+= 1
-            loupeTask?.cancel()
-
-            let docPt = documentView.convert(windowPt, from: nil)
-            let seqIdx = findSequentialIndex(at: docPt)
-            guard seqIdx >= 0, seqIdx < pages.count else {
-                Task { await DCLogger.shared.log("[loupe] miss pg seqIdx=\(seqIdx) docPt=\(docPt)") }
-                return
-            }
-
-            let pageID = sequentialToID[seqIdx]
-            guard let pageRect = pagePositions[pageID] else { return }
-            let cursorInImage = CGPoint(
-                x: docPt.x - pageRect.minX,
-                y: docPt.y - pageRect.minY
-            )
-            let imageViewSize = pageRect.size
-
-            Task { await DCLogger.shared.log("[loupe] win=\(windowPt) doc=\(docPt) pg=\(seqIdx) rect=\(pageRect) cursor=\(cursorInImage)") }
-
-            if let cached = loupeImage, cached.page == seqIdx {
-                showMagnifier(image: cached.nsImage,
-                              page: seqIdx,
-                              cursor: cursorInImage,
-                              imageViewSize: imageViewSize,
-                              windowPt: windowPt,
-                              in: window)
-                return
-            }
-
-            if let img = pageManager?.nsImage(for: seqIdx) {
-                loupeImage = (seqIdx, img)
-                showMagnifier(image: img,
-                              page: seqIdx,
-                              cursor: cursorInImage,
-                              imageViewSize: imageViewSize,
-                              windowPt: windowPt,
-                              in: window)
-                return
-            }
-
-            guard let pageManager = pageManager else { return }
-            let pageSource = pages[seqIdx].source
-            let myID = loupeTaskID
-            loupeTask = Task { [weak self] in
-                var buffer = await pageManager.page(for: seqIdx)
-                if buffer == nil {
-                    buffer = await pageManager.decodePage(pageIndex: seqIdx, from: pageSource)
-                }
-                guard !Task.isCancelled,
-                      let b = buffer,
-                      let nsImage = Coordinator.nsImage(from: b) else { return }
-                await MainActor.run {
-                    guard let self = self, self.loupeTaskID == myID else { return }
-                    self.loupeImage = (seqIdx, nsImage)
-                    self.showMagnifier(image: nsImage,
-                                       page: seqIdx,
-                                       cursor: cursorInImage,
-                                       imageViewSize: imageViewSize,
-                                       windowPt: windowPt,
-                                       in: window)
-                }
-            }
-        }
-
-        private func showMagnifier(image: NSImage,
-                                   page: Int,
-                                   cursor: CGPoint,
-                                   imageViewSize: CGSize,
-                                   windowPt: CGPoint,
-                                   in window: NSWindow) {
-            let loupePx = loupeRadius
-            let size = NSSize(width: loupePx * 2, height: loupePx * 2)
-
-            // NSPanel is positioned in screen coords (bottom-left origin).
-            let screenPt = window.convertPoint(toScreen: windowPt)
-            let panelFrame = NSRect(
-                x: screenPt.x - loupePx,
-                y: screenPt.y - loupePx,
-                width: size.width,
-                height: size.height
-            )
-
-            let magnifier = MagnifierView(
-                image: image,
-                cursorInImageView: cursor,
-                imageViewSize: imageViewSize
-            ).id(page)
-            let wrapped = AnyView(magnifier)
-
-            // Reuse the panel when the page hasn't changed — only the cursor
-            // and panel frame need updating. When the page changes, build a
-            // brand-new NSHostingView so no SwiftUI state can carry over.
-            if let panel = loupePanel, let host = loupeHost, loupeHostPage == page {
-                host.rootView = wrapped
-                panel.setFrame(panelFrame, display: true)
-                return
-            }
-
-            // Page changed (or first show): tear down any existing host and
-            // build fresh.
-            if let oldHost = loupeHost {
-                oldHost.removeFromSuperview()
-                loupeHost = nil
-            }
-
-            let panel: NSPanel
-            if let existing = loupePanel {
-                panel = existing
-                panel.setFrame(panelFrame, display: true)
-            } else {
-                let p = NSPanel(
-                    contentRect: panelFrame,
-                    styleMask: [.borderless, .nonactivatingPanel],
-                    backing: .buffered,
-                    defer: false
-                )
-                p.isOpaque = false
-                p.backgroundColor = .clear
-                p.hasShadow = false
-                p.level = .floating
-                p.ignoresMouseEvents = true
-                p.hidesOnDeactivate = false
-                p.isMovableByWindowBackground = false
-                window.addChildWindow(p, ordered: .above)
-                loupePanel = p
-                panel = p
-            }
-
-            let host = NSHostingView(rootView: wrapped)
-            host.frame = NSRect(origin: .zero, size: size)
-            panel.contentView = host
-            loupeHost = host
-            loupeHostPage = page
-        }
-
-        func hideLoupe() {
-            // Invalidate any in-flight fetch so its showMagnifier doesn't run
-            // after the user has released right-click.
-            loupeTaskID &+= 1
-            loupeTask?.cancel()
-            loupeTask = nil
-
-            if let panel = loupePanel {
-                panel.parent?.removeChildWindow(panel)
-                panel.orderOut(nil)
-            }
-            loupePanel = nil
-            loupeHost = nil
-            loupeHostPage = nil
-            showCursorIfNeeded()
-        }
-
-        /// Converts a 32BGRA CVPixelBuffer into an NSImage by snapshotting
-        /// pixel memory into a CGImage. Called off the main actor; the result
-        /// is Sendable (NSImage + CGImage are value-semantic enough here).
-        nonisolated private static func nsImage(from pixelBuffer: CVPixelBuffer) -> NSImage? {
-            return makeNSImageFromPixelBuffer(pixelBuffer)
-        }
-
-        /// Binary search: finds the sequential index whose page rect contains `docPt.y`.
-        /// Returns -1 if not found.
-        private func findSequentialIndex(at docPt: CGPoint) -> Int {
-            guard !pageYOffsets.isEmpty else { return -1 }
-
-            var lo = 0, hi = pageYOffsets.count - 1
-            while lo < hi {
-                let mid = (lo + hi + 1) / 2
-                if pageYOffsets[mid] <= docPt.y { lo = mid } else { hi = mid - 1 }
-            }
-
-            // In vertical-double mode, left and right pages of a row share the
-            // same Y offset. Walk over all pages at this Y and return the one
-            // whose horizontal bounds contain docPt.x.
-            var idx = lo
-            while idx > 0 && pageYOffsets[idx - 1] == pageYOffsets[idx] {
-                idx -= 1
-            }
-            let rowY = pageYOffsets[idx]
-            while idx < pageYOffsets.count && pageYOffsets[idx] == rowY {
-                let pageID = sequentialToID[idx]
-                if let rect = pagePositions[pageID],
-                   docPt.x >= rect.minX && docPt.x <= rect.maxX,
-                   docPt.y >= rect.minY && docPt.y <= rect.maxY {
-                    return idx
-                }
-                idx += 1
-            }
-            return -1
         }
     }
 }

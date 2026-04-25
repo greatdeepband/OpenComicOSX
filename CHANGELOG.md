@@ -1,78 +1,66 @@
 # DC Reader — Changelog
 
-## Unreleased — Step A phase A-1 (single-page Metal migration)
+## v0.10.2 — 2026-04-25 — Reader-wide named constants + MetalPageView file split
 
-**Status:** Phase A-1 implementation complete, pending user smoke test.
-**Backup before:** `/Volumes/Media/DC_dev_lib_backup_20260423_234635/` (pre-v0.9.0).
-**App built at:** `/Volumes/Media/DC_dev_lib/OpenComic.app`.
+### Changed
+- **`Sources/DC/ReaderConstants.swift`** — new file gathering every previously-bare numeric constant (top-bar height, vertical-page gap, double-page gutter, magnification range, wheel-zoom step + clamp, scale-equality epsilon, aspect-ratio floor, mode-switch render-retry delays, initial-render retry budget, Metal max texture dimension, prefetch lookahead). Each value documents *why* it's that number, not just what it is. Replaces 15+ unnamed magic numbers across `MetalPageView.swift`, `ReaderView.swift`, and `ReaderViewModel.swift`.
+- **`MetalPageView.swift` split into focused extension files** — the 1500-line monolith was carved into:
+  - `MetalPageView.swift` (~600 lines): NSViewRepresentable struct, `MetalCanvasView` NSView subclass, `Coordinator` class declaration with stored properties + init/deinit.
+  - `MetalPageView+Layout.swift` (~600 lines): rebuild, scroll, visible-range, recentre, hit-test (`findSequentialIndex`).
+  - `MetalPageView+Render.swift` (~125 lines): `render`, `triggerPrefetch`, `onTextureReady`.
+  - `MetalPageView+Loupe.swift` (~210 lines): NSEvent monitor, `updateLoupe`, cursor visibility, overlay state emission.
+  - `MetalPageView+Zoom.swift` (~95 lines): scroll-wheel, double-click, pinch monitors.
+- Coordinator stored properties were upgraded from `private` to `internal` so sibling extensions can reach them; the `final class Coordinator` is still nested inside `extension MetalPageView` and never referenced outside the reader, so the practical encapsulation is unchanged.
 
-### What shipped in A-1
-Single Page mode now renders through `MetalPageView` — the same Metal-backed NSScrollView + CAMetalLayer stack that drives vertical and vertical-double. Decode cache is the shared `MetalPageManager` from v0.9.0; loupe, prefetch, and eviction paths are now unified for three of the four reading modes (double-page still uses SwiftUI `SpreadView` until phase A-2).
+## v0.10.1 — 2026-04-25 — Mode-switch centring + cross-vertical scroll restore
 
-### New `MetalPageView` surface
-- **`ReadingLayout` enum:** `.verticalStack(pagesPerRow:)` · `.singlePage` · `.doubleSpread`. Drives all layout branching in `Coordinator.rebuildLayout()`.
-- **`rebuildSinglePage()`** — lays out the current page fit-to-container as one quad; frame-resize zoom scales the documentView around the page.
-- **`rebuildDoubleSpread()`** — stub in place for phase A-2 (lays out left+right or single-spread at half/full width).
-- **Per-layout scrollers:** vertical modes get vertical-only; single/double get both axes (a zoomed page can overhang in any direction).
-- **Zoom path split:**
-  - Vertical modes → native `NSScrollView.magnification` (CALayer transform, fast).
-  - Single/double modes → documentView frame-resize in `rebuildLayout`. `scrollView.magnification` is pinned to 1.0 because the magnification transform is unsafe with `CAMetalLayer` (direct-to-surface drawable bypasses clipView clipping when a scale transform is present).
-- **New NSEvent monitors** (local, scoped to the scroll view's window):
-  - `installZoomWheelMonitor()` — ⌘+scroll-wheel zoom.
-  - `installDoubleClickMonitor()` — double-click fit-to-width / reset.
-  - `installPinchMonitor()` — trackpad pinch-to-zoom.
-  - Existing loupe monitor preserved.
-- **`topContentInset` parameter** — reserves top-bar space via native `NSScrollView.contentInsets` instead of SwiftUI padding (see "Tahoe scroll-into-header bug" below).
-- **`recenterIfContentFits()`** — re-centers the documentView when the zoomed content is smaller than the viewport (prevents zoom-out leaving content off-center).
-- **`updateMetalLayerFrame()`** — clamps `metalLayer.frame` to `clipView.bounds.intersection(documentView.bounds)` so the Metal drawable never paints outside the visible region.
+### Fixed
+- **Single-page off-centre after switching from double-page** — `NSClipView`'s `constrainBoundsRect:` clamps negative bounds origins back to 0 when the documentView is smaller than the clip view, so the previous "set negative origin to centre" math silently failed in X (no `contentInsets.left` to legalise it). `rebuildSinglePage` / `rebuildDoubleSpread` now pad the documentView to `max(scaledSize, usableViewport)` and place the page rect centred *within* the doc — centring is intrinsic to the layout, no negative origins needed. The centring block in `updateNSView` reduces to a single non-negative scroll-origin computation.
+- **Vertical-single ↔ vertical-double scroll position jumped** — the live `scrollOffsetFraction` was shared across both pagesPerRow values, but a fraction is only meaningful against the doc height it was captured under (vertical-double's doc is roughly half as tall). New `vm.scrollOffsetPagesPerRow` tracks which column count the fraction was saved against; `verticalScrollView` falls through to page-based restore when the count differs, so position tracks the page rather than the (mismatched) fraction.
 
-### `ReaderView` wiring
-- `singlePageView` now constructs `MetalPageView(layout: .singlePage, …)`. `ZoomableImageView` still imported but no longer invoked for single-page.
-- `doublePageView` unchanged — still uses `SpreadView` (SwiftUI) until phase A-2.
-- Top-bar overlay restructured to ZStack(alignment: .top) — the reader content fills the full window height, and the top bar sits visually above it. Outer SwiftUI `.padding(.top, 38)` removed for Metal-backed modes (see bug note below). `SpreadView` still gets the padding applied at its call site.
-- `FullSizeTitleBarConfigurator` + `TitlebarEffectView` (NSVisualEffectView `.titlebar`, `.behindWindow`) preserved — the custom 38pt bar is pixel-identical to native window chrome.
+## v0.10.0 — 2026-04-25 — Metal pipeline unified across all four reading modes
 
-### Tahoe scroll-into-header bug — final fix
-**Symptom:** zoomed single-page content rendered over the reader top bar.
+The full Step A migration: every reading mode (single, double, vertical, vertical-double) now renders through one shared `MetalPageView` → `MetalPageRenderer` → `Shaders.metal` stack. SpreadView, ZoomableImageView, MouseCatcher, and `View.onScrollWheel` retired.
 
-**Root cause:** macOS 26 (Tahoe) introduced a regression where an `NSScrollView` whose frame does **not** stretch top-to-bottom of its containing window content view lets its scrolled content render OVER any sibling view above it in the layout tree. See Sarah Reichelt's article: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/.
+### Added
+- **Metal-rendered single-page** — `MetalPageView(layout: .singlePage)` replaces SwiftUI `ZoomableImageView`. Frame-resize zoom (avoids CAMetalLayer compositing issues with `NSScrollView.magnification`).
+- **Metal-rendered double-page** — `MetalPageView(layout: .doubleSpread)` replaces SwiftUI `SpreadView`. Honours `.isSpread` for natural double-scan pages.
+- **Fit-to-window on open** for single/double — `scale = 1.0` now fits the page in both width and height (previously fit-by-width only, overflowing tall pages).
+- **Zoom-around-centre** for single/double — every zoom step recentres the page on the viewport, preserving the focal point.
+- **SwiftUI loupe overlay** — `LoupeOverlayState` + `MagnifierView` driven from `MetalPageView.onLoupeOverlay` callback. Naturally clipped by the reader's ZStack bounds; cursor reset when dragged outside the window. Replaces NSPanel-based loupe.
+- **`prefetchInFlightRange` dedupe** — same-range re-triggers no longer cancel the in-flight prefetch task (was killing decodes mid-flight on rapid `updateVisibleRange` bursts).
+- **Cross-mode-switch state preservation** — switching modes now preserves the live scroll-offset fraction (vertical) and current page (single/double); the new layout restores via the same persistence path the on-disk save uses.
+- **3-stage render retry on layout change** — at 1ms, 50ms, 150ms after `lastLayout` changes, walks CAMetalLayer's drawable rotation past stale frames so the new layout reaches the screen reliably.
 
-**What didn't work:**
-- SwiftUI `.clipped()` on the MetalPageView.
-- `scrollView.layer.masksToBounds = true` + `contentView.layer.masksToBounds = true`.
-- Removing `NSScrollView.magnification` in favor of documentView frame-resize zoom.
-- Restructuring to a ZStack overlay while still applying `.padding(.top, 38)` to the reader content — the SwiftUI padding framed the scroll view at Y=38, **defeating the bug's workaround precondition** (the scroll view must be full-height).
+### Fixed
+- **First page doesn't render on initial mode open** in single/double — `clipH = 0` on the first call to `rebuildSinglePage` / `rebuildDoubleSpread` produced a 1pt-wide documentView frame; now falls back to `containerWidth` and re-rebuilds via `clipViewGeometryChanged` once the clip view sizes up.
+- **Top-bar bleed** — zoomed page no longer overlaps the 38pt reader top bar. CAMetalLayer's `direct-to-surface` compositing bypasses ancestor `masksToBounds`, so the metalLayer frame now subtracts `topInset` before intersecting with `docFrame`.
+- **Image squish at low zoom / centred state** — shader now normalises page-rect doc coords against `metalLayer.frame` (the actual drawable) rather than `clipView.bounds`. Added `viewportOriginX` to the shader uniforms so X panning works correctly in single/double when the doc is wider than the clip.
+- **Page-turn renders the wrong page** in single/double — `updateVisibleRange` short-circuits for these layouts to use `currentPage` directly; the previous binary-search-over-pageYOffsets path always collapsed to `0…0` and the renderer looked up `pages[0].id` instead of the current page.
+- **Scale/docFrame desync** — `coordinator.scale` is now committed BEFORE `rebuildLayout()` runs, so the documentView frame uses the new zoom step rather than the previous-cycle value.
+- **Centre on every zoom step** — block in `updateNSView` forces the documentView's centre to the viewport centre after any rebuild or scale change. `recenterIfContentFits` now uses the *usable* viewport (clip minus top inset) instead of full clip.
+- **Mode-switch leaves single-page slightly off-centre** — `scrollView.magnification` is now reset to the new layout's pinned value on mode change (single/double pin to 1.0; vertical uses the live scale). Without this reset, a stale magnification from a previous vertical session shrank `clipView.bounds.size`, throwing off the centre math.
+- **Mode-switch black state** — SwiftUI reuses the Coordinator/NSScrollView/CAMetalLayer across mode switches, so the first render after a layout change races with the layout commit and presents a stale drawable. The 3-stage render retry walks past it; `metalView.layoutSubtreeIfNeeded()` ensures the metalLayer geometry is current before the retries fire.
+- **Loupe right-page never shown in double-page** — `findSequentialIndex` now hit-tests `pagePositions[pages[currentPage].id]` and `pagePositions[pages[currentPage+1].id]` directly for `.doubleSpread`. The previous walk over `pageYOffsets` indices looked up `sequentialToID[idx]` which pointed at `pages[0]/pages[1]` rather than the visible pages once `currentPage > 0`.
+- **Loupe freezes mid-drag at the gutter** — when the target page's NSImage isn't yet decoded, `updateLoupe` now emits a fallback state using the last cached image so the loupe position keeps tracking the cursor.
 
-**What worked (commit `eaf85f2`):** reserve top-bar space via native `NSScrollView.contentInsets` instead of SwiftUI padding. The scroll view frame is now genuinely full-height; the clip view treats the top 38pt as a non-scrollable band; content cannot enter it regardless of zoom. Paired with `scrollView.borderType = .noBorder` as belt-and-suspenders (independently disables the buggy render path).
+### Changed
+- **`ReaderViewModel`** — removed `currentImage`, `image(for:)`, `cacheVersion`, `offset`, and the `pageManager.onPageReadyNSImage` callback. All four modes drive their own re-renders via `MetalPageView`'s `onTextureReady` path; no SwiftUI cache-version bumping needed.
+- **CHANGELOG**: consolidated five overlapping `Unreleased` entries from the migration arc (2026-04-24 → 2026-04-25) into this single v0.10.0 release.
 
-### Commit sequence (A-1)
-| Commit | What |
-|---|---|
-| `c70d545` | spec: Metal-rendered single & double page (step A) |
-| `7e0e94b` | plan: implementation tasks for Metal single/double page |
-| `97c0e6a` | feat: add `ReadingLayout` enum + layout/currentPage params |
-| `5ee1726` | feat: Coordinator tracks layout + currentPage |
-| `6a5f78b` | feat: `rebuildLayout` branches on ReadingLayout; single-page path |
-| `237c799` | feat: cmd-scroll zoom + double-click fit-to-width monitors |
-| `ded80f6` | fix: scope cmd-scroll monitor to its own window |
-| `19725a8` | feat: single-page mode now renders via MetalPageView |
-| `d4a4d0e` | fix: single-page zoom/pan + navbar overlap (enable horizontal scroller; remove ignoresSafeArea) |
-| `27e33e2` | fix: clamp Metal layer to documentView; recenter on zoom |
-| `0224039` | fix: clip scrollView to its frame to prevent zoom overlap (insufficient alone) |
-| `a4935ca` | fix: single/double zoom via frame-resize (no magnification transform) |
-| `e4dec2b` | fix: work around macOS Tahoe scroll-into-header bug (full-height scrollView + borderless) |
-| `eaf85f2` | fix: reserve top-bar space via `NSScrollView.contentInsets` (final fix) |
+### Removed
+- `Sources/DC/Views/ZoomableImageView.swift` — entire file (230 lines): `ZoomableImageView`, `MouseCatcher`, `_MouseCatcherView`, `ScrollWheelModifier`, `ScrollWheelView`, `_SWView`, and the `View.onScrollWheel` extension. All callers retired.
+- `SpreadView` struct + `computeLoupe` from `ReaderView.swift` (~167 lines).
 
-### Verification
-`swift build -c release` clean (pre-existing warnings only). `./build_app.sh` produces `OpenComic.app`. Manual user smoke test of single-page mode is **pending**: open a comic, zoom past 1× (pinch / ⌘-scroll / ↑ key / double-click), scroll the zoomed page around, verify the image stays below the top bar in all directions; verify keyboard shortcuts and loupe; verify behavior on CBZ, CBR, PDF.
+### Technical notes (archive)
 
-### What remains (to pick up in the next session)
-- **Phase A-1 gate:** user confirms single-page mode smoke test passes.
-- **Phase A-2 (tasks 6–8):** `rebuildDoubleSpread` body + `doublePageView` wired to `MetalPageView(layout: .doubleSpread, …)` + A-2 gate smoke test. SpreadView becomes dead code after this phase but is NOT deleted yet.
-- **Phase A-3 (tasks 9–12):** delete `ZoomableImageView` (entire file), delete `SpreadView` struct + `MouseCatcher` + `ScrollWheelModifier` family from `ReaderView.swift`, trim `pagesPerRow` API now that only vertical-double uses pagesPerRow=2, write CHANGELOG v0.10.0 entry.
+The migration uncovered a chain of Metal/AppKit/SwiftUI interactions that were each diagnosed via live telemetry sessions:
 
-Spec: `docs/superpowers/specs/2026-04-24-metal-rendered-single-double-page-step-a-design.md`.
-Plan: `docs/superpowers/plans/2026-04-24-metal-rendered-single-double-page-step-a.md`.
+- **CAMetalLayer direct-to-surface compositing bypasses ancestor `masksToBounds`.** This was the root cause of the top-bar bleed and made the SwiftUI overlay loupe (which IS clipped by ancestor bounds) the right pattern over the NSPanel-based loupe.
+- **NSScrollView's `contentInsets` shifts `clipView.bounds.origin` to negative values at the rubber-band-at-top state**, but the bounds-origin behaviour wasn't symmetric with our model — the carve-from-visible math had to handle both `origin = 0` (initial layout) and `origin = -topInset` (rubber band) cases.
+- **SwiftUI reuses NSViewRepresentable Coordinators** when the surrounding struct type is preserved at the same view-tree position — even across `_ConditionalContent` branches that change associated values like our `layout` enum. This was unintuitive but explains why the texture ring persisted across mode switches and why the magnification-reset and 3-stage render retry were necessary.
+- **CAMetalLayer's drawable rotation queue** can hold a stale frame from before a layout commit. The retry-render approach (multiple presents at 1ms/50ms/150ms intervals) is a pragmatic fix for the racing-commit problem; `presentsWithTransaction = true` would be the principled alternative if this ever needs revisiting.
+- **`updateVisibleRange` fires many times in rapid succession during initial layout** (clip-view bounds-change notifications, layout-completed retries, render dispatches, frame-change notifications). Without the `prefetchInFlightRange` dedupe, each call cancelled the in-flight decode mid-flight.
 
 ---
 

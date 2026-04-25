@@ -7,33 +7,18 @@ import SwiftUI
 final class ReaderViewModel: ObservableObject {
     @Published var currentPage: Int = 0
     @Published var scale: CGFloat = 1.0
-    @Published var offset: CGSize = .zero
     @Published var readingMode: ReadingMode = .verticalScroll
     /// Updated by ReaderView via GeometryReader so toolbar actions have the real size.
     @Published var containerSize: CGSize = CGSize(width: 900, height: 600)
-    /// Bumped whenever a page decode completes for the current or adjacent page.
-    /// Reading this in singlePageView/doublePageView creates a SwiftUI dependency
-    /// so the view re-evaluates currentImage when the decode finishes.
-    @Published var cacheVersion: Int = 0
 
     let comic: Comic
     /// Shared decode cache for every reading mode (single, double, vertical,
     /// vertical-double). Owns both the CVPixelBuffer ring and the NSImage
-    /// fast-path cache. Injected into `MetalPageView` so vertical modes use
-    /// the same instance the single/double path reads from.
+    /// fast-path cache. Injected into `MetalPageView` so all modes use one
+    /// decode pipeline.
     let pageManager = MetalPageManager()
 
     var pageCount: Int { comic.pages.count }
-
-    /// Returns the cached image for the current page (may be nil while decoding).
-    var currentImage: NSImage? {
-        pageManager.nsImage(for: currentPage)
-    }
-
-    /// Returns the cached image for a given page index (may be nil while decoding).
-    func image(for index: Int) -> NSImage? {
-        pageManager.nsImage(for: index)
-    }
 
     /// Natural size for a page — used for layout before the image is decoded.
     func naturalSize(for index: Int) -> CGSize {
@@ -41,11 +26,16 @@ final class ReaderViewModel: ObservableObject {
         return comic.pages[index].naturalSize
     }
 
-    let minScale: CGFloat = 0.1
-    let maxScale: CGFloat = 8.0
+    let minScale: CGFloat = ReaderConstants.nativeMagnificationMin
+    let maxScale: CGFloat = ReaderConstants.nativeMagnificationMax
 
     var isRestoringPosition: Bool = false
     var scrollOffsetFraction: Double = 0.0
+    /// pagesPerRow the live `scrollOffsetFraction` was last computed against.
+    /// Vertical-single (1) and vertical-double (2) have very different doc
+    /// heights, so a fraction saved in one is meaningless in the other —
+    /// applying it would jump the user to a wrong page on mode switch.
+    var scrollOffsetPagesPerRow: Int = 1
     private(set) var savedScrollOffset: Double? = nil
 
     init(comic: Comic) {
@@ -61,19 +51,9 @@ final class ReaderViewModel: ObservableObject {
            let mode = ReadingMode(rawValue: savedMode) {
             self.readingMode = mode
         }
-        // Wire the SwiftUI re-render callback — fires when any page decode completes.
-        // Only bumps cacheVersion for the current page and its immediate neighbour
-        // to avoid spurious re-renders on prefetch of distant pages.
-        pageManager.onPageReadyNSImage = { [weak self] index, _ in
-            guard let self = self else { return }
-            // Only bump for pages SwiftUI is actively rendering — the current
-            // page, and the current + 1 slot for double-page mode. Prefetched
-            // far-neighbours should not trigger re-renders.
-            if index == self.currentPage || index == self.currentPage + 1 {
-                self.cacheVersion += 1
-            }
-        }
-        // Kick off initial prefetch.
+        // Kick off initial prefetch. All four reading modes drive their own
+        // re-renders via MetalPageView's onTextureReady callback path; no
+        // SwiftUI cache-version bump is needed here.
         triggerPrefetch()
     }
 
@@ -169,7 +149,6 @@ final class ReaderViewModel: ObservableObject {
     func resetZoom() {
         withAnimation(.easeOut(duration: 0.2)) {
             scale = 1.0
-            offset = .zero
         }
     }
 
@@ -186,7 +165,6 @@ final class ReaderViewModel: ObservableObject {
         if readingMode == .doublePage {
             withAnimation(.easeOut(duration: 0.2)) {
                 scale = 1.0
-                offset = .zero
             }
             return
         }
@@ -198,7 +176,6 @@ final class ReaderViewModel: ObservableObject {
         let targetScale = containerWidth / fittedWidth
         withAnimation(.easeOut(duration: 0.2)) {
             scale = targetScale.clamped(to: minScale...maxScale)
-            offset = .zero
         }
     }
 
@@ -211,19 +188,18 @@ final class ReaderViewModel: ObservableObject {
         let actualScale = size.width / fittedWidth
         withAnimation(.easeOut(duration: 0.2)) {
             scale = actualScale.clamped(to: minScale...maxScale)
-            offset = .zero
         }
     }
 
     func zoomIn() {
-        withAnimation(.easeOut(duration: 0.15)) {
-            scale = min(scale * 1.25, maxScale)
+        withAnimation(.easeOut(duration: ReaderConstants.zoomAnimationDuration)) {
+            scale = min(scale * ReaderConstants.wheelZoomStep, maxScale)
         }
     }
 
     func zoomOut() {
-        withAnimation(.easeOut(duration: 0.15)) {
-            scale = max(scale / 1.25, minScale)
+        withAnimation(.easeOut(duration: ReaderConstants.zoomAnimationDuration)) {
+            scale = max(scale / ReaderConstants.wheelZoomStep, minScale)
         }
     }
 }

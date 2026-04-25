@@ -1,20 +1,11 @@
 import Metal
-import MetalKit
 import CoreVideo
-
-// MARK: - SpreadInfo
-
-/// Metadata for a composited left+right page spread.
-struct SpreadInfo {
-    /// The sequential index of the right (paired) page.
-    let rightIndex: Int
-    /// The Y origin and height of this spread row in document space.
-    let rect: CGRect
-}
 
 // MARK: - TextureRingBuffer
 
-/// Thread-unsafe LRU texture ring buffer with a fixed capacity.
+/// Fixed-capacity LRU map of page index → MTLTexture. Not thread-safe; callers
+/// are expected to serialize access (MetalPageRenderer is used only from the
+/// main actor in this project).
 struct TextureRingBuffer {
     private var entries: [Int: (texture: MTLTexture, lastAccess: Date)] = [:]
     private let maxSize: Int
@@ -23,33 +14,21 @@ struct TextureRingBuffer {
         self.maxSize = maxSize
     }
 
-    // MARK: - Mutating API
-
-    /// Insert or replace a texture for the given page index.
-    /// Evicts the least-recently-used entry if at capacity.
     mutating func insert(_ texture: MTLTexture, for pageIndex: Int) {
         if entries.count >= maxSize {
-            let lruKey = entries.min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key
-            if let key = lruKey { entries.removeValue(forKey: key) }
+            if let lruKey = entries.min(by: { $0.value.lastAccess < $1.value.lastAccess })?.key {
+                entries.removeValue(forKey: lruKey)
+            }
         }
         entries[pageIndex] = (texture, Date())
     }
 
-    /// Touch the entry for `pageIndex`, updating its last-access time.
-    /// Returns the texture if found.
     mutating func touch(pageIndex: Int) -> MTLTexture? {
         guard var entry = entries[pageIndex] else { return nil }
         entry.lastAccess = Date()
         entries[pageIndex] = entry
         return entry.texture
     }
-
-    /// Evict all entries outside the given range.
-    mutating func evictOutside(_ range: ClosedRange<Int>) {
-        entries = entries.filter { range.contains($0.key) }
-    }
-
-    // MARK: - Non-mutating subscript
 
     subscript(pageIndex: Int) -> MTLTexture? {
         entries[pageIndex]?.texture
@@ -59,24 +38,14 @@ struct TextureRingBuffer {
 // MARK: - MetalPageRenderer
 
 /// Metal device, command queue, and texture ring buffer.
-/// Handles CVPixelBuffer → MTLTexture upload and GPU render encoding.
+/// Handles CVPixelBuffer → MTLTexture upload and GPU render encoding for the
+/// vertical and vertical-double reading modes.
 final class MetalPageRenderer {
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
-    let textureCache: CVMetalTextureCache
     let pipelineState: MTLRenderPipelineState
 
     private var textureRing = TextureRingBuffer(maxSize: 10)
-
-    /// Live spread textures keyed by the LEFT page's sequential index.
-    /// Only maintained while `pagesPerRow == 2` is active.
-    private var spreadTextures: [Int: MTLTexture] = [:]
-
-    /// Compute pipeline used to blit two page textures into a spread texture.
-    private var blitPipeline: MTLComputePipelineState?
-
-    /// Compute pipeline for the 2× loupe magnifier kernel.
-    private(set) var loupePipeline: MTLComputePipelineState?
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -84,13 +53,20 @@ final class MetalPageRenderer {
         self.device = device
         self.commandQueue = commandQueue
 
-        var cache: CVMetalTextureCache?
-        CVMetalTextureCacheCreate(nil, nil, device, nil, &cache)
-        guard let textureCache = cache else { return nil }
-        self.textureCache = textureCache
+        // Prefer the SPM default library; fall back to runtime compilation of
+        // the bundled Shaders.metal so the .app bundle doesn't need a
+        // pre-compiled .metallib.
+        let library: MTLLibrary?
+        if let defaultLib = device.makeDefaultLibrary() {
+            library = defaultLib
+        } else if let metalURL = Bundle.main.url(forResource: "Shaders", withExtension: "metal"),
+                  let metalSrc = try? String(contentsOf: metalURL, encoding: .utf8) {
+            library = try? device.makeLibrary(source: metalSrc, options: nil)
+        } else {
+            library = nil
+        }
 
-        // Create the render pipeline state from the metal shaders
-        guard let library = device.makeDefaultLibrary(),
+        guard let library = library,
               let vertexFunc = library.makeFunction(name: "vertexShader"),
               let fragmentFunc = library.makeFunction(name: "fragmentShader") else {
             return nil
@@ -101,202 +77,101 @@ final class MetalPageRenderer {
         pipelineDescriptor.fragmentFunction = fragmentFunc
         pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
 
-        do {
-            pipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
-        } catch {
+        guard let state = try? device.makeRenderPipelineState(descriptor: pipelineDescriptor) else {
             return nil
         }
-
-        // Create the blit compute pipeline for spread composition
-        if let blitFunc = library.makeFunction(name: "composeSpreadKernel") {
-            do {
-                blitPipeline = try device.makeComputePipelineState(function: blitFunc)
-            } catch {
-                // Non-fatal — spread composition will fall back to individual rendering
-            }
-        }
-
-        // Create the loupe compute pipeline
-        if let loupeFunc = library.makeFunction(name: "loupeKernel") {
-            do {
-                loupePipeline = try device.makeComputePipelineState(function: loupeFunc)
-            } catch {
-                // Non-fatal — loupe will be skipped gracefully
-            }
-        }
+        self.pipelineState = state
     }
 
-    /// Upload a CVPixelBuffer to a MTLTexture and store in the ring buffer.
+    /// Copy a 32BGRA CVPixelBuffer into a device-owned MTLTexture and store it
+    /// in the ring buffer. An independent texture is used (rather than
+    /// `CVMetalTextureCacheCreateTextureFromImage`) so the CVPixelBuffer can be
+    /// released/evicted without affecting subsequent sampling — a previously
+    /// shared backing caused black pages once the pixel buffer was evicted.
     func upload(pixelBuffer: CVPixelBuffer, for pageIndex: Int) -> MTLTexture? {
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
-
-        var cvTexture: CVMetalTexture?
-        let status = CVMetalTextureCacheCreateTextureFromImage(
-            nil, textureCache, pixelBuffer, nil,
-            .bgra8Unorm, width, height, 0, &cvTexture
-        )
-
-        guard status == kCVReturnSuccess, let cvTex = cvTexture,
-              let texture = CVMetalTextureGetTexture(cvTex) else {
+        guard width > 0, height > 0 else { return nil }
+        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else {
             return nil
         }
 
-        // Ring buffer: evict LRU if at capacity
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: width, height: height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .shared
+
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+
+        let region = MTLRegion(
+            origin: MTLOrigin(x: 0, y: 0, z: 0),
+            size: MTLSize(width: width, height: height, depth: 1)
+        )
+        texture.replace(region: region, mipmapLevel: 0, withBytes: baseAddress, bytesPerRow: bytesPerRow)
+
         textureRing.insert(texture, for: pageIndex)
         return texture
     }
 
-    /// Returns the texture for a cached page, updating its last-access time.
+    /// Returns the cached texture for a page, touching its LRU timestamp.
     func texture(for pageIndex: Int) -> MTLTexture? {
-        return textureRing.touch(pageIndex: pageIndex)
-    }
-
-    /// Evict all textures outside the given page range.
-    func evictOutside(_ range: ClosedRange<Int>) {
-        textureRing.evictOutside(range)
-        // Evict spread textures whose left page is outside the range
-        spreadTextures = spreadTextures.filter { range.contains($0.key) }
-    }
-
-    /// Returns the cached spread texture for the given left page index, if any.
-    func spreadTexture(for leftIndex: Int) -> MTLTexture? {
-        return spreadTextures[leftIndex]
-    }
-
-    /// Sets the spread map for vertical-double mode.
-    /// Called by MetalPageView.Coordinator whenever the layout changes.
-    /// - Parameter spreads: Dict keyed by left-page sequential index → SpreadInfo.
-    func setSpreads(_ spreads: [Int: SpreadInfo]) {
-        // Evict spreads whose left page no longer exists
-        spreadTextures = spreadTextures.filter { spreads[$0.key] != nil }
-    }
-
-    /// Composites a spread texture from the left and right page textures.
-    /// Returns the spread texture (newly created or cached) for the given left index.
-    /// Must be called with valid left/right textures already in the ring buffer.
-    func composeSpread(
-        leftIndex: Int,
-        rightIndex: Int,
-        leftRect: CGRect,
-        rightRect: CGRect,
-        commandBuffer: MTLCommandBuffer
-    ) -> MTLTexture? {
-        guard let blitPipeline = blitPipeline,
-              let leftTex = textureRing[leftIndex],
-              let rightTex = textureRing[rightIndex] else { return nil }
-
-        // Reuse existing spread texture if dimensions match
-        let spreadWidth = Int(leftRect.width + rightRect.width)
-        let spreadHeight = Int(max(leftRect.height, rightRect.height))
-
-        if let existing = spreadTextures[leftIndex],
-           existing.width == spreadWidth && existing.height == spreadHeight {
-            // Recompose into the existing texture
-            renderSpreadIntoTexture(
-                leftTex: leftTex, rightTex: rightTex,
-                leftRect: leftRect, rightRect: rightRect,
-                target: existing,
-                pipeline: blitPipeline,
-                commandBuffer: commandBuffer
-            )
-            return existing
-        }
-
-        // Create a new spread texture
-        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: spreadWidth,
-            height: spreadHeight,
-            mipmapped: false
-        )
-        textureDescriptor.usage = [.shaderRead, .shaderWrite]
-
-        guard let spreadTex = device.makeTexture(descriptor: textureDescriptor) else { return nil }
-        spreadTextures[leftIndex] = spreadTex
-
-        renderSpreadIntoTexture(
-            leftTex: leftTex, rightTex: rightTex,
-            leftRect: leftRect, rightRect: rightRect,
-            target: spreadTex,
-            pipeline: blitPipeline,
-            commandBuffer: commandBuffer
-        )
-
-        return spreadTex
-    }
-
-    private func renderSpreadIntoTexture(
-        leftTex: MTLTexture, rightTex: MTLTexture,
-        leftRect: CGRect, rightRect: CGRect,
-        target: MTLTexture,
-        pipeline: MTLComputePipelineState,
-        commandBuffer: MTLCommandBuffer
-    ) {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.setComputePipelineState(pipeline)
-
-        // Set the three textures: left, right, destination
-        encoder.setTexture(leftTex, index: 0)
-        encoder.setTexture(rightTex, index: 1)
-        encoder.setTexture(target, index: 2)
-
-        // Pass layout params as constants: [leftWidth, rightX, gap, 0]
-        var params: (Float, Float, Float, Float) = (
-            Float(leftRect.width),
-            Float(leftRect.width + 2), // right page X offset (includes gap)
-            2.0, // gap between pages
-            0
-        )
-        encoder.setBytes(&params, length: MemoryLayout.size(ofValue: params), index: 0)
-
-        let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
-        let threadgroupCount = MTLSize(
-            width: (target.width + threadgroupSize.width - 1) / threadgroupSize.width,
-            height: (target.height + threadgroupSize.height - 1) / threadgroupSize.height,
-            depth: 1
-        )
-        encoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadgroupSize)
-        encoder.endEncoding()
+        textureRing.touch(pageIndex: pageIndex)
     }
 
     /// Encode a render pass for the given viewport and page positions.
-    /// When `spreads` is provided (vertical-double mode), spread textures are used
-    /// in place of individual page textures.
+    ///
+    /// `viewport` is the CAMetalLayer's frame in documentView coordinates —
+    /// the drawable maps 1:1 onto this rect. The vertex shader projects
+    /// page rects (also in doc coords) into NDC relative to this viewport.
+    /// MUST be the metalLayer frame, not the clipView bounds — they differ
+    /// whenever the drawable is smaller than the clip (zoomed out or
+    /// recentred), and using clip bounds makes the page render squished.
     func render(
         viewport: CGRect,
         visibleRange: ClosedRange<Int>,
         pagePositions: [Int: CGRect],
         renderPassDescriptor: MTLRenderPassDescriptor,
-        commandBuffer: MTLCommandBuffer,
-        spreads: [Int: SpreadInfo] = [:]
+        commandBuffer: MTLCommandBuffer
     ) {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
 
+        // MTLViewport is specified in drawable pixels. Infer the drawable size
+        // from the colour attachment texture so we don't have to plumb
+        // backingScaleFactor through from AppKit.
+        var drawW: Double = Double(viewport.width)
+        var drawH: Double = Double(viewport.height)
+        if let drawTex = renderPassDescriptor.colorAttachments[0].texture {
+            drawW = Double(drawTex.width)
+            drawH = Double(drawTex.height)
+        }
         encoder.setViewport(MTLViewport(
             originX: 0, originY: 0,
-            width: Double(viewport.width), height: Double(viewport.height),
+            width: drawW, height: drawH,
             znear: 0, zfar: 1
         ))
-
-        // Set the render pipeline state
         encoder.setRenderPipelineState(pipelineState)
 
-        // Simple passthrough vertex/fragment shaders (see Shaders.metal)
-        // Quad vertices: two triangles covering each page rect
+        // SIMD4<Float> has the same 16-byte layout as the shader's PageUniforms
+        // struct: (viewportOriginX, viewportOriginY, viewportWidth, viewportHeight).
+        var uniforms = SIMD4<Float>(
+            Float(viewport.origin.x),
+            Float(viewport.origin.y),
+            Float(viewport.width),
+            Float(viewport.height)
+        )
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.stride, index: 2)
+
         for pageIndex in visibleRange {
-            guard let rect = pagePositions[pageIndex] else { continue }
-
-            let texture: MTLTexture?
-            if let spread = spreads[pageIndex] {
-                // Vertical double: composite spread texture
-                texture = spreadTextures[pageIndex]
-                _ = spread.rightIndex // used by composeSpread caller
-            } else {
-                texture = textureRing[pageIndex]
-            }
-
-            guard let tex = texture else { continue }
+            guard let rect = pagePositions[pageIndex],
+                  let tex = textureRing[pageIndex] else { continue }
             encoder.setFragmentTexture(tex, index: 0)
 
             let vertices: [Float] = [
@@ -305,66 +180,14 @@ final class MetalPageRenderer {
                 Float(rect.minX), Float(rect.maxY), 0, 1,
                 Float(rect.maxX), Float(rect.maxY), 0, 1
             ]
-            encoder.setVertexBytes(vertices, length: MemoryLayout<Float>.stride * 4, index: 0)
+            encoder.setVertexBytes(vertices, length: MemoryLayout<Float>.stride * 16, index: 0)
 
-            let texCoords: [Float] = [0, 1, 1, 1, 0, 0, 1, 0]
-            encoder.setVertexBytes(texCoords, length: MemoryLayout<Float>.stride * 4, index: 1)
+            let texCoords: [Float] = [0, 0, 1, 0, 0, 1, 1, 1]
+            encoder.setVertexBytes(texCoords, length: MemoryLayout<Float>.stride * 8, index: 1)
 
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
 
         encoder.endEncoding()
-    }
-
-    // MARK: - Loupe Rendering
-
-    /// Renders a 2× magnified circular loupe into `drawable`, centred on `cursorTexCoord`
-    /// (normalised 0–1, bottom-left origin) from `srcTexture`.
-    /// Returns the loupe texture, or nil if the pipeline isn't available.
-    func renderLoupe(
-        srcTexture: MTLTexture,
-        cursorTexCoord: CGPoint,
-        loupeRadiusPx: CGFloat,
-        targetSize: CGSize,
-        commandBuffer: MTLCommandBuffer
-    ) -> MTLTexture? {
-        guard let pipeline = loupePipeline else { return nil }
-
-        let width  = Int(targetSize.width)
-        let height = Int(targetSize.height)
-        guard width > 0, height > 0 else { return nil }
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm,
-            width: width, height: height,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderRead, .shaderWrite]
-        descriptor.storageMode = .private
-
-        guard let loupeTex = device.makeTexture(descriptor: descriptor) else { return nil }
-
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
-        encoder.setComputePipelineState(pipeline)
-        encoder.setTexture(srcTexture, index: 0)
-        encoder.setTexture(loupeTex, index: 1)
-
-        var params: (Float, Float, Float) = (
-            Float(cursorTexCoord.x),
-            Float(cursorTexCoord.y),
-            Float(loupeRadiusPx)
-        )
-        encoder.setBytes(&params, length: MemoryLayout.size(ofValue: params), index: 0)
-
-        let tgSize = MTLSize(width: 16, height: 16, depth: 1)
-        let tgCount = MTLSize(
-            width:  (width  + tgSize.width  - 1) / tgSize.width,
-            height: (height + tgSize.height - 1) / tgSize.height,
-            depth: 1
-        )
-        encoder.dispatchThreadgroups(tgCount, threadsPerThreadgroup: tgSize)
-        encoder.endEncoding()
-
-        return loupeTex
     }
 }

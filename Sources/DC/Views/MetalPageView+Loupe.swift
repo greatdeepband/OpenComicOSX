@@ -1,0 +1,213 @@
+import SwiftUI
+import AppKit
+import CoreVideo
+
+// Loupe behavior for the MetalPageView Coordinator. Owns the NSEvent
+// monitor lifecycle, cursor visibility balance, and the SwiftUI overlay
+// state computation. The actual loupe view (MagnifierView) is rendered
+// by ReaderView; this extension only emits state via `onLoupeOverlay`.
+
+extension MetalPageView.Coordinator {
+
+    /// Installs a window-local left-mouse monitor. Unlike an overlay
+    /// view, the monitor doesn't consume events — scroll/pinch still work.
+    /// Left-click-and-hold activates the loupe.
+    func installLoupeMonitor() {
+        guard loupeEventMonitor == nil else { return }
+        loupeEventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        ) { [weak self] event in
+            self?.handleLoupeEvent(event)
+            return event
+        }
+    }
+
+    func handleLoupeEvent(_ event: NSEvent) {
+        guard let scrollView = scrollView,
+              let window = scrollView.window,
+              event.window === window else { return }
+
+        // The loupe is active any time the user holds the mouse button.
+        // Cursor visibility, not the monitor lifecycle, is what follows
+        // whether the loupe itself is on-screen — updateLoupe flips the
+        // cursor on/off each drag based on the panel/window intersection.
+        switch event.type {
+        case .leftMouseDown:
+            updateLoupe(at: event.locationInWindow, in: window)
+        case .leftMouseDragged:
+            updateLoupe(at: event.locationInWindow, in: window)
+        case .leftMouseUp:
+            showCursorIfNeeded()
+            hideLoupe()
+        default:
+            break
+        }
+    }
+
+    func hideCursorIfNeeded() {
+        guard !cursorHidden else { return }
+        NSCursor.hide()
+        cursorHidden = true
+    }
+
+    func showCursorIfNeeded() {
+        guard cursorHidden else { return }
+        NSCursor.unhide()
+        cursorHidden = false
+    }
+
+    /// Resolves the page under the cursor, fetches its NSImage, and emits
+    /// a `LoupeOverlayState` to the SwiftUI overlay via `onLoupeOverlay`.
+    /// The loupe is a SwiftUI view inside the reader's container — no
+    /// NSPanel or child window —
+    /// `.clipped()` on the container naturally clips the loupe circle to
+    /// the reader frame, producing the progressive edge-clipping the user
+    /// asked for without any manual window-bezel arithmetic.
+    func updateLoupe(at windowPt: CGPoint, in window: NSWindow) {
+        guard let scrollView = scrollView,
+              let documentView = scrollView.documentView else { return }
+
+        loupeTaskID &+= 1
+        loupeTask?.cancel()
+
+        let docPt = documentView.convert(windowPt, from: nil)
+
+        // Convert windowPt (AppKit bottom-left in window coords) to
+        // SwiftUI top-left within the ZStack that fills the window. The
+        // reader uses fullSizeContentView + hiddenTitleBar, so the
+        // window's content area spans the full frame height.
+        let windowHeight = window.frame.height
+        let overlayPosition = CGPoint(
+            x: windowPt.x,
+            y: windowHeight - windowPt.y
+        )
+
+        guard !pages.isEmpty else {
+            emitLoupe(nil)
+            return
+        }
+
+        // Prefer the page directly under the cursor; fall back to
+        // currentPage (for single/double) or the first visible page
+        // (for vertical modes) so off-page cursor still drives the loupe.
+        var seqIdx = findSequentialIndex(at: docPt)
+        if seqIdx < 0 || seqIdx >= pages.count {
+            let fallback: Int
+            switch layout {
+            case .singlePage, .doubleSpread:
+                fallback = currentPage
+            case .verticalStack:
+                fallback = lastVisibleRange.lowerBound
+            }
+            seqIdx = max(0, min(fallback, pages.count - 1))
+        }
+
+        let pageID = sequentialToID[seqIdx]
+        guard let pageRect = pagePositions[pageID] else { return }
+        let cursorInImage = CGPoint(
+            x: docPt.x - pageRect.minX,
+            y: docPt.y - pageRect.minY
+        )
+        let imageViewSize = pageRect.size
+
+        hideCursorIfNeeded()
+
+        // Fast path: image is already in the loupe's local cache or in
+        // the page manager's nonisolated NSCache.
+        if let cached = loupeImage, cached.page == seqIdx {
+            emitLoupe(LoupeOverlayState(
+                position: overlayPosition,
+                image: cached.nsImage,
+                imageViewSize: imageViewSize,
+                cursorInImage: cursorInImage
+            ))
+            return
+        }
+
+        if let img = pageManager?.nsImage(for: seqIdx) {
+            loupeImage = (seqIdx, img)
+            emitLoupe(LoupeOverlayState(
+                position: overlayPosition,
+                image: img,
+                imageViewSize: imageViewSize,
+                cursorInImage: cursorInImage
+            ))
+            return
+        }
+
+        // Target page's NSImage isn't decoded yet. Emit a FALLBACK state
+        // using the last cached image so the loupe position keeps tracking
+        // the cursor (otherwise the loupe freezes mid-drag — exactly the
+        // "stops in the middle when crossing the gutter" symptom in
+        // double-page mode). Map cursor to the cached page's rect if it's
+        // still laid out; otherwise use the target rect (content will
+        // briefly look stale but POSITION updates smoothly).
+        if let cached = loupeImage {
+            let staleSize: CGSize
+            let staleCursor: CGPoint
+            if cached.page >= 0, cached.page < pages.count,
+               let cachedRect = pagePositions[pages[cached.page].id] {
+                staleSize = cachedRect.size
+                staleCursor = CGPoint(
+                    x: docPt.x - cachedRect.minX,
+                    y: docPt.y - cachedRect.minY
+                )
+            } else {
+                staleSize = imageViewSize
+                staleCursor = cursorInImage
+            }
+            emitLoupe(LoupeOverlayState(
+                position: overlayPosition,
+                image: cached.nsImage,
+                imageViewSize: staleSize,
+                cursorInImage: staleCursor
+            ))
+        }
+
+        guard let pageManager = pageManager else { return }
+        let pageSource = pages[seqIdx].source
+        let myID = loupeTaskID
+        loupeTask = Task { [weak self] in
+            var buffer = await pageManager.page(for: seqIdx)
+            if buffer == nil {
+                buffer = await pageManager.decodePage(pageIndex: seqIdx, from: pageSource)
+            }
+            guard !Task.isCancelled,
+                  let b = buffer,
+                  let nsImage = MetalPageView.Coordinator.nsImage(from: b) else { return }
+            await MainActor.run {
+                guard let self = self, self.loupeTaskID == myID else { return }
+                self.loupeImage = (seqIdx, nsImage)
+                self.emitLoupe(LoupeOverlayState(
+                    position: overlayPosition,
+                    image: nsImage,
+                    imageViewSize: imageViewSize,
+                    cursorInImage: cursorInImage
+                ))
+            }
+        }
+    }
+
+    func emitLoupe(_ state: LoupeOverlayState?) {
+        if state == nil { showCursorIfNeeded() }
+        onLoupeOverlay?(state)
+    }
+
+    func hideLoupe() {
+        // Invalidate any in-flight fetch so its emit doesn't run
+        // after the user has released the mouse.
+        loupeTaskID &+= 1
+        loupeTask?.cancel()
+        loupeTask = nil
+        loupeImage = nil
+        onLoupeOverlay?(nil)
+        showCursorIfNeeded()
+    }
+
+    /// Converts a 32BGRA CVPixelBuffer into an NSImage by snapshotting
+    /// pixel memory into a CGImage. Called off the main actor; the result
+    /// is Sendable (NSImage + CGImage are value-semantic enough here).
+    nonisolated static func nsImage(from pixelBuffer: CVPixelBuffer) -> NSImage? {
+        return makeNSImageFromPixelBuffer(pixelBuffer)
+    }
+}

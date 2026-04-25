@@ -9,6 +9,10 @@ struct DCApp: App {
             ContentView()
                 .environmentObject(library)
         }
+        // Hide the standard title bar so the reader's custom strip can
+        // integrate with the traffic-light region — one continuous chrome row
+        // instead of a stacked title bar + toolbar.
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open Comic…") {
