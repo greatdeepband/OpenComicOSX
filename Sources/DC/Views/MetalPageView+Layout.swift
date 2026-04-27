@@ -16,11 +16,12 @@ extension MetalPageView.Coordinator {
         tryInitialRender()
     }
 
-    /// Fired whenever the clipView's frame or bounds change. On the very
-    /// first layout pass after a mode switch, this is typically the
-    /// first time the scrollView commits a non-zero clipView size — so
-    /// it's where we can finally issue the pending initial render.
-    @objc func clipViewGeometryChanged(_ notification: Notification) {
+    /// Body of the `clipViewGeometryChanged` notification handler. The
+    /// `@objc` selector itself lives on the Coordinator class declaration
+    /// in MetalPageView.swift so NotificationCenter.addObserver(_,
+    /// selector:) can resolve it via the ObjC runtime — `@objc` extension
+    /// methods on `final class : NSObject` aren't reliably exposed there.
+    func clipViewGeometryChangedImpl() {
         // Keep the metalLayer aligned to the new clip geometry regardless
         // — this also matters for unzoomed scroll events on vertical
         // modes where magnification can resize the clipView.bounds.
@@ -92,7 +93,11 @@ extension MetalPageView.Coordinator {
     }
 
     func rebuildLayout() {
-        guard let metalView = metalView else { return }
+        Task { await DCLogger.shared.log("SWITCH: rebuildLayout entry layout=\(layout) pages.count=\(pages.count) currentPage=\(currentPage)") }
+        guard let metalView = metalView else {
+            Task { await DCLogger.shared.log("SWITCH: rebuildLayout NIL metalView - bailing") }
+            return
+        }
 
         // Arm the post-layout render retry. MetalCanvasView.layout() will
         // fire onLayoutCompleted after AppKit commits the frame change;
@@ -429,6 +434,8 @@ extension MetalPageView.Coordinator {
 
         let visibleRange = firstVisible...lastVisible
 
+        Task { await DCLogger.shared.log("SWITCH: updateVisibleRange vertical visibleRange=\(visibleRange) pageYOffsets.count=\(pageYOffsets.count) pages.count=\(pages.count) currentY=\(currentY)") }
+
         onPageChanged(firstVisible)
         lastVisibleRange = visibleRange
         triggerPrefetch(first: firstVisible, last: lastVisible)
@@ -447,7 +454,10 @@ extension MetalPageView.Coordinator {
         }
     }
 
-    @objc func scrollDidChange(_ notification: Notification) {
+    /// Body of the `scrollDidChange` notification handler. See
+    /// `clipViewGeometryChangedImpl` for why @objc lives in the class body.
+    func scrollDidChangeImpl() {
+        Task { await DCLogger.shared.log("SWITCH: scrollDidChange layout=\(layout) currentY=\(scrollView?.contentView.bounds.origin.y ?? -999)") }
         updateVisibleRange()
 
         // If the loupe is active and the user scrolled without moving the
@@ -466,7 +476,8 @@ extension MetalPageView.Coordinator {
         updateLoupe(at: windowPt, in: window)
     }
 
-    @objc func magnificationDidChange(_ notification: Notification) {
+    /// Body of the `magnificationDidChange` notification handler.
+    func magnificationDidChangeImpl() {
         guard let sv = scrollView else { return }
         switch layout {
         case .verticalStack:

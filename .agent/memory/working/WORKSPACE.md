@@ -1,7 +1,16 @@
 # Workspace
 
 ## Current task
-**v0.10.0 ready.** Phase A-1 + A-2 + A-3 cleanup complete. All four reading modes render through Metal, dead code removed, CHANGELOG consolidated, README updated.
+**v0.10.3 shipped.** Loupe behaviour restored to pre-Metal `ZoomableImageView` feel across all four reading modes — sticky `loupeActivePage` so the loupe never disappears mid-drag, raw cursor coords (no clamping), `MagnifierView` Canvas paints solid black before the visible-rect guard so off-page cursors render as a black circle instead of a transparent ring. CHANGELOG + README updated.
+
+## What shipped in v0.10.3 (2026-04-27)
+- `MetalPageView.Coordinator.loupeActivePage: Int?` added; sticky across cursor excursions into row/column gaps and side/top margins.
+- `MetalPageView+Loupe.swift:updateLoupe` — falls back to `loupeActivePage` when `findSequentialIndex` returns `-1`; only emits `nil` to the SwiftUI overlay when there are no pages at all (no mid-drag hides). Initial fallback (no active page yet) uses `currentPage` for `.singlePage`/`.doubleSpread` and `lastVisibleRange.lowerBound` for `.verticalStack`.
+- `MetalPageView+Loupe.swift:hideLoupe` — resets `loupeActivePage = nil` in lockstep with `loupeImage` and the cursor-restore.
+- `MagnifierView.loupeContent` — black-fill moved out of the visible-rect guard; the Canvas always paints opaque black before attempting any image draw.
+- Diagnosed live via per-event DCLogger instrumentation (`[loupe-evt] / [loupe-upd] / [loupe-emit] / [loupe-canvas]`); root cause was `srcRect.intersection(ivBounds)` becoming null once `cursorInImage.x < -halfW` (≈ -186pt). Instrumentation removed before final build.
+
+## What shipped in v0.10.0 (2026-04-25)
 
 ## What shipped in v0.10.0 (2026-04-25)
 - All four reading modes now route through `MetalPageView`.

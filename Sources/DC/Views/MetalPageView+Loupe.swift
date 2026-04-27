@@ -87,23 +87,39 @@ extension MetalPageView.Coordinator {
             return
         }
 
-        // Prefer the page directly under the cursor; fall back to
-        // currentPage (for single/double) or the first visible page
-        // (for vertical modes) so off-page cursor still drives the loupe.
-        var seqIdx = findSequentialIndex(at: docPt)
-        if seqIdx < 0 || seqIdx >= pages.count {
-            let fallback: Int
+        // Resolve the page under the cursor. When the cursor sits in a
+        // row/column gap or past the document edges, stick to the last
+        // active page (or the first visible page if there isn't one yet)
+        // so the loupe stays on screen for the entire drag — the
+        // pre-Metal single/double-page UX where the loupe was always
+        // visible while the mouse was held, with content fading to
+        // black at the image edges via MagnifierView's intersection
+        // clip. The loupe panel still tracks the real cursor; only its
+        // magnified content is anchored to a real page.
+        let rawSeqIdx = findSequentialIndex(at: docPt)
+        let seqIdx: Int
+        if rawSeqIdx >= 0, rawSeqIdx < pages.count {
+            seqIdx = rawSeqIdx
+        } else if let active = loupeActivePage,
+                  active >= 0, active < pages.count {
+            seqIdx = active
+        } else {
+            let initial: Int
             switch layout {
             case .singlePage, .doubleSpread:
-                fallback = currentPage
+                initial = currentPage
             case .verticalStack:
-                fallback = lastVisibleRange.lowerBound
+                initial = lastVisibleRange.lowerBound
             }
-            seqIdx = max(0, min(fallback, pages.count - 1))
+            seqIdx = max(0, min(initial, pages.count - 1))
         }
+        loupeActivePage = seqIdx
 
         let pageID = sequentialToID[seqIdx]
-        guard let pageRect = pagePositions[pageID] else { return }
+        guard let pageRect = pagePositions[pageID] else {
+            emitLoupe(nil)
+            return
+        }
         let cursorInImage = CGPoint(
             x: docPt.x - pageRect.minX,
             y: docPt.y - pageRect.minY
@@ -200,6 +216,7 @@ extension MetalPageView.Coordinator {
         loupeTask?.cancel()
         loupeTask = nil
         loupeImage = nil
+        loupeActivePage = nil
         onLoupeOverlay?(nil)
         showCursorIfNeeded()
     }

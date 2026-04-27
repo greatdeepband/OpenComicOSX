@@ -22,6 +22,17 @@ struct MagnifierView: View {
 
     private var loupeContent: some View {
         Canvas { ctx, size in
+            // Always paint the background black before attempting any
+            // image draw — when the cursor strays far enough off the
+            // page that the source rect doesn't intersect the image
+            // bounds, the early-return below would otherwise leave the
+            // Canvas transparent and the loupe ring would render as a
+            // hollow shadow over whatever's beneath it.
+            ctx.withCGContext { cgCtx in
+                cgCtx.setFillColor(CGColor(gray: 0, alpha: 1))
+                cgCtx.fill(CGRect(origin: .zero, size: size))
+            }
+
             guard imageViewSize.width > 0, imageViewSize.height > 0 else { return }
 
             let srcW = size.width  / magnification
@@ -72,10 +83,6 @@ struct MagnifierView: View {
 
             ctx.withCGContext { cgCtx in
                 cgCtx.interpolationQuality = .high
-                // Fill background black so out-of-bounds area is clearly empty.
-                cgCtx.setFillColor(CGColor(gray: 0, alpha: 1))
-                cgCtx.fill(CGRect(origin: .zero, size: size))
-
                 cgCtx.addEllipse(in: CGRect(origin: .zero, size: size))
                 cgCtx.clip()
 

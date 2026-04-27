@@ -81,6 +81,7 @@ struct MetalPageView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
+        Task { await DCLogger.shared.log("SWITCH: makeNSView layout=\(layout) pages.count=\(pages.count) pagesPerRow=\(pagesPerRow) containerWidth=\(containerWidth)") }
         let scrollView = NSScrollView()
         // Belt-and-suspenders fix for the macOS 26 (Tahoe) scroll-into-header
         // bug: setting borderType = .noBorder independently disables the
@@ -233,6 +234,7 @@ struct MetalPageView: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        Task { await DCLogger.shared.log("SWITCH: updateNSView layout=\(layout) pages.count=\(pages.count) currentPage=\(currentPage) scale=\(scale) containerWidth=\(containerWidth)") }
         context.coordinator.onPageChanged = onPageChanged
         context.coordinator.onOffsetChanged = onOffsetChanged
         context.coordinator.onMagnificationChanged = onMagnificationChanged
@@ -559,6 +561,13 @@ extension MetalPageView {
         var doubleClickMonitor: Any?
         var pinchMonitor: Any?
         var loupeImage: (page: Int, nsImage: NSImage)?
+        /// The page the loupe is currently magnifying. Sticky across cursor
+        /// excursions into row/column gaps and past document edges so the
+        /// loupe never disappears mid-drag — same UX as the pre-Metal
+        /// single/double-page ZoomableImageView, where the loupe simply
+        /// fades its content to black when the cursor leaves the image
+        /// bounds while staying visible until mouseUp. Reset on hideLoupe.
+        var loupeActivePage: Int?
         /// Monotonically-increasing token for async image-fetch Tasks. Each
         /// `updateLoupe` call bumps the token, and a Task only applies its
         /// result if the token still matches — so fast drags don't let a
@@ -593,6 +602,29 @@ extension MetalPageView {
                 NSEvent.removeMonitor(monitor)
             }
             if cursorHidden { NSCursor.unhide() }
+        }
+
+        // MARK: - Notification selectors
+
+        // These three @objc methods MUST live in the class body, not in an
+        // extension. NotificationCenter.addObserver(_, selector:) resolves
+        // selectors via the Objective-C runtime; @objc extension methods on
+        // `final class : NSObject` aren't always exposed reliably, which
+        // silently breaks vertical-mode scroll-tracking (the symptom: pages
+        // don't render past the initial position because scrollDidChange
+        // never fires). The actual implementations are in
+        // MetalPageView+Layout.swift as plain Swift methods.
+
+        @objc func scrollDidChange(_ notification: Notification) {
+            scrollDidChangeImpl()
+        }
+
+        @objc func magnificationDidChange(_ notification: Notification) {
+            magnificationDidChangeImpl()
+        }
+
+        @objc func clipViewGeometryChanged(_ notification: Notification) {
+            clipViewGeometryChangedImpl()
         }
     }
 }

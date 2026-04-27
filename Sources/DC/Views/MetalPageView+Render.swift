@@ -84,7 +84,15 @@ extension MetalPageView.Coordinator {
 
         metalView.updateMetalLayerFrame()
 
-        guard let drawable = metalView.metalLayer.nextDrawable() else { return }
+        guard let drawable = metalView.metalLayer.nextDrawable() else {
+            Task { await DCLogger.shared.log("SWITCH: render NIL-DRAWABLE layout=\(layout) visibleRange=\(visibleRange) layerFrame=\(metalView.metalLayer.frame) drawableSize=\(metalView.metalLayer.drawableSize)") }
+            return
+        }
+        let renderPosCount = visibleRange.compactMap { idx -> Int? in
+            guard idx >= 0 && idx < pages.count else { return nil }
+            return pagePositions[pages[idx].id] != nil ? 1 : nil
+        }.count
+        Task { await DCLogger.shared.log("SWITCH: render layout=\(layout) visibleRange=\(visibleRange) layerFrame=\(metalView.metalLayer.frame) drawableSize=\(metalView.metalLayer.drawableSize) renderPosCount=\(renderPosCount)") }
 
         guard let commandBuffer = renderer.commandQueue.makeCommandBuffer() else { return }
 

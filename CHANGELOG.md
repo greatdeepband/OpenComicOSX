@@ -1,5 +1,25 @@
 # DC Reader — Changelog
 
+## v0.10.3 — 2026-04-27 — Loupe behaviour restored to pre-Metal feel
+
+### Fixed
+- **Loupe image broke when crossing page top, left, or right edge in vertical scroll modes.** Inside a single page the loupe correctly faded its content to black at the page edge, but the moment the cursor crossed *outside* the page rect (into a 4pt row gap, the 2pt column gap, the 38pt top inset, or the side margins) `findSequentialIndex` returned `-1` and `updateLoupe` returned early — so the loupe panel froze at its last screen position with stale content, then unfroze when the cursor re-entered the next page rect. The bottom edge appeared to work only because the cursor couldn't travel below the page in vertical scroll without immediately re-resolving into the next page.
+
+  Symptom traced live via per-event logging in `MetalPageView+Loupe.swift` and `MagnifierView.swift`: at the breaking point `[loupe-canvas] NO-DRAW reason=src-outside-iv` fired the moment `cursorInImage.x < -halfW` (≈ -186pt at `loupeRadius / magnification = 270 / 1.45`). The Canvas's black fill sat *inside* the visible-rect guard, so a null `srcRect.intersection(ivBounds)` produced a transparent ring, not a black circle.
+
+### Changed
+- **Restored the pre-Metal `ZoomableImageView` loupe UX, generalised across the unified Metal pipeline.** Same gesture, same lifetime, same edge fade-to-black — now resolves "which page" automatically instead of having a single image:
+  - `MetalPageView.Coordinator.loupeActivePage: Int?` — the page currently being magnified. Sticky across cursor excursions; `updateLoupe` falls back to it whenever `findSequentialIndex` returns `-1`. The loupe panel keeps tracking the raw cursor (no clamping) while its magnified content stays anchored to a real page rect. `MagnifierView`'s existing `srcRect.intersection(ivBounds)` clip handles the natural fade-to-black at the page edges; raw `cursorInImage` is allowed to go arbitrarily far past the page bounds.
+  - `MetalPageView+Loupe.swift:updateLoupe` only emits `nil` to the SwiftUI overlay when there are no pages at all. **No mid-drag hides** — the loupe is visible from `mouseDown` through `mouseUp`, exactly like the pre-Metal `ZoomableImageView` (`MouseCatcher.mouseDown` set `showLoupe = true`; only `mouseUp` set it back to `false`).
+  - `MagnifierView.loupeContent` now paints the Canvas solid black *before* the visible-rect guard, so a cursor far enough off the page that `srcRect ⊄ ivBounds` produces an opaque black circle instead of a transparent ring with a hovering shadow.
+  - `loupeActivePage` resets to `nil` on `hideLoupe` (mouseUp), in lockstep with `loupeImage` and the cursor-restore — next press starts fresh.
+
+### Notes
+- Logic is mode-agnostic: all four reading modes (single, double, vertical, vertical-double) flow through the same `updateLoupe`. The only mode-dependent branch is the *initial* fallback when `loupeActivePage` hasn't been set yet (`.singlePage`/`.doubleSpread` → `currentPage`; `.verticalStack` → `lastVisibleRange.lowerBound`); after the first successful resolution every subsequent gap/margin excursion just reuses `loupeActivePage`.
+- The previous CHANGELOG note (v0.10.0 "Loupe freezes mid-drag at the gutter") covered only the *async-decode* freeze in double-page mode; this entry covers the *coordinate-system* freeze that affected vertical and vertical-double crossings into row/column gaps and side/top margins.
+
+---
+
 ## v0.10.2 — 2026-04-25 — Reader-wide named constants + MetalPageView file split
 
 ### Changed
