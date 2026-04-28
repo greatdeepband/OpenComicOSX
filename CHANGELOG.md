@@ -1,5 +1,83 @@
 # DC Reader — Changelog
 
+## v0.11.0 — 2026-04-28 — Liquid-Glass classic-Mac reader toolbar
+
+The reader's top-bar chrome is now three floating Liquid-Glass capsules
+over a transparent strip — leading (back / Library), centred transport
+(prev-comic / prev-page / page-count / next-page / next-comic with 1pt
+hairline dividers between segments), trailing (favorite + ellipsis
+menu). Same handlers behind every button as before; the geometry and
+material are what changed. Detailed spec lives at
+`docs/superpowers/specs/2026-04-27-reader-liquid-glass-toolbar-design.md`.
+
+### Added
+- **`Sources/DC/Views/ReaderToolbar.swift`** (~250 lines) — top-level
+  `ReaderToolbar` view + private `ToolbarCapsule` material wrapper +
+  `SegmentDivider` hairline + `LeadingCapsule` / `TransportCapsule` /
+  `TrailingCapsule`. The three capsules sit inside one
+  `GlassEffectContainer` on macOS 26+ so Liquid-Glass refraction
+  sampling is coordinated; on macOS 14–25 the container collapses to a
+  plain `Group` and each capsule renders independently with
+  `.ultraThinMaterial` clipped to a `Capsule()` plus a 0.5pt rim — same
+  shape, same hit targets, no refraction.
+- **`ToolbarCapsule` availability gate** —
+  `.glassEffect(.regular.interactive(true), in: .capsule)` on macOS
+  26+; `.background(.ultraThinMaterial, in: Capsule())` +
+  `.overlay(Capsule().strokeBorder(...))` fallback otherwise. One place
+  to change material, three call sites (one per capsule).
+- **`ReaderConstants.toolbarCapsuleHeight = 36`** and
+  **`toolbarSegmentDividerOpacity = 0.12`** — the new tunables for the
+  capsule geometry and the hairline divider.
+
+### Changed
+- **`ReaderConstants.topBarHeight`: 38 → 52** to host the 36pt capsules
+  with breathing room and read as a "real" Mac toolbar rather than a
+  thin chrome line. Propagates through `topContentInsets` arithmetic
+  unchanged — no other layout math moves.
+- **`ReaderView.readerTopBar`** reduces from a 116-line inline ZStack
+  to a one-line call site that hands `vm` / `library` /
+  `toggleFullscreen` into `ReaderToolbar`. Inline `backButton`,
+  `transportCluster`, `trailingCluster` deleted (now live as private
+  sub-views in `ReaderToolbar.swift`). The `TitlebarEffectView` struct
+  and its `NSVisualEffectView(.titlebar)` background on the strip are
+  both removed — the strip is fully transparent now.
+- **`ReaderView` body** gains
+  `.ignoresSafeArea(.container, edges: .top)` and
+  `.background(FullSizeTitleBarConfigurator())` so the title-bar area
+  is transparent and the toolbar overlays the traffic-light row in one
+  unified strip — instead of stacking a 28pt opaque title bar above
+  the 52pt toolbar (the symptom the first build showed: chrome read as
+  ~80pt of stacked bars).
+- **`FullSizeTitleBarConfigurator`** now also re-asserts
+  `window.standardWindowButton(.closeButton/.miniaturizeButton/.zoomButton)?.isHidden = false`
+  so the traffic lights are always visible — `.windowStyle(.hiddenTitleBar)`
+  was hiding them on macOS 26 until the user hovered.
+- **`DCApp.swift`** — removed `.windowStyle(.hiddenTitleBar)`. Default
+  `.windowStyle(.titleBar)` keeps the controls visible always; the
+  configurator handles transparency + content stretch.
+
+### Fixed
+- **Click on the navbar to drag the window also fired the loupe.**
+  `MetalPageView+Loupe.swift:handleLoupeEvent` now skips
+  `.leftMouseDown` events when `svLocal.y < topBarHeight` (the
+  scrollView's effective coords are top-origin because the documentView
+  is `isFlipped = true`, propagating through the clipView — diagnosed
+  via per-event live debug, the previous bottom-origin guard always
+  evaluated false). The strip is the band `[0, topBarHeight]`, not
+  `[bounds.maxY - topBarHeight, bounds.maxY]`.
+- **Loupe disappeared when the cursor crossed up into the navbar
+  during an in-flight drag.** The naive top-strip guard blocked
+  `.leftMouseDragged` events too, so the loupe felt asymmetric (works
+  at left/right/bottom edges, dies at the top). Added
+  `MetalPageView.Coordinator.loupeDragActive: Bool` — the strip-skip
+  only gates the INITIAL `.leftMouseDown`; once a drag has started
+  below the strip, all subsequent `.leftMouseDragged` events are
+  processed regardless of cursor position. The loupe now fades to
+  black at the page top edge in the same way it already did at the
+  other three edges. `loupeDragActive` resets on `.leftMouseUp`.
+
+---
+
 ## v0.10.3 — 2026-04-27 — Loupe behaviour restored to pre-Metal feel
 
 ### Fixed

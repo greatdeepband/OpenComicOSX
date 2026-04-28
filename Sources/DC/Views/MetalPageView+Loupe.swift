@@ -27,18 +27,37 @@ extension MetalPageView.Coordinator {
               let window = scrollView.window,
               event.window === window else { return }
 
-        // The loupe is active any time the user holds the mouse button.
-        // Cursor visibility, not the monitor lifecycle, is what follows
-        // whether the loupe itself is on-screen — updateLoupe flips the
-        // cursor on/off each drag based on the panel/window intersection.
+        // The navbar sits OVER the scrollView (NSScrollView spans the full
+        // window with a `topContentInset` reserving the strip), so cursor
+        // coords still resolve inside scrollView.bounds when the user is
+        // interacting with the toolbar. We only block the INITIAL
+        // `.leftMouseDown` that originates in the strip — once a drag has
+        // started below the strip (`loupeDragActive == true`), subsequent
+        // `.leftMouseDragged` events keep firing regardless of where the
+        // cursor wanders, so the loupe behaves symmetrically on all four
+        // edges (left / right / bottom / top — fade-to-black at the page
+        // edge in every direction).
+        //
+        // NSScrollView's effective coords here are TOP-ORIGIN (the
+        // documentView is `isFlipped = true`, which propagates through
+        // the clipView). The top strip is the band `[0, topBarHeight]`.
+        let svLocal = scrollView.convert(event.locationInWindow, from: nil)
+        let inTopStrip = svLocal.y < ReaderConstants.topBarHeight
+
         switch event.type {
         case .leftMouseDown:
+            if inTopStrip { return }
+            loupeDragActive = true
             updateLoupe(at: event.locationInWindow, in: window)
         case .leftMouseDragged:
+            guard loupeDragActive else { return }
             updateLoupe(at: event.locationInWindow, in: window)
         case .leftMouseUp:
-            showCursorIfNeeded()
-            hideLoupe()
+            if loupeDragActive {
+                loupeDragActive = false
+                showCursorIfNeeded()
+                hideLoupe()
+            }
         default:
             break
         }

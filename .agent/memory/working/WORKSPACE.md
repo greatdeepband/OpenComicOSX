@@ -1,7 +1,20 @@
 # Workspace
 
 ## Current task
-**v0.10.3 shipped.** Loupe behaviour restored to pre-Metal `ZoomableImageView` feel across all four reading modes — sticky `loupeActivePage` so the loupe never disappears mid-drag, raw cursor coords (no clamping), `MagnifierView` Canvas paints solid black before the visible-rect guard so off-page cursors render as a black circle instead of a transparent ring. CHANGELOG + README updated.
+**v0.11.0 shipped.** Liquid-Glass classic-Mac reader toolbar — three floating capsules over a transparent strip, traffic lights live in the same row, navbar drag works, loupe drag is symmetric on all four edges including the top.
+
+## What shipped in v0.11.0 (2026-04-28)
+- New `Sources/DC/Views/ReaderToolbar.swift` (~250 lines): top-level `ReaderToolbar` view + private `ToolbarCapsule` (availability-gated `.glassEffect` / `.ultraThinMaterial` wrapper) + `SegmentDivider` + `LeadingCapsule` / `TransportCapsule` / `TrailingCapsule`. macOS 26+ uses real Liquid Glass inside one `GlassEffectContainer`; macOS 14–25 collapses the container to a `Group` and renders each capsule independently with `.ultraThinMaterial`.
+- `ReaderConstants`: `topBarHeight 38 → 52`, plus two new tunables `toolbarCapsuleHeight = 36` and `toolbarSegmentDividerOpacity = 0.12`.
+- `ReaderView.readerTopBar` reduced from a 116-line inline ZStack to a one-line call site. Inline `backButton` / `transportCluster` / `trailingCluster` deleted. `TitlebarEffectView` struct + its `.background()` on the strip both removed — the strip is fully transparent now.
+- `ReaderView` body gains `.ignoresSafeArea(.container, edges: .top)` and `.background(FullSizeTitleBarConfigurator())` so the title-bar area is transparent and the toolbar overlays the traffic-light row in one unified strip.
+- `FullSizeTitleBarConfigurator` re-asserts `window.standardWindowButton(...)?.isHidden = false` for close / miniaturize / zoom — `.windowStyle(.hiddenTitleBar)` was hiding the traffic lights on macOS 26 until the user hovered.
+- `DCApp.swift`: removed `.windowStyle(.hiddenTitleBar)`. Default `.windowStyle(.titleBar)` keeps the controls visible always; the configurator handles transparency.
+- `MetalPageView.Coordinator`: added `loupeDragActive: Bool` so the navbar's strip-skip only gates the INITIAL `.leftMouseDown`. Once a drag has started below the strip, all `.leftMouseDragged` events flow through regardless of cursor position — the loupe fades to black at the page top edge same as left/right/bottom.
+- `MetalPageView+Loupe.swift:handleLoupeEvent`: top-strip guard rewritten — NSScrollView's effective coords here are top-origin (documentView `isFlipped = true` propagates through clipView), confirmed via per-event live debug. Strip is `[0, topBarHeight]`, not `[bounds.maxY - topBarHeight, bounds.maxY]`.
+- Spec: `docs/superpowers/specs/2026-04-27-reader-liquid-glass-toolbar-design.md` (committed in `bfabf59`).
+
+## What shipped in v0.10.3 (2026-04-27)
 
 ## What shipped in v0.10.3 (2026-04-27)
 - `MetalPageView.Coordinator.loupeActivePage: Int?` added; sticky across cursor excursions into row/column gaps and side/top margins.

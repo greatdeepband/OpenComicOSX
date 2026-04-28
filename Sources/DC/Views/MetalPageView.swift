@@ -568,6 +568,14 @@ extension MetalPageView {
         /// fades its content to black when the cursor leaves the image
         /// bounds while staying visible until mouseUp. Reset on hideLoupe.
         var loupeActivePage: Int?
+        /// True once a left-mouse-down has STARTED a loupe drag below the
+        /// top-bar strip. While true, subsequent `.leftMouseDragged`
+        /// events are processed regardless of where the cursor wanders
+        /// (including into the top strip), so the loupe behaves
+        /// symmetrically on all four edges. The strip-skip guard only
+        /// gates the INITIAL `.leftMouseDown` — it keeps a click on the
+        /// navbar from spawning a loupe.
+        var loupeDragActive: Bool = false
         /// Monotonically-increasing token for async image-fetch Tasks. Each
         /// `updateLoupe` call bumps the token, and a Task only applies its
         /// result if the token still matches — so fast drags don't let a

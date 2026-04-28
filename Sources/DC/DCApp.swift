@@ -9,10 +9,11 @@ struct DCApp: App {
             ContentView()
                 .environmentObject(library)
         }
-        // Hide the standard title bar so the reader's custom strip can
-        // integrate with the traffic-light region — one continuous chrome row
-        // instead of a stacked title bar + toolbar.
-        .windowStyle(.hiddenTitleBar)
+        // Default `.windowStyle(.titleBar)` (no override). On macOS 26 the
+        // `.hiddenTitleBar` style hides the traffic-light buttons until the
+        // user hovers, which we don't want — we keep them visible by leaving
+        // the title bar in place and using `FullSizeTitleBarConfigurator`
+        // to make it transparent and stretch the content underneath.
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open Comic…") {

@@ -1,21 +1,6 @@
 import SwiftUI
 import AppKit
 
-/// SwiftUI wrapper around `NSVisualEffectView` with the `.titlebar` material.
-/// Used as the custom reader top-bar background so it matches the native
-/// macOS window-toolbar chrome exactly. `SwiftUI`'s `.bar` material is close
-/// but uses different vibrancy — this is the actual system titlebar look.
-struct TitlebarEffectView: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let v = NSVisualEffectView()
-        v.material = .titlebar
-        v.blendingMode = .behindWindow
-        v.state = .followsWindowActiveState
-        return v
-    }
-    func updateNSView(_ v: NSVisualEffectView, context: Context) {}
-}
-
 /// Reaches up to the hosting NSWindow and configures it to draw content under
 /// the title-bar / traffic-light region. `.windowStyle(.hiddenTitleBar)` only
 /// hides the title text; these three NSWindow knobs are what actually make
@@ -28,6 +13,13 @@ struct FullSizeTitleBarConfigurator: NSViewRepresentable {
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
             window.styleMask.insert(.fullSizeContentView)
+            // Make sure the traffic lights stay visible — `.windowStyle
+            // (.hiddenTitleBar)` plus `.toolbar(.hidden, for: .windowToolbar)`
+            // can leave the standardWindowButtons hidden in some macOS
+            // versions; re-asserting them here is cheap and idempotent.
+            window.standardWindowButton(.closeButton)?.isHidden = false
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = false
+            window.standardWindowButton(.zoomButton)?.isHidden = false
             // Hairline divider at the bottom of the title-bar area looks odd
             // when our custom bar provides its own Divider; turn it off.
             window.isMovableByWindowBackground = false
@@ -98,6 +90,8 @@ struct ReaderView: View {
             }
         }
         .toolbar(.hidden, for: .windowToolbar)
+        .ignoresSafeArea(.container, edges: .top)
+        .background(FullSizeTitleBarConfigurator())
         .navigationTitle(vm.comic.title)
         .onAppear  { KeyMonitor.shared.start(handler: handleKey); let msg = "ReaderView.onAppear — readingMode=\(vm.readingMode), currentPage=\(vm.currentPage), savedScrollOffset=\(String(describing: vm.savedScrollOffset))"; print("[DEBUG] \(msg)"); Task { await DCLogger.shared.log(msg) } }
         .onDisappear { if library.openComic == nil { KeyMonitor.shared.stop() } }
@@ -250,121 +244,12 @@ struct ReaderView: View {
     /// lands at the bar's exact horizontal midpoint regardless of how wide
     /// the back or trailing clusters are.
     @ViewBuilder
+    /// Reader's top-bar chrome — three Liquid-Glass capsules over a
+    /// transparent strip. Implementation lives in `ReaderToolbar.swift`.
     private var readerTopBar: some View {
-        ZStack {
-            HStack(spacing: 10) {
-                // Leading gutter reserves room for the traffic-light controls
-                // that live in the same strip (.windowStyle(.hiddenTitleBar)).
-                Spacer().frame(width: 72)
-                backButton
-                Spacer()
-                trailingCluster
-            }
-            transportCluster
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 38)
-        .background(TitlebarEffectView())
-    }
-
-    private var backButton: some View {
-        Button {
-            vm.persistCurrentPosition()
-            library.closeComic()
-        } label: {
-            Label("Library", systemImage: "chevron.left")
-        }
-        .help("Back to Library")
-    }
-
-    private var transportCluster: some View {
-        let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble
-        return HStack(spacing: 6) {
-            Button {
-                vm.persistCurrentPosition()
-                library.openAdjacentComic(offset: -1, currentMode: vm.readingMode.rawValue)
-            } label: {
-                Image(systemName: "chevron.left.2")
-            }
-            .disabled(library.adjacentComicURL(offset: -1) == nil)
-            .help("Previous comic (Q)")
-
-            Button { vm.previousPage() } label: {
-                Image(systemName: "chevron.left")
-            }
-            .disabled(vm.currentPage == 0 || isVertical)
-            .help("Previous page (←/A)")
-
-            Text("\(vm.currentPage + 1) / \(vm.pageCount)")
-                .monospacedDigit()
-                .font(.callout)
-                .frame(minWidth: 72)
-
-            Button { vm.nextPage() } label: {
-                Image(systemName: "chevron.right")
-            }
-            .disabled(vm.currentPage >= vm.pageCount - 1 || isVertical)
-            .help("Next page (→/D)")
-
-            Button {
-                vm.persistCurrentPosition()
-                library.openAdjacentComic(offset: +1, currentMode: vm.readingMode.rawValue)
-            } label: {
-                Image(systemName: "chevron.right.2")
-            }
-            .disabled(library.adjacentComicURL(offset: +1) == nil)
-            .help("Next comic (E)")
-        }
-    }
-
-    private var trailingCluster: some View {
-        HStack(spacing: 8) {
-            if let url = library.lastOpenedURL {
-                let fav = library.isFavorite(url: url)
-                Button { library.toggleFavorite(url: url) } label: {
-                    Image(systemName: fav ? "heart.fill" : "heart")
-                        .foregroundStyle(fav ? Color.red : Color.primary)
-                }
-                .help(fav ? "Remove from Favorites" : "Add to Favorites")
-            }
-
-            Menu {
-                Section("Zoom") {
-                    Button("Zoom In")  { vm.zoomIn() }
-                        .keyboardShortcut("=", modifiers: [.command])
-                    Button("Zoom Out") { vm.zoomOut() }
-                        .keyboardShortcut("-", modifiers: [.command])
-                    Divider()
-                    Button("Actual Size (100%)") { vm.zoomToActualSize() }
-                    Button("Fit to Width")       { vm.fitToWidth(containerWidth: vm.containerSize.width) }
-                    Button("Reset Zoom")         { vm.resetZoom() }
-                }
-                Section("Reading Mode") {
-                    ForEach(ReadingMode.allCases, id: \.self) { mode in
-                        Button {
-                            vm.readingMode = mode
-                            vm.saveMode()
-                        } label: {
-                            HStack {
-                                Text(mode.rawValue)
-                                if vm.readingMode == mode {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                }
-                Section {
-                    Button("Toggle Full Screen") { toggleFullscreen() }
-                        .keyboardShortcut("f", modifiers: [.command, .control])
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
-            .menuStyle(.borderlessButton)
-            .frame(width: 28)
-            .help("More options")
-        }
+        ReaderToolbar(vm: vm,
+                      library: library,
+                      onToggleFullScreen: toggleFullscreen)
     }
 }
 

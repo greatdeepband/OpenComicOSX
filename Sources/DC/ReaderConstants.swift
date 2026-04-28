@@ -12,7 +12,23 @@ enum ReaderConstants {
     /// Visible height of the reader's top bar overlay. Used as the scrollView's
     /// `contentInsets.top` so the page content scrolls beneath but not over
     /// it. The value is the intrinsic height of `readerTopBar` in ReaderView.
-    static let topBarHeight: CGFloat = 38
+    /// 52pt: tall enough to host 36pt Liquid-Glass capsules with breathing
+    /// room above and below them, and to read as a "real" Mac toolbar
+    /// rather than a thin chrome line.
+    static let topBarHeight: CGFloat = 52
+
+    /// Height of an individual Liquid-Glass capsule inside `readerTopBar`.
+    /// The capsule sits centred in the 52pt strip with ≈ 8pt of strip
+    /// remaining above and below it. 36pt accommodates the system's
+    /// standard control glyph baseline (16-18pt SF Symbols + label) with
+    /// the Liquid-Glass rim still reading as a distinct edge.
+    static let toolbarCapsuleHeight: CGFloat = 36
+
+    /// Hairline divider opacity inside `Segmented`-style toolbar capsules.
+    /// Tuned to be visible but unobtrusive against both Liquid Glass
+    /// (macOS 26+) and `.ultraThinMaterial` (macOS 14–25), in light and
+    /// dark mode.
+    static let toolbarSegmentDividerOpacity: Double = 0.12
 
     /// Vertical gap between adjacent pages in vertical-stack layout.
     /// Tight enough to feel continuous but visible enough to communicate
