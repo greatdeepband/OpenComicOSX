@@ -153,6 +153,22 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.scrollView = scrollView
         context.coordinator.metalView = metalView
         context.coordinator.renderer = renderer
+        // The fresh renderer's TextureRingBuffer is empty — pages must be
+        // re-decoded and re-uploaded into it. Cancel any in-flight prefetch
+        // task from the previous mode (its uploads target the just-dropped
+        // old renderer) and clear `prefetchInFlightRange` so the next
+        // `triggerPrefetch` doesn't false-positive its dedupe and skip the
+        // fresh decode. Without this, mode switches whose new visibleRange
+        // matches the previous mode's (e.g. doubleSpread 0...0 →
+        // verticalStack 0...0) silently keep the new ring empty → render
+        // fires with `renderPosCount > 0` but no textures exist → user sees
+        // a blank cover until the first scroll changes the visibleRange and
+        // bypasses the dedupe. Vertical-double escapes incidentally because
+        // its initial visibleRange is 0...1, which doesn't match 0...0
+        // from a previous single/double mode.
+        context.coordinator.prefetchTask?.cancel()
+        context.coordinator.prefetchTask = nil
+        context.coordinator.prefetchInFlightRange = nil
         context.coordinator.pageManager = pageManager
         context.coordinator.pages = pages
         context.coordinator.pagesPerRow = pagesPerRow
@@ -305,16 +321,30 @@ struct MetalPageView: NSViewRepresentable {
                 // the Coordinator), so we need to do it here. For vertical
                 // we use the saved fraction (preserves mid-page position);
                 // for single/double we just snap to currentPage.
+                //
+                // CRITICAL: this restore MUST run synchronously before the
+                // trailing `updateVisibleRange()` at the end of `updateNSView`
+                // — otherwise that call samples `clipView.origin.y = 0` (the
+                // dispatched scroll hasn't fired yet) and emits
+                // `onPageChanged(0)`, which clobbers `vm.currentPage` to 0.
+                // SwiftUI then re-evaluates with `restorePage = 0`, and if the
+                // user starts another mode switch within the runloop tick
+                // before the dispatched `scrollToPage(restorePage)` lands,
+                // the recovery never happens — `vm.currentPage` stays 0
+                // forever and the user lands on the cover instead of the
+                // row they were reading. The synchronous call closes that
+                // race window: `clipView.origin.y` is at the right Y before
+                // the trailing `updateVisibleRange()` reads it.
+                // `layoutSubtreeIfNeeded()` was just called above, so the
+                // documentView frame and clipView geometry are fully
+                // committed and `scrollToPage`/`scrollToFraction` can
+                // operate on real pageYOffsets and real clip bounds.
                 switch layout {
                 case .verticalStack:
                     if let offset = restoreOffset {
-                        DispatchQueue.main.async { [weak coord] in
-                            coord?.scrollToFraction(offset)
-                        }
+                        coord.scrollToFraction(offset)
                     } else if let page = restorePage {
-                        DispatchQueue.main.async { [weak coord] in
-                            coord?.scrollToPage(page)
-                        }
+                        coord.scrollToPage(page)
                     }
                 case .singlePage, .doubleSpread:
                     // currentPage is already in the coordinator; rebuildSinglePage
