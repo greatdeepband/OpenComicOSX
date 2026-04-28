@@ -1,5 +1,20 @@
 # DC Reader — Changelog
 
+## v0.11.1 — 2026-04-28 — Gallery thumbnail refresh decoupled from @Published
+
+### Fixed
+- **Gallery covers flickered during fast scroll on a fresh-cache library** — the previous thumbnail-refresh mechanism mutated a `@Published var updatedThumbnailURLs: Set<URL>` twice per batch flush (`= []` then `= batch` — a workaround so `onChange` would fire even when the new batch contained a URL from a previous flush). `LibraryViewModel` is consumed via `@EnvironmentObject`, so every `objectWillChange` re-rendered every visible `ComicCard`. Cards waiting for their own disk-load to complete re-rendered NIL on every neighbour's flush, which the user perceived as covers "appearing and disappearing" while/just-after scrolling. Diagnosed via per-event live debug at `2026-04-28 11:15:43–11:16:46`; trace showed 200+ `[gthumb] render NIL` lines per second across 20+ cards per flush during cache warm-up.
+
+### Changed
+- **`LibraryViewModel.thumbnailUpdates: PassthroughSubject<URL, Never>`** — replaces the `@Published Set<URL>` mechanism. `insertIntoCache`, `saveThumbnailAndCache`, and the visible-cache branch of `generateThumbnailsParallel` send one event per inserted URL. The subject is **not** `@Published`, so sending an event does not fire `objectWillChange` — a thumbnail decoded for card N never invalidates cards 1..N-1 / N+1..end.
+- **`ComicCard` and `ContinueReadingHero`** subscribe via `.onReceive(library.thumbnailUpdates)` instead of `.onChange(of: library.updatedThumbnailURLs)`. The `if updatedURL == url { renderToken = UUID() }` gate is unchanged; only the publisher and the trigger site moved.
+
+### Removed
+- `@Published var updatedThumbnailURLs: Set<URL>`, `private var pendingURLs: Set<URL>`, `private var flushScheduled: Bool`, `private func scheduleFlush()`, `private func flushThumbnailGeneration()` — all obsolete with the per-URL subject.
+- `updatedThumbnailURLs.remove(url)` workaround in `closeComic()` — `PassthroughSubject` always delivers `send()` to subscribers regardless of prior emissions, so the Set-mutation workaround that ensured `onChange` would fire is no longer needed.
+
+---
+
 ## v0.11.0 — 2026-04-28 — Liquid-Glass classic-Mac reader toolbar
 
 The reader's top-bar chrome is now three floating Liquid-Glass capsules

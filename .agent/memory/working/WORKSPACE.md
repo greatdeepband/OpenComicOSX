@@ -1,7 +1,14 @@
 # Workspace
 
 ## Current task
-**v0.11.0 shipped.** Liquid-Glass classic-Mac reader toolbar — three floating capsules over a transparent strip, traffic lights live in the same row, navbar drag works, loupe drag is symmetric on all four edges including the top.
+**v0.11.1 shipped.** Gallery thumbnail refresh decoupled from `@Published` — `PassthroughSubject<URL, Never>` replaces the dual-assignment `updatedThumbnailURLs` Set. Per-URL invalidation only; no full-grid re-render on cache writes. CHANGELOG + README updated.
+
+## What shipped in v0.11.1 (2026-04-28)
+- `LibraryViewModel.thumbnailUpdates = PassthroughSubject<URL, Never>()` added; `insertIntoCache`, `saveThumbnailAndCache`, and the visible branch of `generateThumbnailsParallel` send per-URL events.
+- `ComicCard` and `ContinueReadingHero` subscribe via `.onReceive(library.thumbnailUpdates)` instead of `.onChange(of: library.updatedThumbnailURLs)`.
+- Removed: `@Published updatedThumbnailURLs`, `pendingURLs`, `flushScheduled`, `scheduleFlush()`, `flushThumbnailGeneration()`, and the `updatedThumbnailURLs.remove(url)` workaround in `closeComic`.
+- Diagnosed via live `[gthumb]` event log at 2026-04-28 11:15:43–11:16:46 (cache warmed from 25 to 1210 entries; 20+ `render NIL` per flush across uninvolved cards). Instrumentation removed before final build.
+- Code commit: `ed15f53 fix(library): decouple per-card thumbnail refresh from @Published`.
 
 ## What shipped in v0.11.0 (2026-04-28)
 - New `Sources/DC/Views/ReaderToolbar.swift` (~250 lines): top-level `ReaderToolbar` view + private `ToolbarCapsule` (availability-gated `.glassEffect` / `.ultraThinMaterial` wrapper) + `SegmentDivider` + `LeadingCapsule` / `TransportCapsule` / `TrailingCapsule`. macOS 26+ uses real Liquid Glass inside one `GlassEffectContainer`; macOS 14–25 collapses the container to a `Group` and renders each capsule independently with `.ultraThinMaterial`.

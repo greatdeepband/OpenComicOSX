@@ -119,6 +119,8 @@ The loupe is one unified `MagnifierView` instance across all four reading modes,
 
 Since v0.9.0, one `MetalPageManager` is owned by `ReaderViewModel` and injected into every `MetalPageView` instance, so all four reading modes share the same decode cache. `PageImageCache` was retired in v0.9.0.
 
+Per-card refreshes are driven by `LibraryViewModel.thumbnailUpdates`, a non-`@Published` `PassthroughSubject<URL, Never>` that broadcasts one event per cache insertion; cards observe via `.onReceive` so a thumbnail write for one card never invalidates the rest of the grid.
+
 ## Development
 
 ### Prerequisites
