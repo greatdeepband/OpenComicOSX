@@ -947,8 +947,8 @@ struct ContinueReadingHero: View {
             Spacer(minLength: 0)
         }
         .onAppear { library.requestThumbnail(for: url) }
-        .onChange(of: library.updatedThumbnailURLs) { _, urls in
-            if urls.contains(url) { renderToken = UUID() }
+        .onReceive(library.thumbnailUpdates) { updatedURL in
+            if updatedURL == url { renderToken = UUID() }
         }
     }
 }
@@ -1246,8 +1246,8 @@ struct ComicCard: View {
             isHovering = hovering
         }
         .onAppear { library.requestThumbnail(for: url) }
-        .onChange(of: library.updatedThumbnailURLs) { _, urls in
-            if urls.contains(url) { renderToken = UUID() }
+        .onReceive(library.thumbnailUpdates) { updatedURL in
+            if updatedURL == url { renderToken = UUID() }
         }
     }
 

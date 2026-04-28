@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import SwiftUI
+import Combine
 
 // MARK: - Gallery model
 
@@ -59,15 +60,15 @@ final class LibraryViewModel: ObservableObject {
     /// The URL of the last comic opened — used to scroll the library back to that card.
     @Published var lastOpenedURL: URL? = nil
 
-    /// Set of URLs whose thumbnails were just updated.
-    /// Cards observe this and re-render only when their own URL is present,
-    /// eliminating the O(n) full-grid re-render caused by a global counter.
-    /// Cleared on the next run loop tick after publishing.
-    @Published var updatedThumbnailURLs: Set<URL> = []
-
-    /// Pending URLs not yet flushed to updatedThumbnailURLs.
-    private var pendingURLs: Set<URL> = []
-    private var flushScheduled = false
+    /// Per-URL refresh signal for thumbnail availability. Cards subscribe
+    /// via `.onReceive(library.thumbnailUpdates)` and flip their render
+    /// token only when the emitted URL matches their own. This subject is
+    /// **not** `@Published` — sending an event does NOT fire
+    /// `objectWillChange`, so a thumbnail decoded for card N never
+    /// invalidates cards 1..N-1 / N+1..end. Eliminates the full-grid
+    /// re-render that surfaced as cover-flicker during fast scroll
+    /// (diagnosed 2026-04-28; see CHANGELOG v0.11.1).
+    let thumbnailUpdates = PassthroughSubject<URL, Never>()
 
     /// Current search query — empty string means no filter.
     @Published var searchQuery: String = ""
@@ -349,7 +350,6 @@ final class LibraryViewModel: ObservableObject {
         // first (they are in visibleRequestQueue). The rest fill in afterwards.
         let prioritised = await buildPrioritisedQueue(all: all)
         await generateThumbnailsParallel(for: prioritised)
-        await MainActor.run { flushThumbnailGeneration() }
     }
 
     /// URLs requested by visible ComicCards that don't have a thumbnail yet.
@@ -411,9 +411,7 @@ final class LibraryViewModel: ObservableObject {
                             let isNew = self.thumbnailCache.object(forKey: key) == nil
                             self.thumbnailCache.setObject(thumb, forKey: key)
                             if isNew { self.thumbnailCacheCount += 1 }
-                            // Notify only this card — no full-grid re-render.
-                            self.pendingURLs.insert(url)
-                            self.scheduleFlush()
+                            self.thumbnailUpdates.send(url)
                         }
                         // Off-screen: disk write already done above. Card will load
                         // lazily via requestThumbnail when it fires onAppear.
@@ -438,9 +436,6 @@ final class LibraryViewModel: ObservableObject {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     self.insertIntoCache(img, for: comicURL)
-                    // Notify only this card — no full-grid re-render.
-                    self.pendingURLs.insert(comicURL)
-                    self.scheduleFlush()
                 }
             }
             return
@@ -501,13 +496,6 @@ final class LibraryViewModel: ObservableObject {
         // mutation doesn't trigger a LibraryView re-render while the reader is open.
         if let url = lastOpenedURL {
             addRecent(url: url)
-            // Remove this URL from updatedThumbnailURLs so that when the card
-            // reappears and requestThumbnail fires scheduleFlush, the Set value
-            // genuinely changes and onChange triggers a re-render on the card.
-            // Without this, the URL stays in the Set from the background thumbnail
-            // generation that ran while the reader was open, and the subsequent
-            // scheduleFlush produces no Set change — so onChange never fires.
-            updatedThumbnailURLs.remove(url)
         }
         openComic = nil
     }
@@ -766,15 +754,18 @@ final class LibraryViewModel: ObservableObject {
         return thumbnailCache.object(forKey: key)
     }
 
-    /// Re-insert an image into the NSCache (used by ComicCard after a disk fallback load).
+    /// Re-insert an image into the NSCache and publish a refresh event on
+    /// `thumbnailUpdates`. Used by ComicCard after a disk-fallback load.
     func insertIntoCache(_ image: NSImage, for comicURL: URL) {
         let key = LibraryViewModel.thumbnailCacheKey(for: comicURL) as NSString
         let isNew = thumbnailCache.object(forKey: key) == nil
         thumbnailCache.setObject(image, forKey: key)
         if isNew { thumbnailCacheCount += 1 }
+        thumbnailUpdates.send(comicURL)
     }
 
-    /// Save to disk and insert into the NSCache.
+    /// Save to disk, insert into the NSCache, and publish a refresh event
+    /// on `thumbnailUpdates`.
     ///
     /// Uses ImageIO directly (CGImageDestination) instead of the old
     /// NSImage → lockFocus → TIFF → NSBitmapImageRep → JPEG roundtrip.
@@ -794,31 +785,7 @@ final class LibraryViewModel: ObservableObject {
         thumbnailCache.setObject(thumb, forKey: key)
         if isNew { thumbnailCacheCount += 1 }
 
-        // Notify only this card — no full-grid re-render.
-        pendingURLs.insert(comicURL)
-        scheduleFlush()
-    }
-
-    /// Schedules a single run-loop flush of pendingURLs → updatedThumbnailURLs.
-    /// Multiple insertions within the same run loop are coalesced into one publish.
-    ///
-    /// The set is never cleared — SwiftUI's onChange only fires when the value
-    /// actually changes (i.e. when a new URL is inserted), so idempotent calls
-    /// are free. Clearing on the next tick caused a race where onChange fired
-    /// after the set was already empty, leaving cards permanently blank.
-    private func scheduleFlush() {
-        guard !flushScheduled else { return }
-        flushScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            // Assign (not union) so value always transitions {} -> {batch},
-            // guaranteeing onChange fires even if URL was in a prior flush.
-            let batch = self.pendingURLs
-            self.pendingURLs = []
-            self.flushScheduled = false
-            self.updatedThumbnailURLs = []
-            self.updatedThumbnailURLs = batch
-        }
+        thumbnailUpdates.send(comicURL)
     }
 
     // MARK: - Cache management
@@ -852,13 +819,6 @@ final class LibraryViewModel: ObservableObject {
             await self?.generateMissingThumbnails()
         }
         Task { await DCLogger.shared.log("[CACHE] Full cache clear complete.") }
-    }
-
-    /// Called at the end of generateThumbnailsParallel to ensure the last batch is shown.
-    private func flushThumbnailGeneration() {
-        if !pendingURLs.isEmpty {
-            scheduleFlush()
-        }
     }
 
     /// Scales the source NSImage to the 200×280 thumbnail canvas and returns a CGImage.
