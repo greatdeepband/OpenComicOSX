@@ -535,6 +535,19 @@ final class MetalCanvasView: NSView {
         metal.framebufferOnly = false
         metal.contentsScale = NSScreen.screens.first?.backingScaleFactor ?? 2.0
         metal.contentsGravity = .topLeft
+        // Glitch-free resize: with `presentsWithTransaction = true`, the layer
+        // does NOT present the drawable on its own at commit time. The render
+        // path (MetalPageView+Render.swift `render(_:)`) instead waits for the
+        // command buffer to be scheduled, then calls `drawable.present()`
+        // synchronously inside the running CATransaction. That keeps the
+        // drawable presentation atomic with the layer's bounds change — so
+        // when AppKit grows the layer during a window resize, the new
+        // drawable is already in place rather than the previous-size one
+        // being held over for a frame. (Tristan Hume 2019; this is what
+        // ReaderConstants.swift's `modeSwitchRenderRetryDelays` doc comment
+        // calls "the principled alternative.") See render() for the matched
+        // commit + waitUntilScheduled + drawable.present() triplet.
+        metal.presentsWithTransaction = true
         backing.addSublayer(metal)
         self.metalLayer = metal
         return backing

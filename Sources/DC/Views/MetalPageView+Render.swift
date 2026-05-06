@@ -127,7 +127,36 @@ extension MetalPageView.Coordinator {
             commandBuffer: commandBuffer
         )
 
-        commandBuffer.present(drawable)
+        // Stale-size guard. If the layer's drawableSize changed between
+        // nextDrawable() above and now (rare under main-actor flow, but
+        // possible if a re-entrant updateMetalLayerFrame fired), the
+        // drawable's texture is for the wrong viewport. Presenting it
+        // would put a wrong-size image into the new bounds — exactly the
+        // "stretched previous frame" symptom that contentsGravity =
+        // topLeft is meant to mask. Skip the present in that case; the
+        // next render with a correctly-sized drawable will catch up.
+        // (Pattern adapted from Ghostty's IOSurfaceLayer.setSurfaceCallback.)
+        let target = metalView.metalLayer.drawableSize
+        if drawable.texture.width != Int(target.width) ||
+           drawable.texture.height != Int(target.height) {
+            commandBuffer.commit()
+            return
+        }
+
+        // Hume canonical resize triplet (matched with
+        // `metalLayer.presentsWithTransaction = true` in
+        // MetalCanvasView.makeBackingLayer):
+        //   1. commit the encoded work
+        //   2. block until the command buffer is scheduled
+        //      (microseconds-to-millisecond on Apple Silicon)
+        //   3. present the drawable SYNCHRONOUSLY inside the running
+        //      CATransaction so its appearance is atomic with the
+        //      layer's bounds change.
+        // Without this triplet, AppKit holds the previous-size drawable
+        // across the resize gap and stretches it via the layer's
+        // contentsGravity for one frame on every resize tick.
         commandBuffer.commit()
+        commandBuffer.waitUntilScheduled()
+        drawable.present()
     }
 }
