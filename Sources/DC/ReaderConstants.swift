@@ -17,6 +17,17 @@ enum ReaderConstants {
     /// rather than a thin chrome line.
     static let topBarHeight: CGFloat = 52
 
+    /// Width of the AppKit window-resize hot zone along each window-frame
+    /// edge. The reader uses `.fullSizeContentView` + `.hiddenTitleBar`,
+    /// so the NSScrollView spans the full window frame and AppKit's
+    /// resize-cursor hot zones sit OVER the scrollView's bounds. Without
+    /// an explicit guard, the loupe's app-wide `.leftMouseDown` monitor
+    /// claims the click that AppKit's resize tracker needs — the loupe
+    /// fires, the cursor hides, and the resize drag glitches. 6pt
+    /// matches AppKit's typical hot-zone (verified live on 2026-05-06:
+    /// a click at x=1 with this margin classified as `edge=L`).
+    static let windowResizeMargin: CGFloat = 6
+
     /// Height of an individual Liquid-Glass capsule inside `readerTopBar`.
     /// The capsule sits centred in the 52pt strip with ≈ 8pt of strip
     /// remaining above and below it. 36pt accommodates the system's

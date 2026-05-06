@@ -46,6 +46,24 @@ extension MetalPageView.Coordinator {
 
         switch event.type {
         case .leftMouseDown:
+            // Window-frame resize hot zone guard. AppKit reserves a thin
+            // margin around the window frame for cursor-driven resize
+            // tracking. Because the reader uses `.fullSizeContentView`,
+            // the NSScrollView spans the full frame and these resize
+            // hot zones sit OVER scrollView.bounds. Without this guard
+            // the loupe monitor swallows the .leftMouseDown that AppKit
+            // needs to start its resize session — the cursor gets
+            // hidden, the loupe overlay flashes, and the resize drag
+            // glitches.
+            let p = event.locationInWindow
+            let f = window.frame
+            let m = ReaderConstants.windowResizeMargin
+            let inEdge =
+                p.x < m ||
+                p.x > f.width  - m ||
+                p.y < m ||
+                p.y > f.height - m
+            if inEdge { return }
             if inTopStrip { return }
             loupeDragActive = true
             updateLoupe(at: event.locationInWindow, in: window)

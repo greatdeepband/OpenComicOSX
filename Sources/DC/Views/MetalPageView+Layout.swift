@@ -26,20 +26,91 @@ extension MetalPageView.Coordinator {
         // — this also matters for unzoomed scroll events on vertical
         // modes where magnification can resize the clipView.bounds.
         metalView?.updateMetalLayerFrame()
-        // While the initial render is still pending, re-fit single/double-
-        // page layouts to the now-known clip height. The first rebuild may
-        // have used the containerWidth fallback because the clipView
-        // wasn't sized yet; once it is, re-rebuild produces the correct
-        // documentView frame and drawableSize so the render can succeed.
-        if pendingInitialRender {
+
+        guard let scrollView = scrollView else { return }
+        let clipSize = scrollView.contentView.bounds.size
+        let prev = lastClipSize
+        lastClipSize = clipSize
+        let widthChanged  = abs(prev.width  - clipSize.width)  > 0.5
+        let heightChanged = abs(prev.height - clipSize.height) > 0.5
+        let geometryChanged = (widthChanged || heightChanged) && clipSize.width > 1
+
+        // Unified rebuild path: covers both initial-render fallback (the
+        // first time the clipView reports a real size after a mode-switch
+        // gave us a 0-sized clipView) and NSWindow live resize. We do
+        // NOT gate on `pendingInitialRender` here — `rebuildLayout`
+        // itself re-arms that flag every call, so a gate would bounce
+        // every other resize frame.
+        //
+        // Why drive layout from this notification at all: during NSWindow
+        // live resize the run loop pumps `NSEventTrackingRunLoopMode`,
+        // which batches SwiftUI state propagation. `updateNSView`
+        // therefore fires at coarse cadence, the page geometry only
+        // catches up at the end of the drag, and the user sees discrete
+        // jumps. AppKit's frame-change notification on the clipView
+        // fires every frame during the drag, so it's the authoritative
+        // trigger for keeping the page in step with the viewport.
+        //
+        // Single/double-page modes fit-to-window using BOTH width and
+        // height, so any clip-size delta requires a re-fit. Vertical
+        // modes lay pages out by width only — height-only changes
+        // don't change page geometry, only the visible range.
+        if geometryChanged {
             switch layout {
             case .singlePage, .doubleSpread:
+                // Trigger a re-fit on ANY clip-size delta. Width
+                // changes are usually already handled by SwiftUI's
+                // updateNSView path (it sees a new containerWidth and
+                // calls rebuildLayout), but height-only changes
+                // (top/bottom edge drag) don't move width and so don't
+                // trip needsRebuild. Single/double fit-to-window
+                // depends on both axes — without this hook the page
+                // sits at its old size during a top/bottom drag.
+                //
+                // NOTE: do NOT override containerWidth from clipSize
+                // here. Empirical measurement (2026-05-06 debug
+                // session) showed the clipView's width is materially
+                // coarser than SwiftUI's geo.size during live resize
+                // (~13 vs 50+ distinct values across a 6.5-second
+                // drag), so substituting it here downgrades the
+                // resize cadence. Trust whatever containerWidth
+                // updateNSView most recently set; the rebuild's
+                // height math reads the now-current
+                // scrollView.contentView.bounds.height directly.
                 rebuildLayout()
+                // Re-sync drawableSize to the new documentView bounds
+                // — without this the next render presents the
+                // previous drawable stretched to fill the new layer
+                // size, producing a one-frame visual snap.
                 metalView?.updateMetalLayerFrame()
             case .verticalStack:
-                break
+                if widthChanged {
+                    // Capture scroll fraction BEFORE rebuild. In vertical
+                    // mode rebuildVerticalStack scales every page height
+                    // proportionally with totalWidth, so absolute Y
+                    // positions all shift. Without this restore, the
+                    // user's clipView.origin.y stays put while the pages
+                    // beneath it move — they land on earlier content
+                    // every frame of a window-edge drag, manifesting as
+                    // "scroll position lost during resize."
+                    let prevDocH = scrollView.documentView?.frame.height ?? 0
+                    let prevClipH = scrollView.contentView.bounds.height
+                    let prevOriginY = scrollView.contentView.bounds.origin.y
+                    let prevMaxY = prevDocH - prevClipH
+                    let prevFraction: Double? = prevMaxY > 0
+                        ? Double(max(0, min(1, prevOriginY / prevMaxY)))
+                        : nil
+                    rebuildLayout()
+                    metalView?.updateMetalLayerFrame()
+                    if let f = prevFraction {
+                        scrollToFraction(f)
+                    }
+                } else {
+                    updateVisibleRange()
+                }
             }
         }
+
         tryInitialRender()
     }
 

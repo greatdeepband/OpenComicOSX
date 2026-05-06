@@ -52,6 +52,19 @@ struct MetalPageView: NSViewRepresentable {
     let pagesPerRow: Int  // 1 = vertical single, 2 = vertical double
     let scale: CGFloat
     let containerWidth: CGFloat
+    /// Full container size from the parent SwiftUI GeometryReader. Used to
+    /// drive `scrollView.frame` directly during NSWindow live resize —
+    /// SwiftUI's NSViewRepresentable layout commits to the underlying
+    /// NSView at coarser cadence than SwiftUI's body re-evaluation
+    /// (empirically ~24 vs 98+ distinct widths across a single 15-sec
+    /// drag), and the CAMetalLayer renders only the clipView's visible
+    /// portion, so the user sees stair-step rescaling matching the
+    /// layout cadence rather than smooth tracking. By overriding the
+    /// frame from updateNSView we promote the visible viewport to the
+    /// finer body-eval cadence. `containerHeight` defaults to 0 for
+    /// backwards-compatible call sites; the override only fires when
+    /// both axes are >1pt.
+    var containerHeight: CGFloat = 0
     let restorePage: Int?
     let restoreOffset: Double?
     let pageManager: MetalPageManager
@@ -251,6 +264,31 @@ struct MetalPageView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         Task { await DCLogger.shared.log("SWITCH: updateNSView layout=\(layout) pages.count=\(pages.count) currentPage=\(currentPage) scale=\(scale) containerWidth=\(containerWidth)") }
+
+        // Force scrollView.frame.size to match SwiftUI's reported
+        // container size. SwiftUI commits NSViewRepresentable child
+        // frames at coarser cadence than its body re-evaluation
+        // (~24 vs 98+ distinct widths across a 15-sec live resize),
+        // and the CAMetalLayer renders only the clipView visible
+        // portion (see MetalPageView.updateMetalLayerFrame), so the
+        // visible page rescales at that coarser cadence and looks
+        // stair-stepped during a window edge drag. Overriding the
+        // frame here promotes scrollView/clipView/metalLayer to
+        // SwiftUI's body-eval cadence — updateNSView fires per body
+        // re-evaluation. SwiftUI may overwrite this on its next
+        // layout pass; we re-override on the next updateNSView.
+        // Tolerance check avoids needless tile() round-trips on
+        // sub-pixel changes.
+        if containerWidth > 1, containerHeight > 1 {
+            let target = CGSize(width: containerWidth, height: containerHeight)
+            let cur = scrollView.frame.size
+            if abs(cur.width - target.width) > 0.5 || abs(cur.height - target.height) > 0.5 {
+                var f = scrollView.frame
+                f.size = target
+                scrollView.frame = f
+            }
+        }
+
         context.coordinator.onPageChanged = onPageChanged
         context.coordinator.onOffsetChanged = onOffsetChanged
         context.coordinator.onMagnificationChanged = onMagnificationChanged
@@ -278,6 +316,26 @@ struct MetalPageView: NSViewRepresentable {
 
         if needsRebuild {
             let layoutChanged = context.coordinator.lastLayout != layout
+
+            // Capture scroll fraction for vertical-mode rebuilds that are NOT
+            // mode switches (mode switches have their own explicit
+            // scrollToFraction/scrollToPage restore in the layoutChanged
+            // branch below). Pages grow proportionally with totalWidth, so
+            // without this restore the user lands on earlier content as
+            // their window grows during a live-resize drag.
+            var prevFractionForVertical: Double? = nil
+            if !layoutChanged {
+                if case .verticalStack = layout, let doc = scrollView.documentView {
+                    let prevDocH = doc.frame.height
+                    let prevClipH = scrollView.contentView.bounds.height
+                    let prevMaxY = prevDocH - prevClipH
+                    if prevMaxY > 0 {
+                        let originY = scrollView.contentView.bounds.origin.y
+                        prevFractionForVertical = Double(max(0, min(1, originY / prevMaxY)))
+                    }
+                }
+            }
+
             context.coordinator.pages = pages
             context.coordinator.pagesPerRow = pagesPerRow
             context.coordinator.containerWidth = containerWidth
@@ -286,6 +344,10 @@ struct MetalPageView: NSViewRepresentable {
             context.coordinator.rebuildLayout()
             context.coordinator.lastLayout = layout
             context.coordinator.lastCurrentPage = currentPage
+
+            if let f = prevFractionForVertical {
+                context.coordinator.scrollToFraction(f)
+            }
 
             if layoutChanged {
                 let coord = context.coordinator
@@ -377,8 +439,25 @@ struct MetalPageView: NSViewRepresentable {
         // the viewport centre. The doc is now intrinsically padded to ≥ clip
         // (rebuildSinglePage / rebuildDoubleSpread), so the centred scroll
         // origin is always non-negative — NSClipView won't clamp it back.
+        //
+        // SUPPRESSED DURING LIVE RESIZE. During an NSWindow live resize,
+        // `needsRebuild` fires per frame (60Hz). Each fire recomputed
+        // `newOrigin` from `clip.bounds.size`, which lags the just-set
+        // `scrollView.frame` by one tile cycle — so the origin it scrolled
+        // to was correct for the PREVIOUS viewport, not the current one.
+        // The scroll then "fought" the next frame's resize. Empirically
+        // visible as the page snapping back-and-forth on every drag step
+        // (Przemek, 2026-05-06). The block also lacked the
+        // `newOrigin != clip.bounds.origin` no-op guard that
+        // `recenterIfContentFits()` has, so even no-change frames did
+        // a full clipView scroll round-trip.
+        //
+        // The user-driven triggers we DO need to recentre for (page turn,
+        // zoom step, mode switch) all set `needsRebuild` outside live
+        // resize, so this guard doesn't affect them.
         let isSingleOrDouble = (layout == .singlePage || layout == .doubleSpread)
-        if isSingleOrDouble, (needsRebuild || scaleChanged) {
+        let inLiveResize = scrollView.window?.inLiveResize ?? false
+        if isSingleOrDouble, (needsRebuild || scaleChanged), !inLiveResize {
             if let doc = scrollView.documentView {
                 let clip = scrollView.contentView
                 let topInset = scrollView.contentInsets.top
@@ -393,8 +472,10 @@ struct MetalPageView: NSViewRepresentable {
                     x: max(0, doc.bounds.size.width / 2 - usableW / 2),
                     y: max(-topInset, doc.bounds.size.height / 2 - (topInset + usableH / 2))
                 )
-                clip.scroll(to: newOrigin)
-                scrollView.reflectScrolledClipView(clip)
+                if newOrigin != clip.bounds.origin {
+                    clip.scroll(to: newOrigin)
+                    scrollView.reflectScrolledClipView(clip)
+                }
             }
         }
 
@@ -565,6 +646,12 @@ extension MetalPageView {
         var pageYOffsets: [CGFloat] = []
 
         var lastContainerWidth: CGFloat = 0
+        /// Last clipView size observed via `frameDidChangeNotification`. Drives
+        /// the live-resize rebuild path in `clipViewGeometryChangedImpl` —
+        /// SwiftUI's `geo.size` updates are batched in NSEventTrackingRunLoopMode
+        /// during NSWindow live resize, so we drive layout from AppKit's own
+        /// frame-change cadence to keep the page geometry smooth.
+        var lastClipSize: CGSize = .zero
         var lastPagesPerRow: Int = 0
         var layout: ReadingLayout = .verticalStack(pagesPerRow: 1)
         var currentPage: Int = 0
