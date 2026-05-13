@@ -28,3 +28,10 @@ venv/
 *.tmp
 build/
 .swiftpm/
+*.app/
+*.dSYM/
+
+# Agent / tool caches
+.agent/
+.firecrawl/
+.opencode/
