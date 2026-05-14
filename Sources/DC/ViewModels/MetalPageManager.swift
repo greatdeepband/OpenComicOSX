@@ -5,6 +5,22 @@ import ImageIO
 import PDFKit
 import ZIPFoundation
 
+/// Storage-only actor for the thumbnail dictionary, deliberately separate
+/// from `MetalPageManager`'s decode actor so thumbnail work can run on
+/// background CPU cores in parallel with the foreground full-res decoder
+/// without contending at a single actor queue. Calls here are dict ops
+/// only — the heavy decode work happens in `MetalPageManager`'s
+/// nonisolated helpers BEFORE awaiting this actor to store the result.
+private actor ThumbnailStore {
+    private var thumbs: [Int: CGImage] = [:]
+
+    func cached(_ pageIndex: Int) -> CGImage? { thumbs[pageIndex] }
+    func store(_ image: CGImage, for pageIndex: Int) { thumbs[pageIndex] = image }
+    func snapshot() -> [(pageIndex: Int, image: CGImage)] {
+        thumbs.map { ($0.key, $0.value) }
+    }
+}
+
 /// Actor that manages async page decoding and the decoded CVPixelBuffer cache
 /// feeding the Metal vertical reader. Handles every `PageSource` variant
 /// — `.zipData` (CBZ in-memory), `.file` (CBR/CB7/CBT extracted to disk, or
@@ -38,13 +54,13 @@ actor MetalPageManager {
     /// to bump a `@Published` SwiftUI counter so the reader re-renders.
     nonisolated(unsafe) var onPageReadyNSImage: ((Int, NSImage) -> Void)?
 
-    /// Per-page low-res thumbnails (max edge `ReaderConstants.thumbMaxPixel`).
-    /// Decoded lazily via `decodeThumb(pageIndex:from:)` and pre-scanned in
-    /// bulk by `preScanThumbnails(pages:)` on comic open. Used by the
-    /// reader's render path as a fallback placeholder when the full-res
-    /// `MTLTexture` isn't ready yet (fast scroll outpaces decode).
-    /// Memory cost ~540 KB each at 300×450 BGRA; 200 pages = ~108 MB.
-    private var thumbnails: [Int: CGImage] = [:]
+    /// Storage for per-page low-res thumbnails. Held on a separate actor
+    /// (`ThumbnailStore`) so the thumbnail decode work — which is heavy
+    /// CPU but doesn't touch any of this manager's full-res cache state —
+    /// can run nonisolated and in parallel via `withTaskGroup`. Only the
+    /// final dict insert serializes through this actor, and that's a
+    /// microsecond op.
+    fileprivate nonisolated let thumbnailStore = ThumbnailStore()
 
     /// Fires on the main actor after a thumbnail decode succeeds.
     /// Consumers (the reader's `Coordinator`) wire this to upload the
@@ -101,17 +117,23 @@ actor MetalPageManager {
 
     /// Decode a low-resolution thumbnail for `pageIndex` and cache it.
     /// Returns the existing thumb if one is already decoded. Fires
-    /// `onThumbReady` after a successful new decode so consumers (the
-    /// reader's Coordinator) can upload it into the renderer's
-    /// `thumbnailRing` and use it as a render-path placeholder.
+    /// `onThumbReady` on the main actor after a successful new decode so
+    /// consumers (the reader's Coordinator) can upload it into the
+    /// renderer's `thumbnailRing` and use it as a render-path placeholder.
+    ///
+    /// `nonisolated`: the heavy decode work doesn't touch `MetalPageManager`
+    /// state. Only the final store into `thumbnailStore` serializes
+    /// through that small dedicated actor (microsecond op). This is what
+    /// lets `preScanThumbnails`' `withTaskGroup` actually run multiple
+    /// decodes in parallel.
     ///
     /// Decoding uses ImageIO's `CGImageSourceCreateThumbnailAtIndex` for
     /// raster sources (file / zip / zipData), which picks up embedded
     /// JPEG thumbnails when present and otherwise downscales without
     /// allocating a full-res buffer — typically 10–30 ms per page. PDF
     /// pages go through PDFKit's `PDFPage.thumbnail(of:for:)`.
-    func decodeThumb(pageIndex: Int, from source: PageSource) async -> CGImage? {
-        if let cached = thumbnails[pageIndex] { return cached }
+    nonisolated func decodeThumb(pageIndex: Int, from source: PageSource) async -> CGImage? {
+        if let cached = await thumbnailStore.cached(pageIndex) { return cached }
 
         let image: CGImage?
         switch source {
@@ -126,7 +148,7 @@ actor MetalPageManager {
         }
 
         if let image {
-            thumbnails[pageIndex] = image
+            await thumbnailStore.store(image, for: pageIndex)
             if let cb = onThumbReady {
                 await MainActor.run { cb(pageIndex, image) }
             }
@@ -138,52 +160,61 @@ actor MetalPageManager {
     /// rebuild after a mode switch: the new `MetalPageRenderer` has an
     /// empty `thumbnailRing`, so the Coordinator iterates this snapshot
     /// and re-uploads each thumb instead of re-decoding from source.
-    func allThumbnails() -> [(pageIndex: Int, image: CGImage)] {
-        thumbnails.map { ($0.key, $0.value) }
+    nonisolated func allThumbnails() async -> [(pageIndex: Int, image: CGImage)] {
+        await thumbnailStore.snapshot()
     }
 
-    /// Background-priority pre-scan: decodes a thumbnail for every page
-    /// in `pages`, yielding between iterations so the foreground
-    /// per-visible-range prefetch keeps priority at the actor's queue.
-    /// Returns when all pages have been processed or the surrounding
-    /// `Task` is cancelled. Fire-and-forget from `ReaderViewModel` on
-    /// comic open.
-    func preScanThumbnails(pages: [ComicPage]) async {
-        for (idx, page) in pages.enumerated() {
-            if Task.isCancelled { return }
-            if thumbnails[idx] != nil { continue }
-            _ = await decodeThumb(pageIndex: idx, from: page.source)
-            await Task.yield()
+    /// Parallel pre-scan: spawns a child task per page in a `TaskGroup`,
+    /// each decoding its thumbnail on whatever core the cooperative
+    /// scheduler hands out. Total wall time is bounded by the
+    /// `(ImageIO decode time × pageCount) / available cores` rather than
+    /// the serial sum — typically ~1 s for a 200-page comic on M-series.
+    ///
+    /// Because thumb decode is `nonisolated`, this does NOT contend at
+    /// `MetalPageManager`'s actor queue with the foreground per-visible-
+    /// range prefetch — pre-scan progresses concurrently even during fast
+    /// scroll, where the serial version stalled because foreground always
+    /// held actor priority. Fire-and-forget from `ReaderViewModel` on
+    /// comic open; cancellation propagates from the surrounding task.
+    nonisolated func preScanThumbnails(pages: [ComicPage]) async {
+        await withTaskGroup(of: Void.self) { group in
+            for (idx, page) in pages.enumerated() {
+                if Task.isCancelled { break }
+                group.addTask { [self] in
+                    if Task.isCancelled { return }
+                    _ = await self.decodeThumb(pageIndex: idx, from: page.source)
+                }
+            }
         }
     }
 
-    // MARK: - Thumbnail source decoders
+    // MARK: - Thumbnail source decoders (nonisolated, pure functions over inputs)
 
-    private func decodeThumbFromURL(_ url: URL) -> CGImage? {
+    nonisolated private func decodeThumbFromURL(_ url: URL) -> CGImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
         return makeThumb(from: src)
     }
 
-    private func decodeThumbFromZip(archiveURL: URL, entryPath: String) -> CGImage? {
+    nonisolated private func decodeThumbFromZip(archiveURL: URL, entryPath: String) -> CGImage? {
         guard let archive = try? Archive(url: archiveURL, accessMode: .read),
               let entry = archive[entryPath],
               let data = extractEntry(archive: archive, entry: entry) else { return nil }
         return decodeThumbFromImageData(data)
     }
 
-    private func decodeThumbFromZipData(archiveData: Data, entryPath: String) -> CGImage? {
+    nonisolated private func decodeThumbFromZipData(archiveData: Data, entryPath: String) -> CGImage? {
         guard let archive = try? Archive(data: archiveData, accessMode: .read),
               let entry = archive[entryPath],
               let data = extractEntry(archive: archive, entry: entry) else { return nil }
         return decodeThumbFromImageData(data)
     }
 
-    private func decodeThumbFromImageData(_ data: Data) -> CGImage? {
+    nonisolated private func decodeThumbFromImageData(_ data: Data) -> CGImage? {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         return makeThumb(from: src)
     }
 
-    private func decodeThumbFromPDF(doc: PDFDocument, pageIndex: Int) -> CGImage? {
+    nonisolated private func decodeThumbFromPDF(doc: PDFDocument, pageIndex: Int) -> CGImage? {
         guard let page = doc.page(at: pageIndex) else { return nil }
         let bounds = page.bounds(for: .mediaBox)
         // Preserve aspect: bound the longer edge to thumbMaxPixel.
@@ -196,7 +227,7 @@ actor MetalPageManager {
         return nsImage.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil)
     }
 
-    private func extractEntry(archive: Archive, entry: Entry) -> Data? {
+    nonisolated private func extractEntry(archive: Archive, entry: Entry) -> Data? {
         var data = Data()
         do {
             _ = try archive.extract(entry) { chunk in data.append(chunk) }
@@ -206,7 +237,7 @@ actor MetalPageManager {
         return data
     }
 
-    private func makeThumb(from src: CGImageSource) -> CGImage? {
+    nonisolated private func makeThumb(from src: CGImageSource) -> CGImage? {
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
