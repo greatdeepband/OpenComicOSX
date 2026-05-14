@@ -815,9 +815,13 @@ struct LibraryHome: View {
     }
 
     private var content: some View {
-        ScrollView {
+        // Hoisted out of the `if let` below so the Continue Reading rail
+        // can filter the same URL out of its list — it would otherwise
+        // duplicate the comic shown in the Hero card directly above it.
+        let resumeURL = library.continueReadingURL()
+        return ScrollView {
             VStack(alignment: .leading, spacing: 28) {
-                if let resumeURL = library.continueReadingURL() {
+                if let resumeURL {
                     ContinueReadingHero(url: resumeURL)
                         .padding(.horizontal, 24)
                         .padding(.top, 20)
@@ -825,6 +829,21 @@ struct LibraryHome: View {
                     WelcomeHero()
                         .padding(.horizontal, 24)
                         .padding(.top, 20)
+                }
+
+                let continueReadingURLs = library.recentComics
+                    .filter { $0.url != resumeURL }
+                    .prefix(12)
+                    .map { $0.url }
+                if !continueReadingURLs.isEmpty {
+                    Rail(
+                        title: "Continue Reading",
+                        urls: Array(continueReadingURLs),
+                        progressLookup: { url in
+                            library.recentComics.first(where: { $0.url == url })?.readingProgress
+                        },
+                        seeAllSection: .recents
+                    )
                 }
 
                 if !recentlyAdded.isEmpty {
@@ -842,17 +861,6 @@ struct LibraryHome: View {
                         urls: Array(library.favoriteURLs.prefix(12)),
                         progressLookup: { _ in nil },
                         seeAllSection: .favorites
-                    )
-                }
-
-                if !library.recentComics.isEmpty {
-                    Rail(
-                        title: "Continue Reading",
-                        urls: library.recentComics.prefix(12).map { $0.url },
-                        progressLookup: { url in
-                            library.recentComics.first(where: { $0.url == url })?.readingProgress
-                        },
-                        seeAllSection: .recents
                     )
                 }
 
@@ -945,6 +953,17 @@ struct ContinueReadingHero: View {
                 .padding(.top, 4)
             }
             Spacer(minLength: 0)
+        }
+        // contentShape so clicks on the transparent areas of the HStack
+        // (between thumbnail and text, around the Spacer) hit-test as
+        // part of the gesture target rather than passing through to the
+        // ScrollView underneath. The Resume / Favorite buttons inside
+        // the HStack still own their own tap — SwiftUI dispatches button
+        // taps before parent .onTapGesture, so single-clicking Resume
+        // still loads, single-clicking the heart still toggles favourite.
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            Task { await library.load(url: url) }
         }
         .onAppear { library.requestThumbnail(for: url) }
         .onReceive(library.thumbnailUpdates) { updatedURL in
