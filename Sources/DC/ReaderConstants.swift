@@ -28,6 +28,35 @@ enum ReaderConstants {
     /// a click at x=1 with this margin classified as `edge=L`).
     static let windowResizeMargin: CGFloat = 6
 
+    /// Per-step factor for the zoom-replaces-window-resize behaviour in
+    /// vertical / vertical-double reading modes. A "zoom in" gesture
+    /// (pinch out, ⌘+scroll up) grows the window's frame by
+    /// `verticalZoomWindowFactor`; a "zoom out" gesture shrinks it by
+    /// 1/`verticalZoomWindowFactor` so two opposing steps return the
+    /// window to roughly the same size. 1.10 = 10% per step, deliberately
+    /// coarse so a single discrete gesture produces a visible change
+    /// rather than a sub-perceptual one.
+    static let verticalZoomWindowFactor: CGFloat = 1.10
+
+    /// Cooldown between successive vertical-mode zoom-window-resize
+    /// steps. Prevents a single continuous pinch / scroll-wheel event
+    /// stream from firing dozens of resize ticks; combined with the
+    /// gesture-delta accumulator this caps a typical gesture at 1-3
+    /// discrete steps.
+    static let verticalZoomStepCooldown: Double = 0.15
+
+    /// Threshold for the gesture-delta accumulator before a single
+    /// vertical-mode zoom-window-resize step fires. For pinch this is
+    /// summed `event.magnification` (≈ 0.005-0.05 per gesture frame);
+    /// for ⌘+scroll it's accumulated `scrollingDeltaY` divided by 100
+    /// to bring it into the same approximate range. A coarser
+    /// threshold = fewer, more deliberate steps.
+    static let verticalZoomGestureThreshold: CGFloat = 0.20
+
+    /// Minimum window content size for the vertical zoom-window-resize
+    /// path. Stops a runaway shrink past where the toolbar still reads.
+    static let verticalZoomMinSize: CGSize = CGSize(width: 480, height: 360)
+
     /// Height of an individual Liquid-Glass capsule inside `readerTopBar`.
     /// The capsule sits centred in the 52pt strip with ≈ 8pt of strip
     /// remaining above and below it. 36pt accommodates the system's

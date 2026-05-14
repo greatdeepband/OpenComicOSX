@@ -144,9 +144,17 @@ struct MetalPageView: NSViewRepresentable {
         scrollView.allowsMagnification = true
         switch layout {
         case .verticalStack:
-            scrollView.minMagnification = ReaderConstants.nativeMagnificationMin
-            scrollView.maxMagnification = ReaderConstants.nativeMagnificationMax
-            scrollView.magnification = scale
+            // Vertical modes no longer support native magnification.
+            // Pinch / ⌘+scroll are intercepted in MetalPageView+Zoom.swift
+            // and translated into ±10% window-resize steps so the only
+            // way to "zoom" content is to grow the window. Locking
+            // min=max=1.0 here belt-and-suspenders any pinch event the
+            // local monitor might miss (e.g. during the first tick of a
+            // gesture before the monitor is wired up on a fresh
+            // makeNSView).
+            scrollView.minMagnification = 1.0
+            scrollView.maxMagnification = 1.0
+            scrollView.magnification = 1.0
         case .singlePage, .doubleSpread:
             // Magnification stays at 1.0. `scale` drives documentView resize
             // in the layout path.
@@ -364,9 +372,12 @@ struct MetalPageView: NSViewRepresentable {
                     scrollView.maxMagnification = 1.0
                     scrollView.magnification = 1.0
                 case .verticalStack:
-                    scrollView.minMagnification = ReaderConstants.nativeMagnificationMin
-                    scrollView.maxMagnification = ReaderConstants.nativeMagnificationMax
-                    scrollView.magnification = scale
+                    // Vertical modes: no native magnification; zoom is
+                    // expressed as window-resize via the +Zoom.swift
+                    // monitors. See makeNSView for the same pin.
+                    scrollView.minMagnification = 1.0
+                    scrollView.maxMagnification = 1.0
+                    scrollView.magnification = 1.0
                 }
 
                 // Force a synchronous layout pass so the metalView's frame
@@ -644,6 +655,16 @@ extension MetalPageView {
         /// completes (so pages that decode AFTER the last scroll event still
         /// get drawn without the user having to scroll again).
         var lastVisibleRange: ClosedRange<Int> = 0...0
+
+        /// Pinch / ⌘+scroll zoom→window-resize state for vertical modes.
+        /// Each gesture event accumulates into `zoomGestureAccumulator`;
+        /// when |accumulator| crosses `verticalZoomGestureThreshold`, one
+        /// ±10% window-resize step fires and the accumulator resets.
+        /// `lastZoomStepTime` rate-limits a fast continuous gesture.
+        /// State is only meaningful for `.verticalStack` layouts; ignored
+        /// elsewhere.
+        var zoomGestureAccumulator: CGFloat = 0
+        var lastZoomStepTime: CFAbsoluteTime = 0
 
         /// True while we still owe an initial render for the current layout.
         /// Set by `rebuildLayout` and consumed by `handleLayoutCompleted` —
