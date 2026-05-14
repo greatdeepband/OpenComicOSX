@@ -164,4 +164,15 @@ enum ReaderConstants {
     /// Bumping further is fine on high-RAM machines but risks paging on
     /// low-end hardware.
     static let pageCacheCap: Int = 24
+
+    // MARK: - Thumbnails
+
+    /// Max edge (in pixels) for the low-resolution page thumbnails used as
+    /// the render-path placeholder when full-res isn't ready yet. 450
+    /// preserves comic aspect (~300×450 for a 2:3 page), is small enough
+    /// that 200 thumbs fit in ~108 MB, and is large enough to be legible
+    /// when scaled up to full-window dimensions. Driven through
+    /// `kCGImageSourceThumbnailMaxPixelSize`, so ImageIO uses any
+    /// embedded JPEG thumbnail when present and downscales otherwise.
+    static let thumbMaxPixel: Int = 450
 }
