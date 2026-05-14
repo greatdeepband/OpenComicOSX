@@ -115,4 +115,24 @@ enum ReaderConstants {
     /// Pages prefetched on each side of the visible window. 3 covers a
     /// typical scroll-velocity look-ahead without flooding decode work.
     static let prefetchLookahead: Int = 3
+
+    // MARK: - Cache caps
+
+    /// Capacity of the three lockstep page caches: `decodedPages`
+    /// (`CVPixelBuffer` ring in `MetalPageManager`), `nsImageCache`
+    /// (`NSImage` fast-path), and `textureRing` (`MTLTexture` ring in
+    /// `MetalPageRenderer`). All three evict together by LRU.
+    ///
+    /// Budget breakdown (vertical-double on a tall window, worst working set):
+    ///   visible:       4 rows × 2 pages       = 8
+    ///   prefetch:      `prefetchLookahead` × 2 = 6
+    ///   backscroll:    ≈10 pages of history for flip-back cache
+    ///                                          ───
+    ///                                           24
+    /// Memory cost at typical comic resolution (~14 MB CVPixelBuffer +
+    /// ~14 MB MTLTexture per page, NSImage shares CV buffer) is ~670 MB —
+    /// right at `MemoryMonitor`'s `.high` pressure threshold (700 MB).
+    /// Bumping further is fine on high-RAM machines but risks paging on
+    /// low-end hardware.
+    static let pageCacheCap: Int = 24
 }

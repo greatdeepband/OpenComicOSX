@@ -9,12 +9,12 @@ import ZIPFoundation
 /// feeding the Metal vertical reader. Handles every `PageSource` variant
 /// — `.zipData` (CBZ in-memory), `.file` (CBR/CB7/CBT extracted to disk, or
 /// any standalone image), `.zip` (disk-backed archive), `.pdf` (PDF page).
-/// Only `maxCachedPages` (10) are kept in memory at once.
+/// Only `ReaderConstants.pageCacheCap` pages are kept in memory at once.
 actor MetalPageManager {
     private var decodedPages: [Int: CVPixelBuffer] = [:]
     private var pendingPages: Set<Int> = []
     private var lastAccessTimes: [Int: Date] = [:]
-    private let maxCachedPages = 10
+    private let maxCachedPages = ReaderConstants.pageCacheCap
 
     /// Prefetch-window shape: how many pages behind and ahead of centre to
     /// decode. Matches the old `PageImageCache` window so the user-visible
@@ -29,7 +29,7 @@ actor MetalPageManager {
     /// the LRU cap or `evictOutside(_:)` runs.
     nonisolated let nsImageCache: NSCache<NSNumber, NSImage> = {
         let cache = NSCache<NSNumber, NSImage>()
-        cache.countLimit = 10
+        cache.countLimit = ReaderConstants.pageCacheCap
         return cache
     }()
 

@@ -45,7 +45,7 @@ final class MetalPageRenderer {
     let commandQueue: MTLCommandQueue
     let pipelineState: MTLRenderPipelineState
 
-    private var textureRing = TextureRingBuffer(maxSize: 10)
+    private var textureRing = TextureRingBuffer(maxSize: ReaderConstants.pageCacheCap)
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
