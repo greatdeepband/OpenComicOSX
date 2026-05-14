@@ -192,6 +192,30 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.prefetchInFlightRange = nil
         context.coordinator.pageManager = pageManager
         context.coordinator.pages = pages
+
+        // Wire the thumbnail callback so subsequent thumb decodes (from the
+        // VM-spawned pre-scan) upload directly into this fresh renderer's
+        // thumbnailRing. The callback fires on the main actor per
+        // MetalPageManager.decodeThumb's contract — uploadThumb's main-
+        // actor requirement is honoured. Also seed the new ring from the
+        // manager's existing thumbnail snapshot: pre-scan may have decoded
+        // many thumbs already before this renderer was rebuilt (e.g. mode
+        // switch), and without seeding they'd remain in CGImage form only
+        // and the render-path fallback would still see an empty ring.
+        let coord = context.coordinator
+        pageManager.onThumbReady = { [weak coord] pageIndex, image in
+            coord?.renderer?.uploadThumb(image: image, for: pageIndex)
+        }
+        Task { [weak coord] in
+            guard let manager = coord?.pageManager else { return }
+            let existing = await manager.allThumbnails()
+            await MainActor.run {
+                guard let renderer = coord?.renderer else { return }
+                for (idx, img) in existing {
+                    _ = renderer.uploadThumb(image: img, for: idx)
+                }
+            }
+        }
         context.coordinator.pagesPerRow = pagesPerRow
         context.coordinator.containerWidth = containerWidth
         context.coordinator.scale = scale

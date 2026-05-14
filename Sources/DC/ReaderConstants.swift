@@ -175,4 +175,12 @@ enum ReaderConstants {
     /// `kCGImageSourceThumbnailMaxPixelSize`, so ImageIO uses any
     /// embedded JPEG thumbnail when present and downscales otherwise.
     static let thumbMaxPixel: Int = 450
+
+    /// Capacity of the renderer's `thumbnailRing` (parallel `MTLTexture`
+    /// ring used for the render-path placeholder). Separate from
+    /// `pageCacheCap` because thumbs are ~1/30th the memory of full-res
+    /// textures, so we keep many more of them. 200 covers a typical
+    /// long-form comic's entire page count; comics beyond 200 pages fall
+    /// back to LRU eviction on the oldest thumbs.
+    static let thumbnailRingCap: Int = 200
 }

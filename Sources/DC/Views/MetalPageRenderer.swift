@@ -47,6 +47,12 @@ final class MetalPageRenderer {
 
     private var textureRing = TextureRingBuffer(maxSize: ReaderConstants.pageCacheCap)
 
+    /// Low-resolution `MTLTexture` ring used as the render-path placeholder
+    /// when the full-res `textureRing` doesn't have the page yet. Separate
+    /// cap from `textureRing` because thumbs are ~1/30th the memory cost,
+    /// so we keep many more of them. See `ReaderConstants.thumbnailRingCap`.
+    private var thumbnailRing = TextureRingBuffer(maxSize: ReaderConstants.thumbnailRingCap)
+
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
               let commandQueue = device.makeCommandQueue() else { return nil }
@@ -124,6 +130,71 @@ final class MetalPageRenderer {
     /// Returns the cached texture for a page, touching its LRU timestamp.
     func texture(for pageIndex: Int) -> MTLTexture? {
         textureRing.touch(pageIndex: pageIndex)
+    }
+
+    /// Upload a `CGImage` (typically a `~300×450` thumbnail produced by
+    /// `MetalPageManager.decodeThumb`) into a device-owned `MTLTexture`
+    /// and store it in `thumbnailRing`. Used by the reader's Coordinator
+    /// as the consumer of `MetalPageManager.onThumbReady`, and by the
+    /// post-pre-scan seed step on renderer rebuild. Same main-actor
+    /// contract as `upload(pixelBuffer:)` — `MTLDevice` resource creation
+    /// + ring mutation are not thread-safe.
+    func uploadThumb(image: CGImage, for pageIndex: Int) -> MTLTexture? {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return nil }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm,
+            width: width, height: height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .shared
+
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+
+        // Render the CGImage into a stable BGRA buffer, then upload to GPU.
+        // CGContext's premultipliedFirst + byteOrder32Little produces BGRA
+        // matching the texture's `.bgra8Unorm` pixel format. The buffer is
+        // explicitly allocated/freed (not stack-buffered) because
+        // `texture.replace` reads from `withBytes` synchronously — the
+        // allocation can be released right after.
+        let bytesPerRow = width * 4
+        let totalBytes = bytesPerRow * height
+        let pixelData = UnsafeMutableRawPointer.allocate(byteCount: totalBytes, alignment: 16)
+        defer { pixelData.deallocate() }
+
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue
+            | CGBitmapInfo.byteOrder32Little.rawValue
+
+        guard let ctx = CGContext(
+            data: pixelData,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: bitmapInfo
+        ) else { return nil }
+
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let region = MTLRegion(
+            origin: MTLOrigin(x: 0, y: 0, z: 0),
+            size: MTLSize(width: width, height: height, depth: 1)
+        )
+        texture.replace(region: region, mipmapLevel: 0, withBytes: pixelData, bytesPerRow: bytesPerRow)
+
+        thumbnailRing.insert(texture, for: pageIndex)
+        return texture
+    }
+
+    /// Returns the cached thumbnail texture for a page, touching its LRU
+    /// timestamp. Used by the render path as a fallback when
+    /// `texture(for:)` (full-res) returns nil.
+    func thumbTexture(for pageIndex: Int) -> MTLTexture? {
+        thumbnailRing.touch(pageIndex: pageIndex)
     }
 
     /// Encode a render pass for the given viewport and page positions.
