@@ -1,5 +1,84 @@
 # DC Reader — Changelog
 
+## v0.13.0 — 2026-05-14 — Page thumbnail placeholder tier (eliminates fast-scroll black gaps)
+
+### Added
+- **Fast scroll in vertical-double on long comics no longer shows black gaps.** A low-resolution thumbnail (max 450 px on the longer edge) for every page is pre-scanned in parallel on comic open, then used as a render-path placeholder while full-res decode is in flight. The user sees a blurry-but-legible preview during scroll instead of empty space; full-res snaps in within ~100 ms of scroll settling on a page. ImageIO's `CGImageSourceCreateThumbnailAtIndex` does the decode for raster sources (CBZ / CBR / CB7 / CBT / standalone images) — it picks up the embedded JPEG thumbnail when present and downscales otherwise — and `PDFPage.thumbnail(of:for:)` covers PDFs.
+- **Thumbnail pre-scan completes in well under 1 s for a 200-page comic.** `MetalPageManager.preScanThumbnails` uses `withTaskGroup` to fan out one child task per page across the cooperative thread pool (~6 cores on M-series). Thumbnail decode is `nonisolated`, so child tasks run on background CPU without contending at the foreground actor queue — pre-scan progresses concurrently even during active fast scroll, where a serial version stalled behind foreground prefetch priority.
+
+### Changed
+- **Thumbnail storage moved off `MetalPageManager`'s decode actor onto a small dedicated `ThumbnailStore` actor.** The store exposes `cached(_:)` / `store(_:for:)` / `snapshot()` — microsecond dict ops, never a bottleneck. Heavy decode work happens in nonisolated helpers that don't touch any of the manager's full-res cache state, so they don't queue behind foreground full-res decode.
+- **Render path falls back to thumbnails when full-res isn't ready.** `MetalPageRenderer.render(...)` tries `textureRing[pageIndex]` first, falls back to `thumbnailRing[pageIndex]` before skipping the page. When the full-res `MTLTexture` lands on a later prefetch upload, the next render naturally picks it over the thumb (swap is automatic, no animation needed). No shader change — the GPU samples in 0–1 UV space, so a thumbnail stretches to fill the page rect.
+
+### Constants
+- `ReaderConstants.thumbMaxPixel = 450` — max edge for thumbnail decode.
+- `ReaderConstants.thumbnailRingCap = 200` — parallel `MTLTexture` ring capacity. ~108 MB GPU memory for 200 thumbs at 300×450 BGRA.
+
+### Files
+- `Sources/DC/ViewModels/MetalPageManager.swift` — `ThumbnailStore` actor, nonisolated `decodeThumb` + per-source helpers + `allThumbnails` + parallel `preScanThumbnails`. Commits `e03ec5b`, `d041194`.
+- `Sources/DC/ViewModels/ReaderViewModel.swift` — `preScanTask` spawned on init at `.background` priority, cancelled in deinit. Commit `7bb1db1`.
+- `Sources/DC/Views/MetalPageRenderer.swift` — `thumbnailRing`, `uploadThumb(image:for:)`, `thumbTexture(for:)`, render fallback. Commits `eb86b74`, `6e9b29a`.
+- `Sources/DC/Views/MetalPageView.swift` — `makeNSView` wires `pageManager.onThumbReady` and seeds the new renderer from `manager.allThumbnails()`. Commit `eb86b74`.
+- `Sources/DC/ReaderConstants.swift` — new thumbnail constants. Commits `e03ec5b`, `eb86b74`.
+
+---
+
+## v0.12.2 — 2026-05-13 — Library: Continue Reading rail dedupes the hero
+
+### Fixed
+- **The comic shown in the Home view's hero card no longer appears again in the "Continue Reading" rail directly below it.** `LibraryHome.content` hoists `resumeURL` out of the `if let` it was previously scoped to, so the rail can filter the same URL out of its list before rendering.
+
+### Changed
+- **`LibrarySection`, `CardSize`, `LibrarySortOrder` extracted from `LibraryView.swift` into a new `LibraryTypes.swift`.** No semantic change; keeps the main view file focused on layout, types easy to find under one file for outside contributors.
+
+### Files
+- `Sources/DC/Views/LibraryView.swift` — rail filter + extraction. Commit `41377a7`.
+- `Sources/DC/Views/LibraryTypes.swift` — new file (71 lines). Commit `41377a7`.
+
+---
+
+## v0.12.1 — 2026-05-13 — Vertical-mode zoom via window-resize gesture
+
+### Added
+- **In vertical and vertical-double reading modes, pinch and ⌘+scroll now grow or shrink the window in ±10 % steps** instead of scaling page content. The natural way to "zoom" pages that already fill the column width is to make the column bigger; this gesture path makes that explicit. Single-page and double-page mode's content-scale zoom behaviour is unchanged.
+
+### Changed
+- **`NSScrollView.magnification` is now locked to 1.0 in `.verticalStack` layouts**, both in `makeNSView` and the `layoutChanged` branch of `updateNSView` — belt-and-suspenders any pinch event the local monitor might miss before being wired up on a fresh `makeNSView`.
+- New `MetalPageView.Coordinator` state: `zoomGestureAccumulator` + `lastZoomStepTime` — accumulate gesture delta and rate-limit window-resize firings.
+
+### Constants
+- `ReaderConstants.verticalZoomWindowFactor = 1.10` (10 % per step).
+- `ReaderConstants.verticalZoomStepCooldown = 0.15` (seconds between steps).
+- `ReaderConstants.verticalZoomGestureThreshold = 0.20` (accumulator threshold).
+- `ReaderConstants.verticalZoomMinSize = 480 × 360` (window content size floor).
+
+### Files
+- `Sources/DC/Views/MetalPageView.swift` — magnification lock + Coordinator state. Commit `1d90567`.
+- `Sources/DC/Views/MetalPageView+Zoom.swift` — scroll-wheel and pinch monitors route to `applyVerticalZoomGestureDelta` in vertical layouts. Commit `1d90567`.
+- `Sources/DC/ReaderConstants.swift` — verticalZoom constants. Commit `1d90567`.
+
+---
+
+## v0.12.0 — 2026-05-13 — Off-main-thread Metal upload fix + page-cache discipline
+
+### Fixed
+- **Latent race condition in the prefetch task** that could have manifested as black pages, wrong-page flashes, or hard crashes (SIGABRT) on aggressive scroll — especially on Intel Macs with discrete GPUs where Metal's serialisation guarantees are weaker than on Apple Silicon's unified memory architecture. `MetalPageRenderer.upload(pixelBuffer:)` and `texture(for:)` were running on the prefetch `Task`'s nonisolated continuation after `await manager.decodePage(...)`. The renderer's `TextureRingBuffer` mutation and `MTLDevice.makeTexture` are documented main-actor-only — same threading-invariant family as the project's known "`nextDrawable()` off main thread → SIGABRT" landmine. Wrapped both calls in `await MainActor.run`; the early-bail cache check was also moved under a leading main-actor hop so neither side reads `@MainActor` Coordinator state off-isolation.
+- **Vertical-double fast scroll on long comics was wiping the page cache to a 5-page window** every time `onPageChanged` fired. The legacy `MetalPageManager._prefetchAround` path (called from `ReaderViewModel.triggerPrefetch` on every `updateCurrentPage`) was calling `evictOutside(currentPage-1 ... currentPage+3)`, wiping `decodedPages` / `lastAccessTimes` / `nsImageCache` to that tiny window — including pages the newer per-visible-range prefetch had just decoded. Eviction is now solely the responsibility of `store(...)`'s LRU against `ReaderConstants.pageCacheCap`.
+
+### Changed
+- **Page cache cap centralised into `ReaderConstants.pageCacheCap` and bumped from 10 to 24.** Three lockstep caches — `MetalPageManager.decodedPages` (CVPixelBuffer ring), `MetalPageManager.nsImageCache` (NSImage fast-path), `MetalPageRenderer.textureRing` (MTLTexture ring) — previously hardcoded the value in three places. 24 covers vertical-double on a tall window (8 visible + 6 prefetch) plus ~10 slots of backward-scroll history. Peak memory ~670 MB at typical comic resolution; sits at `MemoryMonitor`'s `.high` threshold.
+
+### Added
+- **`build_app.sh` and `build_production.sh` now committed to the repo.** `build_app.sh`'s hardcoded `/Volumes/Media/DC_dev_lib` path was replaced with the same `$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )` pattern `build_production.sh` already used — the script now works from any clone path. Clears an OSS-readiness blocker.
+
+### Files
+- `Sources/DC/Views/MetalPageView+Render.swift` — Metal upload moved onto main actor. Commit `f0fc2ab`.
+- `Sources/DC/ReaderConstants.swift`, `Sources/DC/ViewModels/MetalPageManager.swift`, `Sources/DC/Views/MetalPageRenderer.swift` — pageCacheCap centralisation. Commit `d91a208`.
+- `Sources/DC/ViewModels/MetalPageManager.swift` — `evictOutside` removed from `_prefetchAround`. Commit `ac350be`.
+- `build_app.sh`, `build_production.sh` — added; `build_app.sh` path fixed. Commit `de40201`.
+
+---
+
 ## v0.11.2 — 2026-04-28 — Scroll position preserved across rapid reading-mode switches
 
 ### Fixed
