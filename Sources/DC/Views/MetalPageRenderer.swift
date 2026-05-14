@@ -241,8 +241,14 @@ final class MetalPageRenderer {
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.stride, index: 2)
 
         for pageIndex in visibleRange {
-            guard let rect = pagePositions[pageIndex],
-                  let tex = textureRing[pageIndex] else { continue }
+            guard let rect = pagePositions[pageIndex] else { continue }
+            // Full-res first, low-res thumbnail as fallback. When the
+            // full-res `MTLTexture` lands on a subsequent prefetch upload,
+            // the next render naturally picks it over the thumb. Pages
+            // with neither still render as the clear color (rare — only
+            // before the pre-scan reaches them, e.g. the first second
+            // after a fresh comic open).
+            guard let tex = textureRing[pageIndex] ?? thumbnailRing[pageIndex] else { continue }
             encoder.setFragmentTexture(tex, index: 0)
 
             let vertices: [Float] = [
