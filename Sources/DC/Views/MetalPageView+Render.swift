@@ -48,17 +48,43 @@ extension MetalPageView.Coordinator {
         prefetchTask = Task { [weak self] in
             for seqIdx in order {
                 if Task.isCancelled { return }
-                guard let self = self, seqIdx < self.pages.count else { continue }
-                let page = self.pages[seqIdx]
-                if self.renderer?.texture(for: seqIdx) != nil { continue }
-                guard let buffer = await manager.decodePage(pageIndex: seqIdx, from: page.source) else {
+
+                // Snapshot main-actor state and bail-early under one hop.
+                // Reading pages/renderer off-main violates the Coordinator's
+                // @MainActor isolation and races with the renderer's own
+                // documented "main-actor only" contract (textureRing.touch
+                // mutates lastAccess on every texture(for:) call).
+                let pageToDecode: ComicPage? = await MainActor.run { [weak self] in
+                    guard let self = self,
+                          seqIdx < self.pages.count,
+                          self.renderer?.texture(for: seqIdx) == nil
+                    else { return nil }
+                    return self.pages[seqIdx]
+                }
+                guard let pageToDecode = pageToDecode else { continue }
+
+                // Off-main decode — heavy CPU work, intentionally off the main
+                // thread so scrolling stays smooth during prefetch.
+                guard let buffer = await manager.decodePage(pageIndex: seqIdx, from: pageToDecode.source) else {
                     continue
                 }
                 if Task.isCancelled { return }
-                if self.renderer?.texture(for: seqIdx) == nil {
-                    _ = self.renderer?.upload(pixelBuffer: buffer, for: seqIdx)
-                }
-                await MainActor.run {
+
+                // Upload + readiness notification on the main actor. The
+                // renderer's textureRing mutation and MTLDevice resource
+                // creation are documented as main-actor-only; previously this
+                // ran on the Task's nonisolated continuation after `await
+                // decodePage`, which races with main-actor render() /
+                // texture(for:) calls. Same threading-invariant family as the
+                // project's known "nextDrawable() off main thread → SIGABRT"
+                // landmine.
+                await MainActor.run { [weak self] in
+                    guard !Task.isCancelled,
+                          let self = self,
+                          let renderer = self.renderer,
+                          renderer.texture(for: seqIdx) == nil,
+                          renderer.upload(pixelBuffer: buffer, for: seqIdx) != nil
+                    else { return }
                     self.onTextureReady(seqIdx)
                 }
             }
