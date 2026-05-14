@@ -38,6 +38,13 @@ final class ReaderViewModel: ObservableObject {
     var scrollOffsetPagesPerRow: Int = 1
     private(set) var savedScrollOffset: Double? = nil
 
+    /// Background task that decodes a low-res thumbnail for every page in
+    /// the comic. Used as the render-path placeholder when full-res isn't
+    /// ready. Fired on init, runs at `.background` priority so foreground
+    /// per-visible-range prefetch keeps actor priority. Cancelled on
+    /// deinit (comic close).
+    private var preScanTask: Task<Void, Never>?
+
     init(comic: Comic) {
         self.comic = comic
         ReadingPositionStore.save(pageCount: comic.pages.count, for: comic.url)
@@ -55,6 +62,21 @@ final class ReaderViewModel: ObservableObject {
         // re-renders via MetalPageView's onTextureReady callback path; no
         // SwiftUI cache-version bump is needed here.
         triggerPrefetch()
+
+        // Background thumbnail pre-scan. Decodes a low-res placeholder for
+        // every page so the render path can show a blurry-but-legible
+        // preview when full-res decode hasn't caught up to a fast scroll.
+        // Detached at `.background` priority — foreground prefetch retains
+        // actor priority via `Task.yield()` calls inside `preScanThumbnails`.
+        let manager = pageManager
+        let pagesSnapshot = comic.pages
+        preScanTask = Task.detached(priority: .background) {
+            await manager.preScanThumbnails(pages: pagesSnapshot)
+        }
+    }
+
+    deinit {
+        preScanTask?.cancel()
     }
 
     /// Called whenever the visible page changes — triggers prefetch of the surrounding window
