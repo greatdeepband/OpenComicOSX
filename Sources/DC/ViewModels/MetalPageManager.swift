@@ -98,8 +98,16 @@ actor MetalPageManager {
     }
 
     /// Fire-and-forget prefetch for `[center - lookBehind … center + lookAhead]`.
-    /// Safe to call from any context. Evicts anything outside the window
-    /// after scheduling.
+    /// Safe to call from any context.
+    ///
+    /// Note: this is the legacy navigation-driven prefetch path. The reader's
+    /// per-visible-range prefetch in `MetalPageView+Render.swift` already
+    /// covers the active window with `prefetchLookahead` on each side; this
+    /// path remains as a belt-and-suspenders trigger on explicit page
+    /// navigation. Cache eviction is handled by `store(...)`'s LRU against
+    /// `ReaderConstants.pageCacheCap` — this path no longer prunes via
+    /// `evictOutside`, which under vertical-double fast scroll was wiping
+    /// pages the new prefetch had just decoded.
     nonisolated func prefetch(around center: Int, pages: [ComicPage]) {
         Task { [weak self] in
             await self?._prefetchAround(center: center, pages: pages)
@@ -111,8 +119,6 @@ actor MetalPageManager {
         let hi = min(pages.count - 1, center + lookAhead)
         guard lo <= hi else { return }
         let window = lo...hi
-
-        evictOutside(window)
 
         for i in window {
             if decodedPages[i] != nil { continue }
