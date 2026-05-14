@@ -1,5 +1,16 @@
 # DC Reader — Changelog
 
+## v0.11.2 — 2026-04-28 — Scroll position preserved across rapid reading-mode switches
+
+### Fixed
+- **Cycling reading modes faster than the runloop could complete a restore landed the user on the cover instead of the page they were reading.** `vm.currentPage` was being clobbered to `0` after a mode switch. The `verticalStack` scroll-restore in `updateNSView`'s `layoutChanged` branch was wrapped in `DispatchQueue.main.async`, so the trailing synchronous `updateVisibleRange()` at the end of `updateNSView` sampled `clipView.origin.y = 0` and emitted `onPageChanged(0)`. If the user switched modes again within the same runloop tick before the dispatched `scrollToPage` / `scrollToFraction` could fire, `vm.currentPage` stayed at `0`. Made the verticalStack restore synchronous — `layoutSubtreeIfNeeded()` already commits the documentView frame, so the synchronous call sees correct `pageYOffsets` and clip bounds. Single-page and double-page paths untouched: their trailing `updateVisibleRange()` is load-bearing for initial render after `rebuildLayout` and must not be skipped (see `2026-04-28` failed-attempts memory).
+- **Cover stayed blank after mode switch until a scroll changed the visible range.** Each mode switch creates a new `MetalPageRenderer` with an empty `TextureRingBuffer`. Without cancelling the in-flight prefetch task and clearing `prefetchInFlightRange`, two failures occurred: the in-flight task kept uploading into the dropped renderer, and a new `triggerPrefetch` for the same range (e.g. `0...0` across mode switches) deduplicated against the cleared `prefetchInFlightRange` and skipped the fresh decode. Added prefetch-state reset in `makeNSView` after assigning the fresh renderer; the next `triggerPrefetch` re-decodes and uploads into the new ring.
+
+### Files
+- `Sources/DC/Views/MetalPageView.swift` — 36 insertions, 6 deletions across `makeNSView` and the `layoutChanged` branch of `updateNSView`. Code commit: `6499e0c fix(reader): preserve scroll position across rapid reading-mode switches`.
+
+---
+
 ## v0.11.1 — 2026-04-28 — Gallery thumbnail refresh decoupled from @Published
 
 ### Fixed
