@@ -80,6 +80,14 @@ enum ReaderConstants {
     /// rather than two pages with a hallway between them.
     static let doublePageGutter: CGFloat = 2
 
+    /// Radius of the circular magnifier loupe (`MagnifierView`). Drives both
+    /// the rendered circle size in SwiftUI and the AppKit hit-region used by
+    /// the loupe gesture monitor — they must agree, hence one constant.
+    /// 270pt: large enough that a single eye-fixation captures the magnified
+    /// region without micro-pans, small enough to leave the bulk of the page
+    /// visible around the loupe edge.
+    static let loupeRadius: CGFloat = 270
+
     // MARK: - Zoom / magnification
 
     /// Floor for `NSScrollView.magnification` in vertical modes. Lower than

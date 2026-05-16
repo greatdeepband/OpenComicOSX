@@ -192,7 +192,7 @@ enum ComicLoader {
             CGImageSourceUpdateData(imageSource, lastData as CFData, true)
             success = true
         } catch {
-            print("CBZ stream extract failed for \(url.lastPathComponent): \(error)")
+            Task { await DCLogger.shared.log("[CBZ] stream extract failed for \(url.lastPathComponent): \(error)") }
         }
 
         guard success else { return nil }

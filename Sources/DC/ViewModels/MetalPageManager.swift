@@ -49,11 +49,6 @@ actor MetalPageManager {
         return cache
     }()
 
-    /// Fires on the main actor after a decode-and-convert completes during
-    /// `prefetch(around:pages:)`. Consumers (e.g. `ReaderViewModel`) use this
-    /// to bump a `@Published` SwiftUI counter so the reader re-renders.
-    nonisolated(unsafe) var onPageReadyNSImage: ((Int, NSImage) -> Void)?
-
     /// Storage for per-page low-res thumbnails. Held on a separate actor
     /// (`ThumbnailStore`) so the thumbnail decode work — which is heavy
     /// CPU but doesn't touch any of this manager's full-res cache state —
@@ -106,9 +101,7 @@ actor MetalPageManager {
     }
 
     /// O(1) NSImage lookup — returns the pre-converted NSImage if present,
-    /// or nil if nothing is decoded for that page yet. Intended for SwiftUI
-    /// render paths that need to bail and wait for the `onPageReadyNSImage`
-    /// callback to trigger a re-render.
+    /// or nil if nothing is decoded for that page yet.
     nonisolated func nsImage(for pageIndex: Int) -> NSImage? {
         nsImageCache.object(forKey: NSNumber(value: pageIndex))
     }
@@ -288,13 +281,8 @@ actor MetalPageManager {
             if decodedPages[i] != nil { continue }
             if pendingPages.contains(i) { continue }
             let source = pages[i].source
-            guard let buffer = await decodePage(pageIndex: i, from: source),
-                  let image  = nsImage(for: i) else { continue }
+            guard let buffer = await decodePage(pageIndex: i, from: source) else { continue }
             _ = buffer  // buffer retained by decodedPages via store(); this ref keeps ARC honest
-
-            if let cb = onPageReadyNSImage {
-                await MainActor.run { cb(i, image) }
-            }
         }
     }
 

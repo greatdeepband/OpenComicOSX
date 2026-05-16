@@ -8,13 +8,12 @@ struct MagnifierView: View {
     let cursorInImageView: CGPoint
     let imageViewSize: CGSize
 
-    private let loupeRadius: CGFloat = 270
     private let magnification: CGFloat = 1.45
     private let borderWidth: CGFloat = 3.0
 
     var body: some View {
         loupeContent
-            .frame(width: loupeRadius * 2, height: loupeRadius * 2)
+            .frame(width: ReaderConstants.loupeRadius * 2, height: ReaderConstants.loupeRadius * 2)
             .clipShape(Circle())
             .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: borderWidth))
             .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)

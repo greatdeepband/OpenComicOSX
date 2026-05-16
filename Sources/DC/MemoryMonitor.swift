@@ -69,11 +69,12 @@ final class MemoryMonitor: ObservableObject {
     func start(library: LibraryViewModel, interval: TimeInterval = 5) {
         self.library = library
         Task { await sample() }  // immediate first sample
-        print("Memory status: \(memoryStatus)")
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in await self?.sample() }
         }
-        Task { await DCLogger.shared.log("MEMORY_MONITOR started (interval=\(Int(interval))s)") }
+        Task { [memoryStatus] in
+            await DCLogger.shared.log("MEMORY_MONITOR started (interval=\(Int(interval))s) status=\(memoryStatus)")
+        }
     }
 
     func stop() {

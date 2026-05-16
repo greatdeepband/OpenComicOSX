@@ -757,7 +757,6 @@ extension MetalPageView {
         /// late-resolving stale Task paint over the newest request.
         var loupeTaskID: UInt64 = 0
         var loupeTask: Task<Void, Never>?
-        let loupeRadius: CGFloat = 270
 
         init(
             onPageChanged: @escaping (Int) -> Void,

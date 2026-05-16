@@ -93,7 +93,7 @@ struct ReaderView: View {
         .ignoresSafeArea(.container, edges: .top)
         .background(FullSizeTitleBarConfigurator())
         .navigationTitle(vm.comic.title)
-        .onAppear  { KeyMonitor.shared.start(handler: handleKey); let msg = "ReaderView.onAppear — readingMode=\(vm.readingMode), currentPage=\(vm.currentPage), savedScrollOffset=\(String(describing: vm.savedScrollOffset))"; print("[DEBUG] \(msg)"); Task { await DCLogger.shared.log(msg) } }
+        .onAppear { KeyMonitor.shared.start(handler: handleKey); Task { await DCLogger.shared.log("ReaderView.onAppear — readingMode=\(vm.readingMode), currentPage=\(vm.currentPage), savedScrollOffset=\(String(describing: vm.savedScrollOffset))") } }
         .onDisappear { if library.openComic == nil { KeyMonitor.shared.stop() } }
     }
 
