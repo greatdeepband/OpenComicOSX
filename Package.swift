@@ -22,6 +22,11 @@ let package = Package(
             resources: [
                 .process("Shaders.metal")
             ]
+        ),
+        .testTarget(
+            name: "DCTests",
+            dependencies: ["DC"],
+            path: "Tests/DCTests"
         )
     ]
 )

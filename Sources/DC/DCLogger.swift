@@ -1,12 +1,25 @@
 import Foundation
 
 /// Lightweight debug logger. Writes timestamped lines to /tmp/dc_debug.log.
-/// Enable/disable at compile time via the DEBUG_PAGES flag, or flip the runtime switch.
+///
+/// Default behaviour:
+///   • DEBUG builds — enabled. Log captures everything for live debugging.
+///   • Release builds — disabled. Release users don't write /tmp/dc_debug.log
+///     by default. Flip `DCLogger.shared.enabled = true` at runtime (e.g.
+///     when guiding a user through reproducing a bug report) to capture.
+///
+/// `enabled` is a runtime switch so a release build can still be coaxed into
+/// logging without rebuilding — useful for bug-report triage.
 actor DCLogger {
     static let shared = DCLogger()
 
-    /// Set to false to silence all output without recompiling.
+    /// Set to true to capture, false to silence. Default differs per
+    /// build configuration (see type doc).
+    #if DEBUG
     var enabled = true
+    #else
+    var enabled = false
+    #endif
 
     private let logURL = URL(fileURLWithPath: "/tmp/dc_debug.log")
     private var handle: FileHandle?

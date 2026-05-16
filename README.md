@@ -12,7 +12,7 @@ A native macOS comic book reader built with SwiftUI, AppKit, and Metal. Designed
 - **Fast library load:** background parallel thumbnail extraction with an `NSCache` + disk-backed fallback keyed by FNV-1a content hash.
 - **Per-comic persistence:** remembers page index, reading mode, exact scroll offset, and page count in `UserDefaults`.
 - **Magnifier loupe:** left-click and hold on any page (all four reading modes) for a 1.45× circular loupe centred on the cursor.
-- **GPU-accelerated rendering across every reading mode:** Metal pipeline with two LRU rings (decoded `CVPixelBuffer`s and uploaded `MTLTexture`s, 10 entries each). Vertical modes use native `NSScrollView.magnification` for zoom; single/double use frame-resize zoom with the documentView sized to fit the viewport.
+- **GPU-accelerated rendering across every reading mode:** Metal pipeline with three LRU rings (decoded `CVPixelBuffer`s and uploaded full-res `MTLTexture`s at 24 entries each, plus a 200-entry thumbnail `MTLTexture` ring that fills the placeholder tier during fast scroll). Vertical modes use native `NSScrollView.magnification` for zoom; single/double use frame-resize zoom with the documentView sized to fit the viewport.
 
 ## Architecture
 
@@ -112,9 +112,10 @@ The loupe is one unified `MagnifierView` instance across all four reading modes,
 | Layer | Scope | Cap |
 |---|---|---|
 | `NSCache` thumbnails + FNV-1a disk fallback | Library grid | 600 entries |
-| `MetalPageManager.decodedPages` | All reading modes — `CVPixelBuffer` ring | 10 |
-| `MetalPageManager.nsImageCache` | All reading modes — `NSImage` fast-path (paired with CVPixelBuffer ring, evicted in lockstep) | 10 |
-| `MetalPageRenderer.textureRing` | Metal-backed modes — `MTLTexture` ring | 10 |
+| `MetalPageManager.decodedPages` | All reading modes — `CVPixelBuffer` ring | 24 |
+| `MetalPageManager.nsImageCache` | All reading modes — `NSImage` fast-path (paired with CVPixelBuffer ring, evicted in lockstep) | 24 |
+| `MetalPageRenderer.textureRing` | Metal-backed modes — full-res `MTLTexture` ring | 24 |
+| `MetalPageRenderer.thumbnailRing` | All reading modes — low-res `MTLTexture` placeholder ring (filled by parallel pre-scan, ~108 MB GPU for 200 thumbs at 300×450 BGRA) | 200 |
 | Loupe NSImage | Last cursored page only | 1 |
 
 Since v0.9.0, one `MetalPageManager` is owned by `ReaderViewModel` and injected into every `MetalPageView` instance, so all four reading modes share the same decode cache. `PageImageCache` was retired in v0.9.0.
@@ -142,9 +143,43 @@ cd /path/to/DC_dev
 3. Writes `Info.plist` + entitlements, copies `Shaders.metal` (the renderer compiles it at runtime if the SPM default library is not present in the bundle).
 4. Ad-hoc signs the binary.
 
+### Test
+
+```bash
+swift test
+```
+
+Runs the `DCTests` target (baseline coverage of `ComicFormat` extension parsing, `ReadingPositionStore` UserDefaults round-trip, and `TextureRingBuffer` LRU semantics — the last requires a Metal device, present on every supported macOS).
+
+GitHub Actions runs `swift build -c release` and `swift test --parallel` on every push and PR via `.github/workflows/swift.yml`.
+
 ### External dependencies
 
-- [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) — native CBZ extraction and entry streaming.
+- [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) — native CBZ extraction and entry streaming. MIT-licensed.
+- **`unar` / `lsar`** — bundled binaries from [The Unarchiver](https://theunarchiver.com/command-line), used for CBR (RAR) and CB7 (7-Zip) extraction. LGPL-2.1-or-later; see [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) for source-availability statement and relinking instructions.
+- System `tar` (BSD tar, ships with macOS) — used for CBT (Tar) extraction. No bundling.
+
+### Keyboard shortcuts (reader)
+
+| Key | Single / Double page | Vertical / Vertical Double |
+|---|---|---|
+| `←` / `A` | Previous page | — |
+| `→` / `D` | Next page | — |
+| `↑` / `W` | Zoom in | — (use ⌘+scroll or pinch — grows the window in ±10% steps) |
+| `↓` / `S` | Zoom out | — |
+| `Q` | Open previous comic in gallery | Open previous comic in gallery |
+| `E` | Open next comic in gallery | Open next comic in gallery |
+| `Backspace` / `Z` | Back to library | Back to library |
+| `⌘F` | Toggle full screen | Toggle full screen |
+| `1` | Switch to Single Page mode | Switch to Single Page mode |
+| `2` | Switch to Double Page mode | Switch to Double Page mode |
+| `3` | Switch to Vertical mode | Switch to Vertical mode |
+| `4` | Switch to Vertical Double mode | Switch to Vertical Double mode |
+
+Mouse / trackpad:
+- **Left-click and hold** anywhere on a page — 1.45× circular magnifier loupe centred on the cursor (every reading mode).
+- **⌘+scroll** or **pinch** — zoom (in vertical modes this becomes a ±10% window-resize step; in single/double it scales the page).
+- **Double-click** (single / double page only) — reset zoom to fit-to-window.
 
 ### Notes for future sessions
 
@@ -159,3 +194,11 @@ cd /path/to/DC_dev
 - **macOS 26 (Tahoe) scroll-into-header bug.** If an `NSScrollView`'s frame does not stretch top-to-bottom of its window's content view, its scrolled content will render OVER any sibling above it in the layout tree — even with `masksToBounds = true`, even with SwiftUI `.clipped()`, even after removing `magnification`. Reserve top-bar space via native `NSScrollView.contentInsets` (frame stays full-height; clip view honors the inset as a non-scrollable band), **not** SwiftUI `.padding(.top, …)`. `MetalPageView` exposes a `topContentInset` parameter for this. Also set `scrollView.borderType = .noBorder` as belt-and-suspenders (independently disables the buggy render path). Reference: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/.
 - **CAMetalLayer + `NSScrollView.magnification` is unsafe.** The direct-to-surface Metal drawable bypasses ancestor layer clipping when a scale transform is present on the `clipView`. In `MetalPageView`, vertical modes use native magnification (fast CALayer transform) but single-page and double-spread zoom via documentView frame-resize (`scrollView.magnification` pinned to 1.0). The scale change flows through `Coordinator.rebuildLayout()` which resizes the documentView frame around the centered content. `recenterIfContentFits()` re-centers the documentView when zoomed content is smaller than the viewport, so zoom-out doesn't leave content off-center.
 - **NSEvent local monitors vs overlay views.** `MetalPageView` uses `NSEvent.addLocalMonitorForEvents` (scoped to its window) for cmd-scroll zoom, double-click fit-to-width, pinch zoom, and the loupe. An overlay sibling view would block scroll-wheel / pinch gestures from reaching `NSScrollView`; monitors observe events without consuming them. Scope monitors to the scroll view's own window (`event.window === scrollView.window`) so a monitor installed by one reader instance doesn't fire for events in another window.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to set up the dev environment, the testing workflow, and — importantly — a list of **load-bearing comments / workarounds** that look like cleanup opportunities but are not.
+
+## License
+
+Open Comic itself is [MIT-licensed](LICENSE). The bundled `unar` / `lsar` binaries are LGPL-2.1-or-later; full attribution + relinking instructions are in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md). The full LGPL-2.1 text is in [`LICENSES/LGPL-2.1.txt`](LICENSES/LGPL-2.1.txt).

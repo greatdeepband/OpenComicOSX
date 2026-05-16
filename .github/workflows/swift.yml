@@ -1,0 +1,43 @@
+name: Swift
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test (macOS 14)
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        # macos-14 runners ship multiple Xcode versions; pin to the latest
+        # 15.x available so swift-tools-version: 5.10 resolves correctly.
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build (release)
+        run: swift build -c release
+
+      - name: Test
+        run: swift test --parallel
