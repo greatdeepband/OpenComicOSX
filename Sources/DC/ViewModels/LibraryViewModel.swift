@@ -211,8 +211,14 @@ final class LibraryViewModel: ObservableObject {
     // MARK: - Persistence helpers for new UI state
 
     private func saveSelectedSection() {
-        guard let value = selectedSection,
-              let data = try? JSONEncoder().encode(value) else { return }
+        guard let value = selectedSection else { return }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(value)
+        } catch {
+            Task { await DCLogger.shared.log("[PERSIST] selectedSection encode failed: \(error)") }
+            return
+        }
         UserDefaults.standard.set(data, forKey: "library.selectedSection")
     }
 
@@ -222,9 +228,12 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func loadNewLibraryState() {
-        if let data = UserDefaults.standard.data(forKey: "library.selectedSection"),
-           let decoded = try? JSONDecoder().decode(LibrarySection.self, from: data) {
-            selectedSection = decoded
+        if let data = UserDefaults.standard.data(forKey: "library.selectedSection") {
+            do {
+                selectedSection = try JSONDecoder().decode(LibrarySection.self, from: data)
+            } catch {
+                Task { await DCLogger.shared.log("[PERSIST] selectedSection decode failed: \(error) — falling back to default") }
+            }
         }
         if let raw = UserDefaults.standard.string(forKey: "library.cardSize"),
            let size = CardSize(rawValue: raw) {
@@ -567,15 +576,26 @@ final class LibraryViewModel: ObservableObject {
     }
 
     private func loadFavorites() {
-        guard let data = UserDefaults.standard.data(forKey: favoritesKey),
-              let paths = try? JSONDecoder().decode([String].self, from: data)
-        else { return }
+        guard let data = UserDefaults.standard.data(forKey: favoritesKey) else { return }
+        let paths: [String]
+        do {
+            paths = try JSONDecoder().decode([String].self, from: data)
+        } catch {
+            Task { await DCLogger.shared.log("[PERSIST] favorites decode failed: \(error) — favorites list will appear empty") }
+            return
+        }
         favoriteURLs = paths.compactMap { URL(string: $0) }
     }
 
     private func saveFavorites() {
         let paths = favoriteURLs.map { $0.absoluteString }
-        guard let data = try? JSONEncoder().encode(paths) else { return }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(paths)
+        } catch {
+            Task { await DCLogger.shared.log("[PERSIST] favorites encode failed: \(error) — favorites change not persisted") }
+            return
+        }
         UserDefaults.standard.set(data, forKey: favoritesKey)
     }
 
@@ -590,14 +610,22 @@ final class LibraryViewModel: ObservableObject {
     }
 
     private func loadRecents() {
-        guard let data = UserDefaults.standard.data(forKey: recentsKey),
-              let decoded = try? JSONDecoder().decode([RecentComic].self, from: data)
-        else { return }
-        recentComics = decoded
+        guard let data = UserDefaults.standard.data(forKey: recentsKey) else { return }
+        do {
+            recentComics = try JSONDecoder().decode([RecentComic].self, from: data)
+        } catch {
+            Task { await DCLogger.shared.log("[PERSIST] recents decode failed: \(error) — Continue Reading will appear empty") }
+        }
     }
 
     private func saveRecents() {
-        guard let data = try? JSONEncoder().encode(recentComics) else { return }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(recentComics)
+        } catch {
+            Task { await DCLogger.shared.log("[PERSIST] recents encode failed: \(error) — last-opened state not persisted") }
+            return
+        }
         UserDefaults.standard.set(data, forKey: recentsKey)
     }
 
@@ -677,14 +705,25 @@ final class LibraryViewModel: ObservableObject {
     }
 
     private func loadGalleries() {
-        guard let data = UserDefaults.standard.data(forKey: galleriesKey),
-              let decoded = try? JSONDecoder().decode([Gallery].self, from: data)
-        else { return }
-        galleries = decoded
+        guard let data = UserDefaults.standard.data(forKey: galleriesKey) else { return }
+        do {
+            galleries = try JSONDecoder().decode([Gallery].self, from: data)
+        } catch {
+            // Galleries hold user-curated content — if this decode fails, the user's
+            // library appears empty. Log loudly so a regression can be diagnosed
+            // before the user has to report "my library disappeared".
+            Task { await DCLogger.shared.log("[PERSIST] galleries decode failed: \(error) — library will appear empty until persistence is repaired") }
+        }
     }
 
     private func saveGalleries() {
-        guard let data = try? JSONEncoder().encode(galleries) else { return }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(galleries)
+        } catch {
+            Task { await DCLogger.shared.log("[PERSIST] galleries encode failed: \(error) — library mutation not persisted; restart will revert") }
+            return
+        }
         UserDefaults.standard.set(data, forKey: galleriesKey)
     }
 

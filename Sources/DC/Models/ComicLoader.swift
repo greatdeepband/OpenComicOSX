@@ -120,7 +120,13 @@ enum ComicLoader {
 
     /// CBZ-specific fast path: streams the cover entry and returns a CGImage at maxPixels.
     private static func loadCoverCGImageCBZ(url: URL, maxPixels: Int) -> CGImage? {
-        guard let archive = try? Archive(url: url, accessMode: .read) else { return nil }
+        let archive: Archive
+        do {
+            archive = try Archive(url: url, accessMode: .read)
+        } catch {
+            Task { await DCLogger.shared.log("[CBZ] cover-fast-path archive open failed for \(url.lastPathComponent): \(error)") }
+            return nil
+        }
         let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
         let entries = archive
             .filter { $0.type == .file
@@ -149,7 +155,13 @@ enum ComicLoader {
     }
 
     private static func loadCoverCBZ(url: URL) -> NSImage? {
-        guard let archive = try? Archive(url: url, accessMode: .read) else { return nil }
+        let archive: Archive
+        do {
+            archive = try Archive(url: url, accessMode: .read)
+        } catch {
+            Task { await DCLogger.shared.log("[CBZ] cover archive open failed for \(url.lastPathComponent): \(error)") }
+            return nil
+        }
 
         // Find the first image entry by sorted path — no extraction needed.
         let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
@@ -335,11 +347,19 @@ enum ComicLoader {
         // scrolling — page decodes read from memory instead of re-opening the
         // ZIP file on disk for every page.
         // Memory cost: compressed file size (50-200 MB typical).
-        guard let archiveData = try? Data(contentsOf: url) else {
-            throw LoadError.extractionFailed("Could not read ZIP archive from disk.")
+        let archiveData: Data
+        do {
+            archiveData = try Data(contentsOf: url)
+        } catch {
+            Task { await DCLogger.shared.log("[CBZ] Data(contentsOf:) failed for \(url.lastPathComponent): \(error)") }
+            throw LoadError.extractionFailed("Could not read ZIP archive from disk: \(error.localizedDescription)")
         }
-        guard let archive = try? Archive(data: archiveData, accessMode: .read) else {
-            throw LoadError.extractionFailed("Could not open ZIP archive.")
+        let archive: Archive
+        do {
+            archive = try Archive(data: archiveData, accessMode: .read)
+        } catch {
+            Task { await DCLogger.shared.log("[CBZ] Archive(data:) failed for \(url.lastPathComponent): \(error)") }
+            throw LoadError.extractionFailed("Could not open ZIP archive: \(error.localizedDescription)")
         }
         let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif"])
         let entries = archive
@@ -486,8 +506,14 @@ enum ComicLoader {
     /// Loads the cache manifest if it exists.
     private static func loadManifest(for cacheDir: URL) -> CacheManifest? {
         let url = manifestURL(for: cacheDir)
+        // Absent file is the normal cold-cache path; only log decode failures.
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(CacheManifest.self, from: data)
+        do {
+            return try JSONDecoder().decode(CacheManifest.self, from: data)
+        } catch {
+            Task { await DCLogger.shared.log("[CACHE] Manifest decode failed at \(url.path): \(error) — will rebuild cache") }
+            return nil
+        }
     }
 
     /// Saves a cache manifest after successful extraction.
@@ -500,8 +526,18 @@ enum ComicLoader {
             sourcePath: sourceURL.path,
             sourceMtime: mtime
         )
-        guard let data = try? JSONEncoder().encode(manifest) else { return }
-        try? data.write(to: manifestURL(for: cacheDir))
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(manifest)
+        } catch {
+            Task { await DCLogger.shared.log("[CACHE] Manifest encode failed for \(sourceURL.lastPathComponent): \(error)") }
+            return
+        }
+        do {
+            try data.write(to: manifestURL(for: cacheDir))
+        } catch {
+            Task { await DCLogger.shared.log("[CACHE] Manifest write failed at \(manifestURL(for: cacheDir).path): \(error)") }
+        }
     }
 
     /// Returns true if the cache doesn't exist, the manifest is missing, or the content
