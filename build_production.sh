@@ -95,8 +95,8 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
     <key>CFBundleDisplayName</key><string>Open Comic</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.11.2</string>
-    <key>CFBundleVersion</key><string>0.11.2</string>
+    <key>CFBundleShortVersionString</key><string>0.14.0</string>
+    <key>CFBundleVersion</key><string>0.14.0</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.graphics-design</string>
     <key>NSHumanReadableCopyright</key><string>Copyright 2026. All rights reserved.</string>

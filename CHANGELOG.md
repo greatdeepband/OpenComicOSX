@@ -1,5 +1,45 @@
 # DC Reader — Changelog
 
+## v0.14.0 — 2026-05-17 — OSS readiness milestone + comic-switch polish
+
+This release closes the open-source readiness audit started 2026-05-13: MIT license, LGPL attribution for the bundled `unar` / `lsar`, a baseline test target, GitHub Actions CI, and a `CONTRIBUTING.md` that documents the project's live-verification protocol and load-bearing workarounds. On top of that, the comic-switch transition is now visually smooth — the toolbar icon "grey settle" during the cold-render gap is gone, freshly-decoded pages no longer wait for a mouse move to appear, and the library no longer races single-tap-select against double-tap-open.
+
+### Added
+- **MIT LICENSE.** Open Comic itself is now MIT-licensed. The bundled `unar` / `lsar` binaries remain LGPL-2.1-or-later; full attribution + source-availability statement + relinking instructions live in `THIRD_PARTY_LICENSES.md`, with the full LGPL-2.1 text under `LICENSES/LGPL-2.1.txt`. The README and the in-bundle resources both point at the same source.
+- **Baseline unit test target.** `Tests/DCTests/` covers the pure-logic units that don't need a running app: `ComicFormatTests` (file-extension parsing across CBZ / CBR / CB7 / CBT / PDF), `ReadingPositionStoreTests` (UserDefaults round-trip for page index, reading mode, scroll offset, page count), `TextureRingBufferTests` (LRU eviction + ring-position reuse). Run with `swift test`. Metal-touching code stays live-verified inside `OpenComic.app` per the protocol in `CONTRIBUTING.md`.
+- **GitHub Actions CI** at `.github/workflows/swift.yml`. macos-14 runner, Xcode 15.4 (matches `swift-tools-version: 5.10`), `swift build -c release` + `swift test --parallel`, SwiftPM dependency cache keyed on `Package.resolved`. Runs on `push` and `pull_request` against `main`.
+- **`CONTRIBUTING.md`.** Branch / test / build workflow, live-verification protocol ("the unit-test target covers pure logic only — UI correctness comes from driving the app"), test-all-four-reading-modes guidance when touching `MetalPageView` or its layout/render extensions, the "don't `rm /tmp/dc_debug.log` while the app is running" rule, and explicit pointers at the load-bearing workarounds (3-stage render retry, synchronous scroll-restore before `updateVisibleRange`, macOS 26 Tahoe scroll-into-header inset pattern, Hume `presentsWithTransaction` triplet).
+- **New comics default to Single Page reading mode** instead of inheriting the user's last mode from a different comic. The previous behaviour leaked the wrong mode across comics with very different shapes — a Vertical-Double setting from a long manga applied awkwardly to a 22-page Western comic. A fresh `UserDefaults` entry is now treated as "no preference yet" and lands the reader in `.singlePage` instead of falling through to the global last-used value.
+
+### Changed
+- **`DCLogger.enabled` defaults to `true` in DEBUG builds and `false` in release builds** instead of `true` unconditionally. Release builds no longer write to `/tmp/dc_debug.log` by default — flip at runtime via `DCLogger.shared.enabled = true` if you're capturing a bug report. The actor itself is unchanged, just the default.
+- **Reader toolbar capsules drop `.interactive(true)` from `glassEffect`.** Each capsule's buttons already have `.buttonStyle(.plain)` interaction, so capsule-level hover/press reactivity was duplicative — and it was leaking hover state across `.id(comic.url)`-driven view-tree rebuilds: the cursor stays in place while the tree tears down + remounts, the new capsule instantly enters hover, and the exit event for the now-gone old capsule sometimes never fires, leaving the new capsule visually stuck "highlighted" until the next mouse move.
+- **Reader backdrop is now `Color(NSColor.windowBackgroundColor)` instead of `Color.black`.** Under the floating Liquid-Glass capsules, the system-appropriate window background is sampled instead of solid black during the cold-render gap, so the toolbar's vibrancy-driven foreground colour stays stable.
+- **`scripts/make_app.sh`, `scripts/memory_ring_test.sh`, `scripts/make_icns.py` no longer reference hardcoded `/Volumes/Media/__Manus copy/DC` or `/home/ubuntu/…` paths.** All three now resolve their working directory relative to their own location, matching `build_app.sh` / `build_production.sh`.
+
+### Fixed
+- **Toolbar icons no longer flash from grey to dark during the cold-render gap on comic switch.** The reader's SwiftUI backdrop was `Color.black`, and the `CAMetalLayer` clear colour is also black — so between the new `ReaderView` mounting (via `.id(comic.url)`) and the first successful Metal draw, the area under the floating Liquid-Glass toolbar capsules was solid black. macOS 26's Liquid Glass auto-adapts `Color.primary` based on the luminance underneath the capsule for legibility: over black it drifts toward light/grey; over normal page art it resolves to dark. As pages painted in, the icons interpolated through that adaptation — visible as a "grey settle" transition. Switching the backdrop to `Color(NSColor.windowBackgroundColor)` means the capsules never sample solid black during the gap, and the icon colour stays stable end-to-end. The black phase was always there — making the page paint faster (the CATransaction fix below) is what exposed the adaptation as a visible transition rather than a static state.
+- **Freshly-decoded pages no longer wait for a mouse move or scroll to appear.** Renders triggered from `onTextureReady` (the prefetch upload landing on the main actor) had no enclosing CATransaction — with `CAMetalLayer.presentsWithTransaction = true` the drawable was queued for "next CATransaction commit", which only fired when some other AppKit event woke the runloop. Wrapped `drawable.present()` in an explicit `CATransaction.begin()` / `commit()` pair so the drawable always commits in-frame regardless of who triggered the render. Inside an already-open AppKit transaction (scroll, resize) this nests harmlessly.
+- **Single-tap-to-select on a library card no longer races double-tap-to-open.** Two stacked `.onTapGesture` modifiers (count: 2 for open, count: 1 for select) had SwiftUI's gesture arbiter occasionally swallowing the double-tap as two single-taps. Replaced the count-1 selection gesture with `.simultaneousGesture(TapGesture().onEnded { … })` so it can fire alongside the open recognizer without competing for arbitration. Affects all three card grids (`LibraryGridPane`, `LibraryGalleryPane`, `DraggableComicGrid`).
+- **Decode and persist failures now log via `DCLogger` instead of being silently swallowed by `try?`.** `ComicLoader` (CBZ entry decode, PDF page extraction, archive `Process.run`), `LibraryViewModel` (cache directory create / remove). Failures still don't bubble up to the user (callers expect optional return), but they leave a breadcrumb in `/tmp/dc_debug.log` when debug logging is enabled.
+
+### OSS hygiene
+- Three verified code-quality wins from a focused cleanup pass — `LoupeOverlayState` marked private (was visible across the module despite being a callback payload); rationale comments added to `MemoryMonitor`'s memory thresholds; magic numbers eliminated where they had only one call site.
+- Git tags for `v0.11.0` / `.1` / `.2`, `v0.12.0` / `.1` / `.2`, and `v0.13.0` retroactively applied so `git tag -l` reflects the CHANGELOG.
+
+### Files
+- `LICENSE`, `LICENSES/LGPL-2.1.txt`, `THIRD_PARTY_LICENSES.md`, `CONTRIBUTING.md` — new. Commits `e1fd0dd`, `9225394`.
+- `Tests/DCTests/{ComicFormatTests,ReadingPositionStoreTests,TextureRingBufferTests}.swift`; `Package.swift` adds `testTarget`. Commit `9225394`.
+- `.github/workflows/swift.yml` — new. Commit `9225394`.
+- `Sources/DC/DCLogger.swift` — `enabled` default `#if DEBUG`. Commit `9225394`.
+- `scripts/make_app.sh`, `scripts/memory_ring_test.sh`, `scripts/make_icns.py` — portable paths. Commit `9225394`.
+- `Sources/DC/Models/ComicLoader.swift`, `Sources/DC/ViewModels/LibraryViewModel.swift` — DCLogger calls replace `try?` swallows. Commit `cab6a6e`.
+- `Sources/DC/ViewModels/ReaderViewModel.swift` — single-page default for fresh comics. Commit `22dac87`.
+- `Sources/DC/Views/ReaderView.swift`, `Sources/DC/Views/ReaderToolbar.swift`, `Sources/DC/Views/MetalPageView+Render.swift`, `Sources/DC/Views/LibraryView.swift` — comic-switch polish bundle. Commit `284980f`.
+- `Sources/DC/Views/MetalPageView.swift`, `Sources/DC/MemoryMonitor.swift` — quality wins. Commit `7c72dc3`.
+
+---
+
 ## v0.13.0 — 2026-05-14 — Page thumbnail placeholder tier (eliminates fast-scroll black gaps)
 
 ### Added
