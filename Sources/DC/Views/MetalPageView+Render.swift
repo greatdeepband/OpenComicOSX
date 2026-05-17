@@ -181,8 +181,25 @@ extension MetalPageView.Coordinator {
         // Without this triplet, AppKit holds the previous-size drawable
         // across the resize gap and stretches it via the layer's
         // contentsGravity for one frame on every resize tick.
+        //
+        // Step 3 requires a CATransaction to be open. AppKit-driven
+        // renders (scroll, resize) run inside one of AppKit's own
+        // transactions, so `drawable.present()` commits in-frame there.
+        // But renders fired from `DispatchQueue.main.async`, `asyncAfter`,
+        // or a Task's `MainActor.run` continuation (notably the
+        // `onTextureReady` path on cold open) have NO enclosing
+        // transaction — `presentsWithTransaction = true` then queues
+        // the drawable for "next CATransaction commit", which may not
+        // fire until some other AppKit event wakes the runloop. The
+        // user-visible symptom: a freshly-decoded page sits invisible
+        // until the user scrolls or moves the mouse. Wrap the present
+        // in an explicit CATransaction so the drawable always commits
+        // immediately, regardless of who triggered the render. Inside
+        // an already-open AppKit transaction this nests harmlessly.
         commandBuffer.commit()
         commandBuffer.waitUntilScheduled()
+        CATransaction.begin()
         drawable.present()
+        CATransaction.commit()
     }
 }

@@ -323,7 +323,7 @@ struct LibraryGridPane: View {
                                 isSelected: selectedURL == url
                             )
                             .onTapGesture(count: 2) { Task { await library.load(url: url) } }
-                            .onTapGesture { selectedURL = url }
+                            .simultaneousGesture(TapGesture().onEnded { selectedURL = url })
                             .contextMenu {
                                 Button("Open") { Task { await library.load(url: url) } }
                                 Divider()
@@ -468,7 +468,7 @@ struct LibraryGalleryPane: View {
                                 isSelected: selectedURL == url
                             )
                             .onTapGesture(count: 2) { Task { await library.load(url: url) } }
-                            .onTapGesture { selectedURL = url }
+                            .simultaneousGesture(TapGesture().onEnded { selectedURL = url })
                             .contextMenu {
                                 Button("Open") { Task { await library.load(url: url) } }
                                 Divider()
@@ -1161,7 +1161,7 @@ struct DraggableComicGrid: View {
                     )
                 )
                 .onTapGesture(count: 2) { Task { await library.load(url: url) } }
-                .onTapGesture { selectedURL = url }
+                .simultaneousGesture(TapGesture().onEnded { selectedURL = url })
                 .contextMenu {
                     Button("Open") { Task { await library.load(url: url) } }
                     Divider()

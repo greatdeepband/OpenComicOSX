@@ -61,7 +61,16 @@ private struct ToolbarCapsule<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         if #available(macOS 26.0, *) {
-            content.glassEffect(.regular.interactive(true), in: .capsule)
+            // `.regular` (no `.interactive(true)`) — the buttons inside the
+            // capsule have their own `.buttonStyle(.plain)` interaction, so
+            // capsule-level hover/press reactivity is duplicative. It also
+            // leaks hover state across `.id(comic.url)`-driven view-tree
+            // rebuilds on comic switch: cursor stays in place while the
+            // tree tears down + remounts, the new capsule instantly enters
+            // hover, and sometimes the exit event for the now-gone old
+            // capsule never fires — leaving the new capsule visually
+            // stuck "highlighted" until the next mouse move.
+            content.glassEffect(.regular, in: .capsule)
         } else {
             content
                 .background(.ultraThinMaterial, in: Capsule())

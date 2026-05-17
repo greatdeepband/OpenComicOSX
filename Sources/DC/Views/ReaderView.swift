@@ -53,7 +53,7 @@ struct ReaderView: View {
             // See: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/
             GeometryReader { geo in
                 ZStack {
-                    Color.black
+                    Color(NSColor.windowBackgroundColor)
                     // NOTE: no .padding(.top, readerTopBarHeight) here —
                     // applying SwiftUI padding frames the NSScrollView at
                     // Y=topBarHeight, which defeats the macOS 26 Tahoe
