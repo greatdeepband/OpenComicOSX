@@ -91,33 +91,10 @@ struct LibraryView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: debugMode)
-        .sheet(isPresented: Binding(
-            get: { library.pendingCompressionURLs != nil },
-            set: { if !$0 { library.cancelPendingCompression() } }
-        )) {
-            CompressionPromptSheet(
-                title: library.pendingCompressionTitle,
-                detailLine: library.pendingCompressionDetail,
-                onConfirm: { delete, remember in
-                    library.confirmPendingCompression(deleteOriginals: delete, remember: remember)
-                },
-                onCancel: { library.cancelPendingCompression() }
-            )
-        }
-        .sheet(isPresented: Binding(
-            get: {
-                switch library.compressionService.state {
-                case .idle: return false
-                default: return true
-                }
-            },
-            set: { _ in /* dismissed via the sheet's Done button */ }
-        )) {
-            CompressionProgressSheet(
-                service: library.compressionService,
-                onDismiss: { /* state already reset by service.acknowledge() */ }
-            )
-        }
+        .modifier(CompressionSheetsModifier(
+            library: library,
+            service: library.compressionService
+        ))
     }
 
     private func handleLibraryDrop(providers: [NSItemProvider]) -> Bool {
@@ -1454,5 +1431,49 @@ struct RenameGallerySheet: View {
         }
         .padding(24)
         .frame(minWidth: 360)
+    }
+}
+
+// MARK: - Compression sheets
+
+/// Wraps the two compression-related .sheet modifiers in a ViewModifier so
+/// SwiftUI subscribes to the nested `CompressionService` via `@ObservedObject`.
+/// Without this, `library.compressionService.state` transitions don't propagate
+/// to the .sheet binding (environment-object observation doesn't chain into
+/// nested observables) and the progress sheet would stick on "Idle." after the
+/// Done button reset state to `.idle`.
+private struct CompressionSheetsModifier: ViewModifier {
+    @ObservedObject var library: LibraryViewModel
+    @ObservedObject var service: CompressionService
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: Binding(
+                get: { library.pendingCompressionURLs != nil },
+                set: { if !$0 { library.cancelPendingCompression() } }
+            )) {
+                CompressionPromptSheet(
+                    title: library.pendingCompressionTitle,
+                    detailLine: library.pendingCompressionDetail,
+                    onConfirm: { delete, remember in
+                        library.confirmPendingCompression(deleteOriginals: delete, remember: remember)
+                    },
+                    onCancel: { library.cancelPendingCompression() }
+                )
+            }
+            .sheet(isPresented: Binding(
+                get: {
+                    switch service.state {
+                    case .idle: return false
+                    default: return true
+                    }
+                },
+                set: { _ in /* dismissed via the sheet's Done button */ }
+            )) {
+                CompressionProgressSheet(
+                    service: service,
+                    onDismiss: { /* state already reset by service.acknowledge() */ }
+                )
+            }
     }
 }
