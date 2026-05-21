@@ -161,7 +161,13 @@ struct ReaderView: View {
             onMagnificationChanged: { newScale in
                 vm.setScaleFromScrollView(newScale)
             },
-            onLoupeOverlay: { state in metalLoupe = state }
+            onLoupeOverlay: { state in metalLoupe = state },
+            onPageNavSwipe: { offset in
+                if offset > 0 { vm.nextPage() } else { vm.previousPage() }
+            },
+            onComicNavSwipe: { offset in
+                library.openAdjacentComic(offset: offset, currentMode: vm.readingMode.rawValue)
+            }
         )
     }
 
@@ -186,7 +192,13 @@ struct ReaderView: View {
             onMagnificationChanged: { newScale in
                 vm.setScaleFromScrollView(newScale)
             },
-            onLoupeOverlay: { state in metalLoupe = state }
+            onLoupeOverlay: { state in metalLoupe = state },
+            onPageNavSwipe: { offset in
+                if offset > 0 { vm.nextPage() } else { vm.previousPage() }
+            },
+            onComicNavSwipe: { offset in
+                library.openAdjacentComic(offset: offset, currentMode: vm.readingMode.rawValue)
+            }
         )
     }
 

@@ -83,13 +83,26 @@ struct MetalPageView: NSViewRepresentable {
     /// ReaderView drives a SwiftUI MagnifierView overlay from this state so
     /// the loupe is naturally clipped to the reader frame.
     var onLoupeOverlay: ((LoupeOverlayState?) -> Void)?
+    /// Fires when a 2-finger horizontal trackpad swipe crosses the page-nav
+    /// threshold in single/double layouts. Argument is +1 (next) or -1 (prev).
+    /// Single/double only — vertical layouts ignore the gesture so the
+    /// natural 2-finger scroll still drives reading motion.
+    var onPageNavSwipe: ((Int) -> Void)?
+    /// Fires when a 3-finger horizontal trackpad swipe lands in single/double
+    /// layouts. Argument is +1 (next comic) or -1 (prev comic). Only fires
+    /// when the OS routes the swipe to the foreground app — if the user's
+    /// Trackpad preferences hand 3-finger gestures to Mission Control / Spaces,
+    /// our app never sees the event.
+    var onComicNavSwipe: ((Int) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onPageChanged: onPageChanged,
             onOffsetChanged: onOffsetChanged,
             onMagnificationChanged: onMagnificationChanged,
-            onLoupeOverlay: onLoupeOverlay
+            onLoupeOverlay: onLoupeOverlay,
+            onPageNavSwipe: onPageNavSwipe,
+            onComicNavSwipe: onComicNavSwipe
         )
     }
 
@@ -290,6 +303,8 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.installZoomWheelMonitor()
         context.coordinator.installDoubleClickMonitor()
         context.coordinator.installPinchMonitor()
+        context.coordinator.installPageSwipeMonitor()
+        context.coordinator.installComicSwipeMonitor()
 
         return scrollView
     }
@@ -735,6 +750,20 @@ extension MetalPageView {
         var zoomWheelMonitor: Any?
         var doubleClickMonitor: Any?
         var pinchMonitor: Any?
+        var pageSwipeMonitor: Any?
+        var comicSwipeMonitor: Any?
+
+        /// Per-gesture trackpad-swipe accumulators (`scrollingDeltaX/Y`,
+        /// summed across `.changed` phases). Reset on `.began` / `.ended`
+        /// / `.cancelled`. `swipeFired` gates the nav callback so one
+        /// gesture fires one nav action even if the user keeps dragging
+        /// past the threshold. `swipeFingerCount` is latched at `.began`
+        /// (2 = page nav, 3+ = comic nav) so mid-gesture finger lifts
+        /// don't switch the action.
+        var swipeAccumX: CGFloat = 0
+        var swipeAccumY: CGFloat = 0
+        var swipeFired: Bool = false
+        var swipeFingerCount: Int = 0
         var loupeImage: (page: Int, nsImage: NSImage)?
         /// The page the loupe is currently magnifying. Sticky across cursor
         /// excursions into row/column gaps and past document edges so the
@@ -758,16 +787,23 @@ extension MetalPageView {
         var loupeTaskID: UInt64 = 0
         var loupeTask: Task<Void, Never>?
 
+        var onPageNavSwipe: ((Int) -> Void)?
+        var onComicNavSwipe: ((Int) -> Void)?
+
         init(
             onPageChanged: @escaping (Int) -> Void,
             onOffsetChanged: @escaping (Double) -> Void,
             onMagnificationChanged: ((CGFloat) -> Void)?,
-            onLoupeOverlay: ((LoupeOverlayState?) -> Void)?
+            onLoupeOverlay: ((LoupeOverlayState?) -> Void)?,
+            onPageNavSwipe: ((Int) -> Void)? = nil,
+            onComicNavSwipe: ((Int) -> Void)? = nil
         ) {
             self.onPageChanged = onPageChanged
             self.onOffsetChanged = onOffsetChanged
             self.onMagnificationChanged = onMagnificationChanged
             self.onLoupeOverlay = onLoupeOverlay
+            self.onPageNavSwipe = onPageNavSwipe
+            self.onComicNavSwipe = onComicNavSwipe
         }
 
         deinit {
@@ -778,6 +814,12 @@ extension MetalPageView {
                 NSEvent.removeMonitor(monitor)
             }
             if let monitor = doubleClickMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            if let monitor = pageSwipeMonitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            if let monitor = comicSwipeMonitor {
                 NSEvent.removeMonitor(monitor)
             }
             if let monitor = pinchMonitor {
