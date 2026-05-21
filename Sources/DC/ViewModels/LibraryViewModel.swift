@@ -76,6 +76,19 @@ final class LibraryViewModel: ObservableObject {
     /// Ordered list of favorited comic URLs (most recently favorited first).
     @Published var favoriteURLs: [URL] = []
 
+    /// Cross-cutting service that handles single + batch CBZ compression.
+    /// Sheets (`CompressionPromptSheet`, `CompressionProgressSheet`) observe
+    /// this service directly.
+    @Published var compressionService = CompressionService()
+
+    /// Pending compression intent — set when the user triggers an action;
+    /// drives the prompt sheet. `nil` means "no prompt up". When the user
+    /// confirms in the prompt, we read `pendingCompressionURLs` and call
+    /// `compressionService.runBatch(...)`.
+    @Published var pendingCompressionURLs: [URL]? = nil
+    @Published var pendingCompressionTitle: String = ""
+    @Published var pendingCompressionDetail: String = ""
+
     // MARK: - New library UI state
 
     /// Currently selected sidebar row. Optional because SwiftUI `List`
@@ -206,6 +219,95 @@ final class LibraryViewModel: ObservableObject {
             changed = true
         }
         if changed { saveGalleries() }
+    }
+
+    // MARK: - Compression entry points
+
+    /// Triggered by the "Compress All Comics…" menu item.
+    func requestCompressAll() {
+        let urls = allComicURLs
+        let cbzCount = urls.filter { $0.pathExtension.lowercased() == "cbz" }.count
+        pendingCompressionTitle = "Compress \(cbzCount) comic\(cbzCount == 1 ? "" : "s")?"
+        pendingCompressionDetail =
+            "Recompresses JPEG images inside each .cbz, typically shrinking each file 30–50 % " +
+            "with no visible change at typical reading scales. PNG entries and non-CBZ formats " +
+            "(PDF, CBR, CB7, CBT) are skipped."
+        pendingCompressionURLs = urls
+        runPendingIfRemembered()
+    }
+
+    /// Triggered by right-click → "Compress Gallery" on a sidebar row.
+    func requestCompressGallery(_ id: UUID) {
+        guard let gallery = galleries.first(where: { $0.id == id }) else { return }
+        let cbzCount = gallery.comics.filter { $0.pathExtension.lowercased() == "cbz" }.count
+        pendingCompressionTitle = "Compress \(cbzCount) comic\(cbzCount == 1 ? "" : "s") in '\(gallery.name)'?"
+        pendingCompressionDetail =
+            "Recompresses JPEG images inside each .cbz, typically shrinking 30–50 % per file. " +
+            "PNG entries and non-CBZ formats are skipped."
+        pendingCompressionURLs = gallery.comics
+        runPendingIfRemembered()
+    }
+
+    /// Triggered by right-click → "Compress Comic" on a card.
+    func requestCompressComic(at url: URL) {
+        pendingCompressionTitle = "Compress '\(url.lastPathComponent)'?"
+        pendingCompressionDetail =
+            "Recompresses JPEG images inside the .cbz, typically shrinking it 30–50 % with no " +
+            "visible change at typical reading scales."
+        pendingCompressionURLs = [url]
+        runPendingIfRemembered()
+    }
+
+    /// If the user has previously ticked "Remember my choice", skip the
+    /// prompt and run with the remembered delete-originals value.
+    private func runPendingIfRemembered() {
+        guard let urls = pendingCompressionURLs else { return }
+        if CompressionPreferences.hasRememberedChoice {
+            let delete = CompressionPreferences.rememberedDeleteOriginals
+            pendingCompressionURLs = nil
+            startBatch(urls: urls, deleteOriginals: delete)
+        }
+    }
+
+    /// Called by `CompressionPromptSheet`'s confirm callback.
+    func confirmPendingCompression(deleteOriginals: Bool, remember: Bool) {
+        guard let urls = pendingCompressionURLs else { return }
+        pendingCompressionURLs = nil
+        if remember {
+            CompressionPreferences.remember(deleteOriginals: deleteOriginals)
+        }
+        startBatch(urls: urls, deleteOriginals: deleteOriginals)
+    }
+
+    func cancelPendingCompression() {
+        pendingCompressionURLs = nil
+    }
+
+    /// One place that kicks off the batch + wires the per-file completion
+    /// hook to thumbnail invalidation. After each successful compression
+    /// the card's cover refreshes from the new (smaller) file so the user
+    /// sees the result without restarting the app, and the library's URL
+    /// continues to point at the now-compressed file.
+    private func startBatch(urls: [URL], deleteOriginals: Bool) {
+        compressionService.runBatch(
+            urls: urls,
+            deleteOriginals: deleteOriginals,
+            onFileCompleted: { [weak self] url in
+                self?.invalidateThumbnail(for: url)
+                self?.thumbnailUpdates.send(url)
+            }
+        )
+    }
+
+    /// Removes the disk-cached thumbnail (FNV-1a-hashed path under
+    /// `~/Library/Application Support/DC/Thumbnails/<hash>.jpg`) and the
+    /// in-memory NSCache entry so the next thumbnail request decodes a
+    /// fresh cover from the compressed CBZ.
+    func invalidateThumbnail(for url: URL) {
+        let key = Self.thumbnailCacheKey(for: url) as NSString
+        thumbnailCache.removeObject(forKey: key)
+        let diskURL = Self.thumbnailURL(for: url)
+        try? FileManager.default.removeItem(at: diskURL)
     }
 
     // MARK: - Persistence helpers for new UI state
