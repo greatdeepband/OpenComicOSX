@@ -22,6 +22,11 @@ struct DCApp: App {
                 .keyboardShortcut("o", modifiers: .command)
             }
             CommandMenu("Library") {
+                Button("Compress All Comics…") {
+                    library.requestCompressAll()
+                }
+                .disabled(library.allComicURLs.isEmpty)
+                Divider()
                 Button("Clear All Cache…") {
                     let alert = NSAlert()
                     alert.messageText = "Clear All Cache?"
