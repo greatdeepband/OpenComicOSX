@@ -1,6 +1,7 @@
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
+import ZIPFoundation
 
 /// Pure-logic CBZ compressor — no UI, no `@MainActor`. Mirrors CompyUI's
 /// `container.py` + `image_engine.py` algorithm (ported 2026-05-19):
@@ -70,5 +71,178 @@ enum CBZCompressor {
             return nil
         }
         return newBytes
+    }
+}
+
+// MARK: - Public: full-file CBZ compression
+
+struct CBZCompressionResult {
+    let url: URL
+    let inputBytes: Int
+    let outputBytes: Int
+    let jpegsSeen: Int
+    let jpegsRewritten: Int
+    let jpegsSkippedBitonal: Int
+    let jpegsSkippedThreshold: Int
+    let jpegsFailed: Int
+    let pngsPassed: Int
+    let othersPassed: Int
+}
+
+enum CBZCompressionError: Error {
+    case notACBZ
+    case invalidArchive
+    case ioFailure(String)
+}
+
+extension CBZCompressor {
+
+    /// Recompresses every JPEG entry inside the CBZ at `url`, writes a new
+    /// CBZ to a sibling `.tmp` file, then atomic-renames it back over the
+    /// original (so a crash mid-compression never destroys the source).
+    ///
+    /// PNG and other entries pass through unchanged (format-preservation
+    /// contract). Throws `CBZCompressionError.notACBZ` for non-CBZ inputs.
+    /// Reports per-image progress via `progress("entry", current, total)`.
+    /// Honors `Task.isCancelled` between entries.
+    static func compressCBZ(
+        at url: URL,
+        maxDim: Int,
+        jpegQuality: CGFloat,
+        grayQuality: CGFloat,
+        skipThreshold: Double,
+        progress: ((String, Int, Int) -> Void)? = nil
+    ) throws -> CBZCompressionResult {
+        guard url.pathExtension.lowercased() == "cbz" else {
+            throw CBZCompressionError.notACBZ
+        }
+        let fh = try FileHandle(forReadingFrom: url)
+        let header = fh.readData(ofLength: 2)
+        try fh.close()
+        guard header == Data([0x50, 0x4B]) else {
+            throw CBZCompressionError.notACBZ
+        }
+
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let inputBytes = (attrs[.size] as? Int) ?? 0
+        let inArchive: Archive
+        do {
+            inArchive = try Archive(url: url, accessMode: .read)
+        } catch {
+            throw CBZCompressionError.invalidArchive
+        }
+
+        let tmpURL = url.deletingPathExtension()
+            .appendingPathExtension("cbz.tmp.\(ProcessInfo.processInfo.processIdentifier)")
+        try? FileManager.default.removeItem(at: tmpURL)
+        let outArchive: Archive
+        do {
+            outArchive = try Archive(url: tmpURL, accessMode: .create)
+        } catch {
+            throw CBZCompressionError.ioFailure("create tmp archive: \(error)")
+        }
+
+        var seenJPEG = 0, rewrote = 0, skippedBitonal = 0, skippedThreshold = 0, failedJPEG = 0
+        var passedPNG = 0, passedOther = 0
+
+        let entries = Array(inArchive.makeIterator())
+        let total = entries.count
+        for (idx, entry) in entries.enumerated() {
+            if Task.isCancelled {
+                try? FileManager.default.removeItem(at: tmpURL)
+                throw CancellationError()
+            }
+            progress?("entry", idx + 1, total)
+            let name = entry.path.lowercased()
+            var data = Data()
+            do {
+                _ = try inArchive.extract(entry) { data.append($0) }
+            } catch {
+                continue
+            }
+            let isJPEG = name.hasSuffix(".jpg") || name.hasSuffix(".jpeg")
+            let isPNG  = name.hasSuffix(".png")
+            if isJPEG {
+                seenJPEG += 1
+                if let newBytes = recompressJPEG(
+                    data: data,
+                    maxDim: maxDim,
+                    jpegQuality: jpegQuality,
+                    grayQuality: grayQuality,
+                    skipThreshold: skipThreshold
+                ) {
+                    do {
+                        try outArchive.addEntry(
+                            with: entry.path, type: .file,
+                            uncompressedSize: Int64(newBytes.count),
+                            compressionMethod: .deflate
+                        ) { pos, size in
+                            newBytes.subdata(in: Int(pos)..<Int(pos) + size)
+                        }
+                        rewrote += 1
+                    } catch {
+                        failedJPEG += 1
+                        try outArchive.addEntry(
+                            with: entry.path, type: .file,
+                            uncompressedSize: Int64(data.count),
+                            compressionMethod: .deflate
+                        ) { pos, size in
+                            data.subdata(in: Int(pos)..<Int(pos) + size)
+                        }
+                    }
+                } else {
+                    skippedThreshold += 1
+                    try outArchive.addEntry(
+                        with: entry.path, type: .file,
+                        uncompressedSize: Int64(data.count),
+                        compressionMethod: .deflate
+                    ) { pos, size in
+                        data.subdata(in: Int(pos)..<Int(pos) + size)
+                    }
+                }
+            } else if isPNG {
+                passedPNG += 1
+                try outArchive.addEntry(
+                    with: entry.path, type: .file,
+                    uncompressedSize: Int64(data.count),
+                    compressionMethod: .deflate
+                ) { pos, size in
+                    data.subdata(in: Int(pos)..<Int(pos) + size)
+                }
+            } else {
+                passedOther += 1
+                try outArchive.addEntry(
+                    with: entry.path, type: .file,
+                    uncompressedSize: Int64(data.count),
+                    compressionMethod: .deflate
+                ) { pos, size in
+                    data.subdata(in: Int(pos)..<Int(pos) + size)
+                }
+            }
+        }
+
+        let tmpAttrs = try? FileManager.default.attributesOfItem(atPath: tmpURL.path)
+        let outputBytes = (tmpAttrs?[.size] as? Int) ?? 0
+        if outputBytes >= inputBytes {
+            try? FileManager.default.removeItem(at: tmpURL)
+            return CBZCompressionResult(
+                url: url, inputBytes: inputBytes, outputBytes: inputBytes,
+                jpegsSeen: seenJPEG, jpegsRewritten: 0,
+                jpegsSkippedBitonal: skippedBitonal,
+                jpegsSkippedThreshold: skippedThreshold + rewrote,
+                jpegsFailed: failedJPEG,
+                pngsPassed: passedPNG, othersPassed: passedOther
+            )
+        }
+        _ = try FileManager.default.replaceItemAt(url, withItemAt: tmpURL)
+
+        return CBZCompressionResult(
+            url: url, inputBytes: inputBytes, outputBytes: outputBytes,
+            jpegsSeen: seenJPEG, jpegsRewritten: rewrote,
+            jpegsSkippedBitonal: skippedBitonal,
+            jpegsSkippedThreshold: skippedThreshold,
+            jpegsFailed: failedJPEG,
+            pngsPassed: passedPNG, othersPassed: passedOther
+        )
     }
 }
