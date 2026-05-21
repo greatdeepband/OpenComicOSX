@@ -77,6 +77,29 @@ final class CompressionService: ObservableObject {
                     continue
                 }
                 summary.attempted += 1
+
+                // If user opted to KEEP originals, copy aside first so that
+                // after compressCBZ's atomic rename the user has BOTH the
+                // shrunk file (at the original path) and an untouched copy
+                // at `<name>-original.cbz`.
+                var sidecarURL: URL? = nil
+                if !deleteOriginals {
+                    let stem = url.deletingPathExtension().lastPathComponent
+                    let parent = url.deletingLastPathComponent()
+                    let target = parent.appendingPathComponent("\(stem)-original.cbz")
+                    do {
+                        if FileManager.default.fileExists(atPath: target.path) {
+                            try FileManager.default.removeItem(at: target)
+                        }
+                        try FileManager.default.copyItem(at: url, to: target)
+                        sidecarURL = target
+                    } catch {
+                        summary.failed += 1
+                        summary.errors.append((url, "couldn't preserve original: \(error)"))
+                        continue
+                    }
+                }
+
                 do {
                     let result = try CBZCompressor.compressCBZ(
                         at: url,
@@ -91,6 +114,7 @@ final class CompressionService: ObservableObject {
                     let completedURL = url
                     await MainActor.run { onFileCompleted?(completedURL) }
                 } catch is CancellationError {
+                    if let s = sidecarURL { try? FileManager.default.removeItem(at: s) }
                     await MainActor.run {
                         self?.state = .cancelled(partial: summary)
                         self?.runningTask = nil
@@ -99,6 +123,7 @@ final class CompressionService: ObservableObject {
                 } catch {
                     summary.failed += 1
                     summary.errors.append((url, "\(error)"))
+                    if let s = sidecarURL { try? FileManager.default.removeItem(at: s) }
                 }
             }
             await MainActor.run {
