@@ -357,6 +357,11 @@ struct LibraryGridPane: View {
                                 Button(removeLabel, role: .destructive) {
                                     remove(url)
                                 }
+                                Divider()
+                                Button("Compress Comic…") {
+                                    library.requestCompressComic(at: url)
+                                }
+                                .disabled(url.pathExtension.lowercased() != "cbz")
                             }
                         }
                     }
@@ -502,6 +507,11 @@ struct LibraryGalleryPane: View {
                                 Button("Remove from Gallery", role: .destructive) {
                                     remove(url)
                                 }
+                                Divider()
+                                Button("Compress Comic…") {
+                                    library.requestCompressComic(at: url)
+                                }
+                                .disabled(url.pathExtension.lowercased() != "cbz")
                             }
                         }
                     }
@@ -1196,6 +1206,11 @@ struct DraggableComicGrid: View {
                         library.removeComics([url], from: gallery.id)
                         if selectedURL == url { selectedURL = nil }
                     }
+                    Divider()
+                    Button("Compress Comic…") {
+                        library.requestCompressComic(at: url)
+                    }
+                    .disabled(url.pathExtension.lowercased() != "cbz")
                     Divider()
                     Button("Reset to Alphabetical Order") {
                         library.resetGalleryOrder(id: gallery.id)
