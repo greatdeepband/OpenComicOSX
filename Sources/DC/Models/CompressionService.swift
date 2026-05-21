@@ -1,0 +1,125 @@
+import Foundation
+import SwiftUI
+
+/// State machine for one batch of CBZ compressions. The view layer observes
+/// `state` to render the sheet; the run loop publishes per-file progress.
+@MainActor
+final class CompressionService: ObservableObject {
+
+    enum State: Equatable {
+        case idle
+        case running
+        case finished(summary: BatchSummary)
+        case cancelled(partial: BatchSummary)
+        case failed(error: String)
+    }
+
+    struct BatchSummary: Equatable {
+        var attempted: Int = 0
+        var succeeded: Int = 0
+        var skippedNonCBZ: Int = 0
+        var failed: Int = 0
+        var totalInputBytes: Int = 0
+        var totalOutputBytes: Int = 0
+        var errors: [(url: URL, message: String)] = []
+        static func == (l: BatchSummary, r: BatchSummary) -> Bool {
+            l.attempted == r.attempted
+                && l.succeeded == r.succeeded
+                && l.skippedNonCBZ == r.skippedNonCBZ
+                && l.failed == r.failed
+                && l.totalInputBytes == r.totalInputBytes
+                && l.totalOutputBytes == r.totalOutputBytes
+                && l.errors.count == r.errors.count
+        }
+    }
+
+    @Published var state: State = .idle
+    @Published var currentFileURL: URL? = nil
+    @Published var filesCompleted: Int = 0
+    @Published var filesTotal: Int = 0
+
+    private var runningTask: Task<Void, Never>? = nil
+
+    /// Kicks off a batch run over `urls`. Idempotent — if a batch is already
+    /// running, the second call is ignored.
+    ///
+    /// `onFileCompleted` fires on the main actor for every URL whose
+    /// compressCBZ returned success (NOT cancelled, NOT skipped, NOT
+    /// failed). LibraryViewModel uses this to invalidate the cached
+    /// thumbnail so the card refreshes from the new (smaller) file.
+    func runBatch(
+        urls: [URL],
+        deleteOriginals: Bool,
+        onFileCompleted: ((URL) -> Void)? = nil
+    ) {
+        guard case .idle = state else { return }
+        state = .running
+        currentFileURL = nil
+        filesCompleted = 0
+        filesTotal = urls.count
+        var summary = BatchSummary()
+
+        runningTask = Task.detached { [weak self] in
+            for (idx, url) in urls.enumerated() {
+                if Task.isCancelled {
+                    await MainActor.run {
+                        self?.state = .cancelled(partial: summary)
+                        self?.runningTask = nil
+                    }
+                    return
+                }
+                await MainActor.run {
+                    self?.currentFileURL = url
+                    self?.filesCompleted = idx
+                }
+                if url.pathExtension.lowercased() != "cbz" {
+                    summary.skippedNonCBZ += 1
+                    continue
+                }
+                summary.attempted += 1
+                do {
+                    let result = try CBZCompressor.compressCBZ(
+                        at: url,
+                        maxDim: ReaderConstants.cbzCompressionMaxDim,
+                        jpegQuality: ReaderConstants.cbzCompressionJpegQuality,
+                        grayQuality: ReaderConstants.cbzCompressionGrayQuality,
+                        skipThreshold: ReaderConstants.cbzCompressionSkipThreshold
+                    )
+                    summary.succeeded += 1
+                    summary.totalInputBytes += result.inputBytes
+                    summary.totalOutputBytes += result.outputBytes
+                    let completedURL = url
+                    await MainActor.run { onFileCompleted?(completedURL) }
+                } catch is CancellationError {
+                    await MainActor.run {
+                        self?.state = .cancelled(partial: summary)
+                        self?.runningTask = nil
+                    }
+                    return
+                } catch {
+                    summary.failed += 1
+                    summary.errors.append((url, "\(error)"))
+                }
+            }
+            await MainActor.run {
+                self?.filesCompleted = self?.filesTotal ?? 0
+                self?.state = .finished(summary: summary)
+                self?.runningTask = nil
+            }
+        }
+    }
+
+    /// Cancels the in-flight batch. The summary at that point becomes
+    /// `.cancelled(partial:)`.
+    func cancel() {
+        runningTask?.cancel()
+    }
+
+    /// Resets back to `.idle` after the user dismisses a finished sheet.
+    func acknowledge() {
+        state = .idle
+        currentFileURL = nil
+        filesCompleted = 0
+        filesTotal = 0
+    }
+}
