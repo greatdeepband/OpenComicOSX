@@ -210,6 +210,11 @@ struct LibrarySidebar: View {
             library.resetGalleryOrder(id: gallery.id)
         }
         Divider()
+        Button("Compress Gallery…") {
+            library.requestCompressGallery(gallery.id)
+        }
+        .disabled(gallery.comics.isEmpty)
+        Divider()
         Button("Delete Gallery", role: .destructive) {
             library.deleteGallery(id: gallery.id)
         }
