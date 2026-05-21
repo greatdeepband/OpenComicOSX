@@ -91,6 +91,33 @@ struct LibraryView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: debugMode)
+        .sheet(isPresented: Binding(
+            get: { library.pendingCompressionURLs != nil },
+            set: { if !$0 { library.cancelPendingCompression() } }
+        )) {
+            CompressionPromptSheet(
+                title: library.pendingCompressionTitle,
+                detailLine: library.pendingCompressionDetail,
+                onConfirm: { delete, remember in
+                    library.confirmPendingCompression(deleteOriginals: delete, remember: remember)
+                },
+                onCancel: { library.cancelPendingCompression() }
+            )
+        }
+        .sheet(isPresented: Binding(
+            get: {
+                switch library.compressionService.state {
+                case .idle: return false
+                default: return true
+                }
+            },
+            set: { _ in /* dismissed via the sheet's Done button */ }
+        )) {
+            CompressionProgressSheet(
+                service: library.compressionService,
+                onDismiss: { /* state already reset by service.acknowledge() */ }
+            )
+        }
     }
 
     private func handleLibraryDrop(providers: [NSItemProvider]) -> Bool {
