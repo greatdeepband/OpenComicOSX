@@ -118,6 +118,44 @@ enum ReaderConstants {
     /// false negatives that re-trigger expensive layout rebuilds.
     static let scaleEqualityEpsilon: CGFloat = 0.001
 
+    // MARK: - Trackpad swipe page/comic navigation (single & double modes)
+
+    /// Accumulated horizontal trackpad delta (points) that triggers one
+    /// page change in single/double mode. Trackpad scroll events arrive
+    /// at ~60 Hz with `scrollingDeltaX` of a few points each; a deliberate
+    /// 2-finger swipe across the trackpad accumulates ~50-150 points.
+    /// 50 fires on a brisk flick without triggering on a small drift.
+    static let pageSwipeThreshold: CGFloat = 50
+
+    /// `|deltaX|` must exceed `|deltaY| * this ratio` for a 2-finger scroll
+    /// to count as a horizontal swipe (page nav) rather than a vertical
+    /// scroll (pan when zoomed). 1.5 lets a clearly-horizontal flick win
+    /// while a casual diagonal drift stays out of the page-nav code path.
+    static let swipeHorizontalDominanceRatio: CGFloat = 1.5
+
+    // MARK: - CBZ compression (ported from CompyUI engine, 2026-05-14)
+
+    /// Longest-edge pixel cap for recompressed JPEGs inside CBZ archives.
+    /// 2000 px stays above the highest reading-mode native resolution on a
+    /// 5K display while shrinking large 4000+ px source scans by ~75 %.
+    static let cbzCompressionMaxDim: Int = 2000
+
+    /// JPEG quality for colour images during CBZ recompression (0.0-1.0,
+    /// matches `kCGImageDestinationLossyCompressionQuality`). 0.85 matches
+    /// CompyUI's default — visually transparent on comic art at typical
+    /// reading scales.
+    static let cbzCompressionJpegQuality: CGFloat = 0.85
+
+    /// JPEG quality for grayscale images. 0.80 — manga and B&W scans
+    /// tolerate slightly more aggressive quantisation than colour.
+    static let cbzCompressionGrayQuality: CGFloat = 0.80
+
+    /// Skip the rewrite when the recompressed JPEG would be larger than
+    /// `original_size * skipThreshold`. 0.95 — only rewrite when we save
+    /// at least 5 %, so a near-optimum source doesn't get bounced through
+    /// a re-encoder for no benefit.
+    static let cbzCompressionSkipThreshold: Double = 0.95
+
     /// Floor for any aspect-ratio division (page AR / spread AR). Prevents
     /// division-by-zero when a page reports a degenerate naturalSize.
     static let aspectRatioFloor: CGFloat = 0.001
