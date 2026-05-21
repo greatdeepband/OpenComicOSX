@@ -141,14 +141,19 @@ enum ReaderConstants {
     static let cbzCompressionMaxDim: Int = 2000
 
     /// JPEG quality for colour images during CBZ recompression (0.0-1.0,
-    /// matches `kCGImageDestinationLossyCompressionQuality`). 0.85 matches
-    /// CompyUI's default — visually transparent on comic art at typical
-    /// reading scales.
-    static let cbzCompressionJpegQuality: CGFloat = 0.85
+    /// matches `kCGImageDestinationLossyCompressionQuality`). 0.78 chosen
+    /// to compensate for ImageIO's limitations vs CompyUI's PIL encoder —
+    /// PIL writes progressive JPEGs with optimized Huffman tables, which
+    /// shrinks output by ~10-20% at the same nominal quality. ImageIO
+    /// can only write baseline JPEGs without Huffman optimization, so we
+    /// drop the quality knob to land at comparable bytes. Should still
+    /// read as visually transparent on comic art at typical reading scales.
+    static let cbzCompressionJpegQuality: CGFloat = 0.78
 
-    /// JPEG quality for grayscale images. 0.80 — manga and B&W scans
-    /// tolerate slightly more aggressive quantisation than colour.
-    static let cbzCompressionGrayQuality: CGFloat = 0.80
+    /// JPEG quality for grayscale images. 0.73 — manga and B&W scans
+    /// tolerate slightly more aggressive quantisation than colour. Same
+    /// ImageIO-vs-PIL compensation as `cbzCompressionJpegQuality`.
+    static let cbzCompressionGrayQuality: CGFloat = 0.73
 
     /// Skip the rewrite when the recompressed JPEG would be larger than
     /// `original_size * skipThreshold`. 0.95 — only rewrite when we save
