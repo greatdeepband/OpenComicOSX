@@ -1455,8 +1455,12 @@ private struct CompressionSheetsModifier: ViewModifier {
                 CompressionPromptSheet(
                     title: library.pendingCompressionTitle,
                     detailLine: library.pendingCompressionDetail,
-                    onConfirm: { delete, remember in
-                        library.confirmPendingCompression(deleteOriginals: delete, remember: remember)
+                    onConfirm: { delete, convertPNGs, remember in
+                        library.confirmPendingCompression(
+                            deleteOriginals: delete,
+                            convertPNGs: convertPNGs,
+                            remember: remember
+                        )
                     },
                     onCancel: { library.cancelPendingCompression() }
                 )

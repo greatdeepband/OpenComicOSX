@@ -264,19 +264,20 @@ final class LibraryViewModel: ObservableObject {
         guard let urls = pendingCompressionURLs else { return }
         if CompressionPreferences.hasRememberedChoice {
             let delete = CompressionPreferences.rememberedDeleteOriginals
+            let convertPNGs = CompressionPreferences.rememberedConvertPNGs
             pendingCompressionURLs = nil
-            startBatch(urls: urls, deleteOriginals: delete)
+            startBatch(urls: urls, deleteOriginals: delete, convertPNGs: convertPNGs)
         }
     }
 
     /// Called by `CompressionPromptSheet`'s confirm callback.
-    func confirmPendingCompression(deleteOriginals: Bool, remember: Bool) {
+    func confirmPendingCompression(deleteOriginals: Bool, convertPNGs: Bool, remember: Bool) {
         guard let urls = pendingCompressionURLs else { return }
         pendingCompressionURLs = nil
         if remember {
-            CompressionPreferences.remember(deleteOriginals: deleteOriginals)
+            CompressionPreferences.remember(deleteOriginals: deleteOriginals, convertPNGs: convertPNGs)
         }
-        startBatch(urls: urls, deleteOriginals: deleteOriginals)
+        startBatch(urls: urls, deleteOriginals: deleteOriginals, convertPNGs: convertPNGs)
     }
 
     func cancelPendingCompression() {
@@ -288,10 +289,11 @@ final class LibraryViewModel: ObservableObject {
     /// the card's cover refreshes from the new (smaller) file so the user
     /// sees the result without restarting the app, and the library's URL
     /// continues to point at the now-compressed file.
-    private func startBatch(urls: [URL], deleteOriginals: Bool) {
+    private func startBatch(urls: [URL], deleteOriginals: Bool, convertPNGs: Bool) {
         compressionService.runBatch(
             urls: urls,
             deleteOriginals: deleteOriginals,
+            convertPNGs: convertPNGs,
             onFileCompleted: { [weak self] url in
                 self?.invalidateThumbnail(for: url)
                 self?.thumbnailUpdates.send(url)

@@ -31,6 +31,7 @@ final class CompressionService: ObservableObject {
         var totalJpegsRewritten: Int = 0
         var totalJpegsSkipped: Int = 0      // sum of bitonal + threshold + failed
         var totalPngsPassed: Int = 0
+        var totalPngsConverted: Int = 0
         var totalOthersPassed: Int = 0
 
         static func == (l: BatchSummary, r: BatchSummary) -> Bool {
@@ -45,6 +46,7 @@ final class CompressionService: ObservableObject {
                 && l.totalJpegsRewritten == r.totalJpegsRewritten
                 && l.totalJpegsSkipped == r.totalJpegsSkipped
                 && l.totalPngsPassed == r.totalPngsPassed
+                && l.totalPngsConverted == r.totalPngsConverted
                 && l.totalOthersPassed == r.totalOthersPassed
         }
     }
@@ -66,6 +68,7 @@ final class CompressionService: ObservableObject {
     func runBatch(
         urls: [URL],
         deleteOriginals: Bool,
+        convertPNGs: Bool = false,
         onFileCompleted: ((URL) -> Void)? = nil
     ) {
         guard case .idle = state else { return }
@@ -122,7 +125,8 @@ final class CompressionService: ObservableObject {
                         maxDim: ReaderConstants.cbzCompressionMaxDim,
                         jpegQuality: ReaderConstants.cbzCompressionJpegQuality,
                         grayQuality: ReaderConstants.cbzCompressionGrayQuality,
-                        skipThreshold: ReaderConstants.cbzCompressionSkipThreshold
+                        skipThreshold: ReaderConstants.cbzCompressionSkipThreshold,
+                        convertPNGs: convertPNGs
                     )
                     summary.succeeded += 1
                     summary.totalInputBytes += result.inputBytes
@@ -133,6 +137,7 @@ final class CompressionService: ObservableObject {
                         + result.jpegsSkippedThreshold
                         + result.jpegsFailed
                     summary.totalPngsPassed += result.pngsPassed
+                    summary.totalPngsConverted += result.pngsConverted
                     summary.totalOthersPassed += result.othersPassed
                     let completedURL = url
                     await MainActor.run { onFileCompleted?(completedURL) }

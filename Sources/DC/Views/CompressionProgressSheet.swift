@@ -92,6 +92,9 @@ struct CompressionProgressSheet: View {
                         "\(summary.totalJpegsSkipped) (already small, bitonal, or decode failure)"
                     )
                 }
+                if summary.totalPngsConverted > 0 {
+                    statRow("PNGs converted to JPEG:", "\(summary.totalPngsConverted)")
+                }
                 if summary.totalPngsPassed > 0 {
                     statRow("PNGs passed through:", "\(summary.totalPngsPassed)")
                 }

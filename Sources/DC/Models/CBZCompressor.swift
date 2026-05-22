@@ -72,6 +72,88 @@ enum CBZCompressor {
         }
         return newBytes
     }
+
+    /// Decode PNG `data`, composite onto white if it has alpha, resize to
+    /// fit `maxDim`, and re-encode as JPEG. Used when the user opts in to
+    /// PNG → JPEG conversion (off by default — CompyUI's "format-preservation
+    /// contract" passes PNGs through unchanged, but for PNG-heavy CBZs that
+    /// means ~0 % compression). Returns `nil` if the JPEG output wouldn't
+    /// shrink past `skipThreshold` (rare for PNG → JPEG, which is typically
+    /// 5–20× smaller; the threshold mostly guards weird inputs).
+    ///
+    /// Alpha is composited onto white before JPEG encoding because JPEG
+    /// doesn't support transparency and ImageIO's default behavior produces
+    /// black backgrounds where the alpha was. Comic pages rarely have
+    /// meaningful transparency at the page-image level — they're scans of
+    /// printed pages — so flattening on white is the safe choice.
+    static func recompressPNGAsJPEG(
+        data: Data,
+        maxDim: Int,
+        jpegQuality: CGFloat,
+        grayQuality: CGFloat,
+        skipThreshold: Double
+    ) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0 else { return nil }
+
+        let thumbOpts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxDim
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOpts as CFDictionary) else { return nil }
+
+        let csModel = cgImage.colorSpace?.model
+        let isGray = (csModel == .monochrome)
+
+        let alpha = cgImage.alphaInfo
+        let hasAlpha = !(alpha == .none || alpha == .noneSkipLast || alpha == .noneSkipFirst)
+
+        let opaqueImage: CGImage
+        if hasAlpha {
+            let width = cgImage.width
+            let height = cgImage.height
+            let colorSpace: CGColorSpace = isGray
+                ? CGColorSpaceCreateDeviceGray()
+                : CGColorSpaceCreateDeviceRGB()
+            let bitmapInfo: UInt32 = isGray
+                ? CGImageAlphaInfo.none.rawValue
+                : CGImageAlphaInfo.noneSkipLast.rawValue
+            guard let ctx = CGContext(
+                data: nil, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: 0,
+                space: colorSpace, bitmapInfo: bitmapInfo
+            ) else { return nil }
+            ctx.setFillColor(
+                isGray
+                    ? CGColor(gray: 1, alpha: 1)
+                    : CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+            )
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            guard let composited = ctx.makeImage() else { return nil }
+            opaqueImage = composited
+        } else {
+            opaqueImage = cgImage
+        }
+
+        let quality = isGray ? grayQuality : jpegQuality
+        let outData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            outData, UTType.jpeg.identifier as CFString, 1, nil
+        ) else { return nil }
+        CGImageDestinationAddImage(dest, opaqueImage, [
+            kCGImageDestinationLossyCompressionQuality: quality
+        ] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+
+        let newBytes = outData as Data
+        if Double(newBytes.count) >= Double(data.count) * skipThreshold {
+            return nil
+        }
+        return newBytes
+    }
 }
 
 // MARK: - Public: full-file CBZ compression
@@ -85,7 +167,8 @@ struct CBZCompressionResult {
     let jpegsSkippedBitonal: Int
     let jpegsSkippedThreshold: Int
     let jpegsFailed: Int
-    let pngsPassed: Int
+    let pngsPassed: Int       // PNG entries passed through unchanged
+    let pngsConverted: Int    // PNG entries converted to JPEG (when convertPNGs=true)
     let othersPassed: Int
 }
 
@@ -111,6 +194,7 @@ extension CBZCompressor {
         jpegQuality: CGFloat,
         grayQuality: CGFloat,
         skipThreshold: Double,
+        convertPNGs: Bool = false,
         progress: ((String, Int, Int) -> Void)? = nil
     ) throws -> CBZCompressionResult {
         guard url.pathExtension.lowercased() == "cbz" else {
@@ -143,7 +227,7 @@ extension CBZCompressor {
         }
 
         var seenJPEG = 0, rewrote = 0, skippedBitonal = 0, skippedThreshold = 0, failedJPEG = 0
-        var passedPNG = 0, passedOther = 0
+        var passedPNG = 0, convertedPNG = 0, passedOther = 0
 
         let entries = Array(inArchive.makeIterator())
         let total = entries.count
@@ -201,6 +285,35 @@ extension CBZCompressor {
                     }
                 }
             } else if isPNG {
+                if convertPNGs,
+                   let newBytes = recompressPNGAsJPEG(
+                    data: data,
+                    maxDim: maxDim,
+                    jpegQuality: jpegQuality,
+                    grayQuality: grayQuality,
+                    skipThreshold: skipThreshold
+                   ) {
+                    // Rename `foo.png` → `foo.jpg` inside the archive so
+                    // the file extension matches the new bytes. Readers
+                    // (including OpenComic) dispatch on extension.
+                    let originalPath = entry.path
+                    let renamedPath: String = {
+                        let lower = originalPath.lowercased()
+                        if lower.hasSuffix(".png") {
+                            return String(originalPath.dropLast(4)) + ".jpg"
+                        }
+                        return originalPath
+                    }()
+                    try outArchive.addEntry(
+                        with: renamedPath, type: .file,
+                        uncompressedSize: Int64(newBytes.count),
+                        compressionMethod: .deflate
+                    ) { pos, size in
+                        newBytes.subdata(in: Int(pos)..<Int(pos) + size)
+                    }
+                    convertedPNG += 1
+                    continue
+                }
                 passedPNG += 1
                 try outArchive.addEntry(
                     with: entry.path, type: .file,
@@ -231,7 +344,7 @@ extension CBZCompressor {
                 jpegsSkippedBitonal: skippedBitonal,
                 jpegsSkippedThreshold: skippedThreshold + rewrote,
                 jpegsFailed: failedJPEG,
-                pngsPassed: passedPNG, othersPassed: passedOther
+                pngsPassed: passedPNG, pngsConverted: convertedPNG, othersPassed: passedOther
             )
         }
         _ = try FileManager.default.replaceItemAt(url, withItemAt: tmpURL)
@@ -242,7 +355,7 @@ extension CBZCompressor {
             jpegsSkippedBitonal: skippedBitonal,
             jpegsSkippedThreshold: skippedThreshold,
             jpegsFailed: failedJPEG,
-            pngsPassed: passedPNG, othersPassed: passedOther
+            pngsPassed: passedPNG, pngsConverted: convertedPNG, othersPassed: passedOther
         )
     }
 }
