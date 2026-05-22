@@ -1,5 +1,51 @@
 # DC Reader — Changelog
 
+## v0.15.0 — 2026-05-22 — CBZ compression, trackpad swipes, loupe + icon fixes
+
+Two big features and a handful of polish fixes. **CBZ compression** lands as a full feature with menu and right-click access — recompresses JPEG images inside each archive, optionally converts PNGs to JPEGs for PNG-heavy libraries, optionally keeps originals. **Trackpad swipe navigation** lets you flip pages with a two-finger swipe in single/double-page modes. The loupe no longer steals window-resize clicks in the bottom-left/right corners, and the app icon is now compiled into an Asset Catalog so Stage Manager and Spotlight display it properly.
+
+### Added
+
+- **CBZ compression.** Open the Library menu → "Compress All Comics…", right-click a gallery → "Compress Gallery…", or right-click any comic card → "Compress Comic…". A prompt asks two questions: delete originals (replace in place) or keep them as `<name>-original.cbz` next to the compressed file, and whether to convert PNG entries to JPEG. Both choices can be ticked "Remember my choice" to skip the prompt on future batches. A modal progress sheet shows live per-page progress within each file, total file count, current filename, a Cancel button, and on completion a breakdown of JPEGs rewritten / PNGs converted / non-CBZ files skipped / total bytes saved (with percentage). The algorithm mirrors CompyUI's `container.py` + `image_engine.py`: decode each JPEG via ImageIO's thumbnail API, resize to fit 2000 px on the longer edge, re-encode at quality 0.78 (color) / 0.73 (grayscale), skip the rewrite if it wouldn't save at least 5 %. PNG entries pass through unchanged by default — preserving the format — but the opt-in PNG → JPEG mode (renaming `.png` → `.jpg` inside the archive, compositing alpha onto white) typically gives 5–10× shrinkage on scanned-manga archives that are otherwise pass-through-only. Atomic-write via `FileManager.replaceItemAt` — a crash mid-compression never destroys the source. Per-file thumbnail invalidation so the library card refreshes from the new (smaller) file without an app restart.
+- **Trackpad swipe navigation** in single-page and double-page reading modes. A two-finger horizontal swipe flips one page (right = previous, left = next). Threshold is 50 points of horizontal travel with a 1.5× horizontal-dominance ratio so a casual diagonal scroll doesn't accidentally flip pages. A momentum-phase guard prevents a flick from double-firing. When the page is zoomed in (scale > 1) the gesture passes through so trackpad panning still works. Three-finger swipe was wired to next/previous comic, but on most macOS setups the OS claims three-finger horizontal gestures for "Swipe between full-screen apps" before the app sees them — to enable, set System Settings → Trackpad → More Gestures → "Swipe between full-screen apps" to four fingers.
+- **Compiled Asset Catalog** (`Resources/Assets.car`) alongside the existing `AppIcon.icns`. Stage Manager, Spotlight and Mission Control read the modern asset catalog first; previously they showed a blank tile because they don't always fall back to `CFBundleIconFile`. `build_production.sh` now invokes `xcrun actool` automatically as part of the bundle assembly. `CFBundleIconName: AppIcon` added to `Info.plist`.
+
+### Fixed
+
+- **Loupe no longer fires when clicking in the bottom-left or bottom-right window corners.** AppKit's diagonal-resize hot zone at each corner is ~14 pt square, wider than the 6 pt straight-edge zone the existing guard checked. A click in the corner band was being claimed by the loupe's app-wide `.leftMouseDown` monitor instead of starting a window resize. New `windowResizeCornerMargin = 14` constant and a corner-only check in `MetalPageView+Loupe.swift` so any click where both axes are within the corner band hands the event back to AppKit. Top corners were already shielded by the top-strip guard.
+- **Compression progress sheet no longer sticks on "Compression / Idle" after Done.** The `.sheet` binding was reading `library.compressionService.state` — a `@Published` on a nested `ObservableObject` — through an `@EnvironmentObject`. SwiftUI's environment-object observation doesn't chain into nested observables, so when `state` transitioned back to `.idle` after `acknowledge()`, the binding's `get` closure was never re-evaluated and the sheet stayed up. Wrapped both compression sheets in a `CompressionSheetsModifier` that owns `@ObservedObject` references to both the library and the service.
+
+### Changed
+
+- **JPEG compression quality dropped from 0.85 → 0.78 (colour) and 0.80 → 0.73 (grayscale).** ImageIO can only write baseline JPEGs without Huffman optimization; CompyUI's PIL encoder writes progressive JPEGs with optimized Huffman tables, which produces output 10–20 % smaller at the same nominal quality. Dropping our quality knob lands us at comparable output bytes via the only encoder we have. Still visually transparent on comic art at typical reading scales.
+- **Compression progress bar now tracks per-page progress within each file**, not just file-level. A single 200 MB CBZ has 200+ entries; previously the bar sat at `0 of 1` for the whole compression then snapped to done. New `entryCompleted` / `entryTotal` `@Published` properties on `CompressionService`, combined with `filesCompleted` / `filesTotal` for a smooth bar across both axes. Multi-file batches show "File X of Y" + "Page X of Y" + the current filename; single-file batches just show the page progress.
+- **Compression summary now shows a per-entry-type breakdown.** JPEGs rewritten, JPEGs skipped (already-small / bitonal / decode failure), PNGs converted to JPEG, PNGs passed through, other entries passed. Plus a percentage on the total-bytes line. Tells the user *why* compression was marginal (often: archive is mostly PNGs and PNG-conversion mode wasn't enabled).
+
+### Constants
+
+- `cbzCompressionMaxDim: Int = 2000`, `cbzCompressionJpegQuality: CGFloat = 0.78`, `cbzCompressionGrayQuality: CGFloat = 0.73`, `cbzCompressionSkipThreshold: Double = 0.95` — the four tuning knobs for CBZ compression. Documented inline with the ImageIO-vs-PIL rationale.
+- `pageSwipeThreshold: CGFloat = 50`, `swipeHorizontalDominanceRatio: CGFloat = 1.5` — page-nav swipe gating.
+- `windowResizeCornerMargin: CGFloat = 14` — corner-resize hot-zone radius for the loupe edge guard.
+
+### Files
+
+- `Sources/DC/Models/CBZCompressor.swift` — new. `recompressJPEG` + `recompressPNGAsJPEG` + `compressCBZ` + result/error types. Tests in `Tests/DCTests/CBZCompressorTests.swift` (4 unit + integration tests).
+- `Sources/DC/Models/CompressionService.swift` — new. `@MainActor` `ObservableObject` orchestrator with cancellation, per-entry-type aggregation, and per-page progress publication.
+- `Sources/DC/Views/CompressionPromptSheet.swift` — new. Delete-or-keep picker, "Convert PNG pages to JPEG" toggle, "Remember my choice" checkbox, `CompressionPreferences` UserDefaults wrapper.
+- `Sources/DC/Views/CompressionProgressSheet.swift` — new. Live progress + breakdown + cancel/done.
+- `Sources/DC/Views/MetalPageView+Swipes.swift` — new. Unified `installPageSwipeMonitor` that touch-counts on `.scrollWheel` events for 2-finger and 3-finger gestures.
+- `Sources/DC/Views/MetalPageView+Loupe.swift` — corner guard added.
+- `Sources/DC/Views/MetalPageView.swift` — wires the new swipe callbacks alongside the existing zoom / loupe / double-click monitors.
+- `Sources/DC/Views/ReaderView.swift` — wires swipe callbacks to `vm.nextPage` / `vm.previousPage` / `library.openAdjacentComic` in single & double page mode.
+- `Sources/DC/Views/LibraryView.swift` — "Compress Comic…" on each of the 3 comic-card context-menu sites, "Compress Gallery…" on the sidebar gallery rows, `CompressionSheetsModifier` for sheet presentation.
+- `Sources/DC/ViewModels/LibraryViewModel.swift` — compression entry methods, `startBatch` with `onFileCompleted` hook, `invalidateThumbnail` for post-compression cover refresh.
+- `Sources/DC/DCApp.swift` — "Compress All Comics…" menu item under the existing `CommandMenu("Library")`.
+- `Sources/DC/ReaderConstants.swift` — compression + swipe + loupe-corner constants.
+- `build_production.sh` — Asset Catalog compilation step (xcassets dir → `xcrun actool` → `Resources/Assets.car`) + `CFBundleIconName` in `Info.plist`.
+- `docs/design/2026-05-19-cbz-compression.md` — full 13-task implementation plan that drove the compression work.
+
+---
+
 ## v0.14.0 — 2026-05-17 — OSS readiness milestone + comic-switch polish
 
 This release closes the open-source readiness audit started 2026-05-13: MIT license, LGPL attribution for the bundled `unar` / `lsar`, a baseline test target, GitHub Actions CI, and a `CONTRIBUTING.md` that documents the project's live-verification protocol and load-bearing workarounds. On top of that, the comic-switch transition is now visually smooth — the toolbar icon "grey settle" during the cold-render gap is gone, freshly-decoded pages no longer wait for a mouse move to appear, and the library no longer races single-tap-select against double-tap-open.
