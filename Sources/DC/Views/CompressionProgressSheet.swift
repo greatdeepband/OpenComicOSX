@@ -70,11 +70,36 @@ struct CompressionProgressSheet: View {
             statRow("Failed:",        "\(summary.failed)")
             let saved = summary.totalInputBytes - summary.totalOutputBytes
             if summary.totalInputBytes > 0 {
+                let pct = Double(saved) / Double(summary.totalInputBytes) * 100
                 statRow(
                     "Total bytes:",
-                    "\(byteString(summary.totalInputBytes)) → \(byteString(summary.totalOutputBytes)) (saved \(byteString(max(0, saved))))"
+                    "\(byteString(summary.totalInputBytes)) → \(byteString(summary.totalOutputBytes)) (saved \(byteString(max(0, saved))), \(String(format: "%.1f", pct))%)"
                 )
             }
+
+            // Per-entry-type breakdown — explains WHY compression was
+            // marginal when it was. If "PNGs passed through: N" is high
+            // relative to "JPEGs touched", the CBZ is mostly PNG and
+            // would only shrink under an opt-in PNG→JPEG conversion mode.
+            let totalEntries = summary.totalJpegsSeen + summary.totalPngsPassed + summary.totalOthersPassed
+            if totalEntries > 0 {
+                Divider()
+                Text("Entries").font(.callout).bold()
+                statRow("JPEGs rewritten:",  "\(summary.totalJpegsRewritten) of \(summary.totalJpegsSeen)")
+                if summary.totalJpegsSkipped > 0 {
+                    statRow(
+                        "JPEGs skipped:",
+                        "\(summary.totalJpegsSkipped) (already small, bitonal, or decode failure)"
+                    )
+                }
+                if summary.totalPngsPassed > 0 {
+                    statRow("PNGs passed through:", "\(summary.totalPngsPassed)")
+                }
+                if summary.totalOthersPassed > 0 {
+                    statRow("Other entries passed:", "\(summary.totalOthersPassed)")
+                }
+            }
+
             if !summary.errors.isEmpty {
                 Divider()
                 Text("Errors:").font(.callout).bold()

@@ -22,6 +22,17 @@ final class CompressionService: ObservableObject {
         var totalInputBytes: Int = 0
         var totalOutputBytes: Int = 0
         var errors: [(url: URL, message: String)] = []
+
+        // Per-entry-type aggregation across the batch, summed from each
+        // CBZCompressionResult. Tells the user WHY compression was
+        // marginal — e.g. "of your 200 MB, 5 MB was JPEGs (rewritten)
+        // and 195 MB was PNGs (passed through unchanged)".
+        var totalJpegsSeen: Int = 0
+        var totalJpegsRewritten: Int = 0
+        var totalJpegsSkipped: Int = 0      // sum of bitonal + threshold + failed
+        var totalPngsPassed: Int = 0
+        var totalOthersPassed: Int = 0
+
         static func == (l: BatchSummary, r: BatchSummary) -> Bool {
             l.attempted == r.attempted
                 && l.succeeded == r.succeeded
@@ -30,6 +41,11 @@ final class CompressionService: ObservableObject {
                 && l.totalInputBytes == r.totalInputBytes
                 && l.totalOutputBytes == r.totalOutputBytes
                 && l.errors.count == r.errors.count
+                && l.totalJpegsSeen == r.totalJpegsSeen
+                && l.totalJpegsRewritten == r.totalJpegsRewritten
+                && l.totalJpegsSkipped == r.totalJpegsSkipped
+                && l.totalPngsPassed == r.totalPngsPassed
+                && l.totalOthersPassed == r.totalOthersPassed
         }
     }
 
@@ -111,6 +127,13 @@ final class CompressionService: ObservableObject {
                     summary.succeeded += 1
                     summary.totalInputBytes += result.inputBytes
                     summary.totalOutputBytes += result.outputBytes
+                    summary.totalJpegsSeen += result.jpegsSeen
+                    summary.totalJpegsRewritten += result.jpegsRewritten
+                    summary.totalJpegsSkipped += result.jpegsSkippedBitonal
+                        + result.jpegsSkippedThreshold
+                        + result.jpegsFailed
+                    summary.totalPngsPassed += result.pngsPassed
+                    summary.totalOthersPassed += result.othersPassed
                     let completedURL = url
                     await MainActor.run { onFileCompleted?(completedURL) }
                 } catch is CancellationError {
