@@ -56,6 +56,13 @@ final class CompressionService: ObservableObject {
     @Published var filesCompleted: Int = 0
     @Published var filesTotal: Int = 0
 
+    /// Within-file progress for the file currently being compressed. Each
+    /// CBZ has 100s of entries; without this the bar stays at 0/1 for the
+    /// whole compression of a big single-comic batch. Combined with
+    /// filesCompleted/filesTotal in the view layer for a smooth bar.
+    @Published var entryCompleted: Int = 0
+    @Published var entryTotal: Int = 0
+
     private var runningTask: Task<Void, Never>? = nil
 
     /// Kicks off a batch run over `urls`. Idempotent — if a batch is already
@@ -90,6 +97,8 @@ final class CompressionService: ObservableObject {
                 await MainActor.run {
                     self?.currentFileURL = url
                     self?.filesCompleted = idx
+                    self?.entryCompleted = 0
+                    self?.entryTotal = 0
                 }
                 if url.pathExtension.lowercased() != "cbz" {
                     summary.skippedNonCBZ += 1
@@ -126,7 +135,15 @@ final class CompressionService: ObservableObject {
                         jpegQuality: ReaderConstants.cbzCompressionJpegQuality,
                         grayQuality: ReaderConstants.cbzCompressionGrayQuality,
                         skipThreshold: ReaderConstants.cbzCompressionSkipThreshold,
-                        convertPNGs: convertPNGs
+                        convertPNGs: convertPNGs,
+                        progress: { [weak self] _, current, total in
+                            // Hop to MainActor — compressCBZ's progress
+                            // callback fires from the detached Task's thread.
+                            Task { @MainActor [weak self] in
+                                self?.entryCompleted = current
+                                self?.entryTotal = total
+                            }
+                        }
                     )
                     summary.succeeded += 1
                     summary.totalInputBytes += result.inputBytes
@@ -174,5 +191,7 @@ final class CompressionService: ObservableObject {
         currentFileURL = nil
         filesCompleted = 0
         filesTotal = 0
+        entryCompleted = 0
+        entryTotal = 0
     }
 }

@@ -42,11 +42,27 @@ struct CompressionProgressSheet: View {
             Text("Idle.")
         case .running:
             VStack(alignment: .leading, spacing: 6) {
-                ProgressView(value: Double(service.filesCompleted),
-                             total: Double(max(service.filesTotal, 1)))
-                Text("\(service.filesCompleted) of \(service.filesTotal)")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                // Smooth bar: combine file-level progress with within-file
+                // entry-level progress. For a 1-file batch with 245 pages,
+                // this gives us 0% → 100% across the entries instead of
+                // sitting at 0% until the whole file is done.
+                let fileFraction: Double = {
+                    guard service.entryTotal > 0 else { return 0 }
+                    return Double(service.entryCompleted) / Double(service.entryTotal)
+                }()
+                let totalProgress = (Double(service.filesCompleted) + fileFraction)
+                    / Double(max(service.filesTotal, 1))
+                ProgressView(value: min(max(totalProgress, 0), 1))
+                if service.filesTotal > 1 {
+                    Text("File \(min(service.filesCompleted + 1, service.filesTotal)) of \(service.filesTotal)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if service.entryTotal > 0 {
+                    Text("Page \(service.entryCompleted) of \(service.entryTotal)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
                 if let url = service.currentFileURL {
                     Text(url.lastPathComponent)
                         .font(.caption)
