@@ -28,6 +28,16 @@ enum ReaderConstants {
     /// a click at x=1 with this margin classified as `edge=L`).
     static let windowResizeMargin: CGFloat = 6
 
+    /// Corner-resize hot-zone radius. AppKit reserves a larger diagonal
+    /// hot zone at each window corner than along a straight edge — the
+    /// cursor turns into the diagonal-resize variant within roughly a
+    /// 12 × 12pt square at each corner. The straight-edge guard
+    /// (`windowResizeMargin`) caught the four edges but missed the
+    /// bottom-left and bottom-right corners specifically (the top
+    /// corners are masked by the top-strip guard already). Verified
+    /// live 2026-05-22.
+    static let windowResizeCornerMargin: CGFloat = 14
+
     /// Per-step factor for the zoom-replaces-window-resize behaviour in
     /// vertical / vertical-double reading modes. A "zoom in" gesture
     /// (pinch out, ⌘+scroll up) grows the window's frame by

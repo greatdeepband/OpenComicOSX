@@ -63,7 +63,16 @@ extension MetalPageView.Coordinator {
                 p.x > f.width  - m ||
                 p.y < m ||
                 p.y > f.height - m
-            if inEdge { return }
+            // Corner hot zones are bigger than straight-edge hot zones —
+            // the diagonal-resize cursor activates in a ~14pt square at
+            // each corner. Without this, a click in the bottom-left or
+            // bottom-right corner would fire the loupe instead of starting
+            // a window resize.
+            let c = ReaderConstants.windowResizeCornerMargin
+            let inXCorner = p.x < c || p.x > f.width  - c
+            let inYCorner = p.y < c || p.y > f.height - c
+            let inCorner  = inXCorner && inYCorner
+            if inEdge || inCorner { return }
             if inTopStrip { return }
             loupeDragActive = true
             updateLoupe(at: event.locationInWindow, in: window)
