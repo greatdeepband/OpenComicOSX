@@ -59,6 +59,50 @@ strip -S "$APP/Contents/MacOS/DC" 2>/dev/null || true
 cp "$PKG/Sources/DC/Shaders.metal" "$APP/Contents/Resources/"
 cp "$PKG/AppBundle/DC.icns" "$APP/Contents/Resources/AppIcon.icns"
 
+# Compile an Asset Catalog (Assets.car) so Stage Manager / Mission
+# Control / Spotlight find the icon — these surfaces look at
+# CFBundleIconName + Assets.car FIRST and only fall back to
+# CFBundleIconFile + .icns for legacy code paths. Without a compiled
+# .car the app icon shows as a blank tile in Stage Manager.
+echo "==> Compiling Asset Catalog"
+XCASSETS="$DIST/Assets.xcassets"
+APPICONSET="$XCASSETS/AppIcon.appiconset"
+mkdir -p "$APPICONSET"
+# Copy each iconset PNG; Apple's expected filenames are identical to
+# our DC.iconset names (icon_16x16.png, icon_16x16@2x.png, etc.)
+cp "$PKG/AppBundle/DC.iconset/"*.png "$APPICONSET/"
+# AppIcon.appiconset/Contents.json — manifest of which file is which size.
+cat > "$APPICONSET/Contents.json" << 'EOF'
+{
+  "images": [
+    { "size": "16x16",   "idiom": "mac", "filename": "icon_16x16.png",       "scale": "1x" },
+    { "size": "16x16",   "idiom": "mac", "filename": "icon_16x16@2x.png",    "scale": "2x" },
+    { "size": "32x32",   "idiom": "mac", "filename": "icon_32x32.png",       "scale": "1x" },
+    { "size": "32x32",   "idiom": "mac", "filename": "icon_32x32@2x.png",    "scale": "2x" },
+    { "size": "128x128", "idiom": "mac", "filename": "icon_128x128.png",     "scale": "1x" },
+    { "size": "128x128", "idiom": "mac", "filename": "icon_128x128@2x.png",  "scale": "2x" },
+    { "size": "256x256", "idiom": "mac", "filename": "icon_256x256.png",     "scale": "1x" },
+    { "size": "256x256", "idiom": "mac", "filename": "icon_256x256@2x.png",  "scale": "2x" },
+    { "size": "512x512", "idiom": "mac", "filename": "icon_512x512.png",     "scale": "1x" },
+    { "size": "512x512", "idiom": "mac", "filename": "icon_512x512@2x.png",  "scale": "2x" }
+  ],
+  "info": { "author": "xcode", "version": 1 }
+}
+EOF
+cat > "$XCASSETS/Contents.json" << 'EOF'
+{ "info": { "author": "xcode", "version": 1 } }
+EOF
+xcrun actool "$XCASSETS" \
+    --compile "$APP/Contents/Resources" \
+    --platform macosx \
+    --minimum-deployment-target 14.0 \
+    --app-icon AppIcon \
+    --output-partial-info-plist "$DIST/actool-info.plist" \
+    --output-format human-readable-text > /dev/null
+# Cleanup intermediate xcassets dir from dist/ (Assets.car is now in
+# the bundle; we don't need the source xcassets in dist/).
+rm -rf "$XCASSETS" "$DIST/actool-info.plist"
+
 # Bundled CLIs for CBR / CB7 (ComicLoader looks them up at
 # Contents/Resources/bin/{unar,lsar}; falls back to Homebrew if
 # missing — which would break on a fresh Mac).
@@ -94,6 +138,7 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
     <key>CFBundleName</key><string>Open Comic</string>
     <key>CFBundleDisplayName</key><string>Open Comic</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.14.0</string>
     <key>CFBundleVersion</key><string>0.14.0</string>
