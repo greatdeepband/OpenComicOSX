@@ -42,7 +42,6 @@ Two big features and a handful of polish fixes. **CBZ compression** lands as a f
 - `Sources/DC/DCApp.swift` — "Compress All Comics…" menu item under the existing `CommandMenu("Library")`.
 - `Sources/DC/ReaderConstants.swift` — compression + swipe + loupe-corner constants.
 - `build_production.sh` — Asset Catalog compilation step (xcassets dir → `xcrun actool` → `Resources/Assets.car`) + `CFBundleIconName` in `Info.plist`.
-- `docs/design/2026-05-19-cbz-compression.md` — full 13-task implementation plan that drove the compression work.
 
 ---
 
