@@ -1,5 +1,33 @@
 # DC Reader — Changelog
 
+## v0.15.1 — 2026-05-31 — compression hardening + clearer page diagnostics
+
+A round of robustness fixes from a code audit of the compression pipeline and the comic-loading paths, plus expanded test coverage. No user-facing feature changes.
+
+### Fixed
+
+- **Compression result reports the file's actual on-disk path.** `compressCBZ` discarded the URL returned by `FileManager.replaceItemAt`. On a case-insensitive volume that call can hand back a differently-cased path than the input, so the reported `CBZCompressionResult.url` could disagree with where the file actually landed. The returned URL is now used (falling back to the original only when the API returns nil).
+- **Temp files from crashed compressions are swept.** The compressor only deleted its own PID's `.cbz.tmp.<pid>` before starting. If a previous run (or the system) crashed mid-compression, its orphaned `<name>.cbz.tmp.<oldpid>` sat in the user's comic folder forever — invisible unless they browsed it in Finder. Each run now sweeps every `<name>.cbz.tmp.*` sibling of the file being compressed, regardless of PID.
+- **Unreadable pages now leave a diagnostic trail.** Several `try?` swallows in the ZIP decode and page-sizing paths failed silently, so a corrupt or unreadable entry produced a blank or mis-sized page with no clue why. The `.zip` / `.zipData` decode guards now distinguish "archive won't open" from "entry not found," and the `naturalSize` fallbacks (archive open, header extract error, dimension parse) log before returning the 1×1 placeholder. The CBR cover fast-path also logs when it falls back to full extraction.
+
+### Changed
+
+- **Page-header reader no longer abuses `CancellationError` as flow control.** `imageSizeFromArchiveEntry` threw `CancellationError` to abort ZIP extraction after reading just the header bytes, which a generic `catch is CancellationError` could mistake for a real user-initiated cancel. It now uses a dedicated private sentinel (`HeaderReadComplete.enoughBytes`).
+
+### Tests
+
+- **Wide-gamut color fidelity is now guarded.** New regression test proves Display P3 and Adobe RGB (1998) ICC profiles survive JPEG recompression unchanged — the thumbnail `CGImage` carries the source color space and `CGImageDestinationAddImage` re-embeds it, so there is no silent sRGB shift. (Orientation is intentionally baked into pixels by `kCGImageSourceCreateThumbnailWithTransform` and not re-tagged, to avoid double-rotation.)
+- Added tests for the orphan temp-file sweep, the result-path validity invariant, and the ZIP page decode / `naturalSize` paths (`Tests/DCTests/PageSourceTests.swift`). Suite is now 28 tests.
+
+### Files
+
+- `Sources/DC/Models/CBZCompressor.swift` — `sweepOrphanedTmpFiles(for:)`; capture `replaceItemAt` result; color-fidelity comment.
+- `Sources/DC/Models/Comic.swift` — dedicated header-read sentinel; split/logged decode and `naturalSize` failure paths.
+- `Sources/DC/Models/ComicLoader.swift` — log the lsar-JSON cover fallback.
+- `Tests/DCTests/CBZCompressorTests.swift`, `Tests/DCTests/PageSourceTests.swift` — new coverage.
+
+---
+
 ## v0.15.0 — 2026-05-22 — CBZ compression, trackpad swipes, loupe + icon fixes
 
 Two big features and a handful of polish fixes. **CBZ compression** lands as a full feature with menu and right-click access — recompresses JPEG images inside each archive, optionally converts PNGs to JPEGs for PNG-heavy libraries, optionally keeps originals. **Trackpad swipe navigation** lets you flip pages with a two-finger swipe in single/double-page modes. The loupe no longer steals window-resize clicks in the bottom-left/right corners, and the app icon is now compiled into an Asset Catalog so Stage Manager and Spotlight display it properly.

@@ -10,7 +10,12 @@ final class CBZCompressorTests: XCTestCase {
     /// gradient so the encoder produces a non-trivial bitstream (a flat fill
     /// compresses to a degenerate few-byte stream and breaks size assertions).
     private func makeJPEGData(width: Int, height: Int, quality: CGFloat = 0.95) -> Data {
-        let cs = CGColorSpaceCreateDeviceRGB()
+        makeJPEGData(width: width, height: height, colorSpace: CGColorSpaceCreateDeviceRGB(), quality: quality)
+    }
+
+    /// Synthesizes a JPEG tagged with the given color space, so we can assert
+    /// the profile survives recompression (the metadata-preservation fix).
+    private func makeJPEGData(width: Int, height: Int, colorSpace cs: CGColorSpace, quality: CGFloat = 0.95) -> Data {
         let ctx = CGContext(
             data: nil, width: width, height: height,
             bitsPerComponent: 8, bytesPerRow: 0, space: cs,
@@ -27,6 +32,39 @@ final class CBZCompressorTests: XCTestCase {
         CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
         CGImageDestinationFinalize(dest)
         return out as Data
+    }
+
+    /// Reads the embedded ICC profile name from JPEG bytes (e.g. "Display P3",
+    /// "sRGB IEC61966-2.1"). Returns nil if no profile is embedded.
+    private func profileName(of jpeg: Data) -> String? {
+        guard let src = CGImageSourceCreateWithData(jpeg as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        else { return nil }
+        return props[kCGImagePropertyProfileName] as? String
+    }
+
+    func test_recompressJPEG_preservesWideGamutProfile() throws {
+        // Both wide-gamut profiles the audit flagged: Display P3 and AdobeRGB.
+        for (space, expectedName) in [
+            (CGColorSpace(name: CGColorSpace.displayP3)!, "Display P3"),
+            (CGColorSpace(name: CGColorSpace.adobeRGB1998)!, "Adobe RGB (1998)")
+        ] {
+            let input = makeJPEGData(width: 3000, height: 4000, colorSpace: space, quality: 0.95)
+            XCTAssertEqual(profileName(of: input), expectedName, "Sanity: synthetic input must be \(expectedName)")
+
+            let result = CBZCompressor.recompressJPEG(
+                data: input,
+                maxDim: 2000,
+                jpegQuality: 0.85,
+                grayQuality: 0.80,
+                skipThreshold: 0.95
+            )
+            let output = try XCTUnwrap(result, "Expected a shrunk JPEG for \(expectedName)")
+            XCTAssertEqual(
+                profileName(of: output), expectedName,
+                "\(expectedName) profile must survive recompression (no silent sRGB shift)"
+            )
+        }
     }
 
     func test_recompressJPEG_largeImage_shrinks() throws {
@@ -125,5 +163,34 @@ final class CBZCompressorTests: XCTestCase {
         var roundtripped = Data()
         _ = try after.extract(pngEntry) { roundtripped.append($0) }
         XCTAssertEqual(roundtripped.count, original.pngSize, "PNG must pass through unchanged")
+
+        // The result URL must point at a real, readable archive (the fix that
+        // forwards replaceItemAt's resulting URL instead of discarding it).
+        XCTAssertTrue(FileManager.default.fileExists(atPath: result.url.path),
+                      "result.url must point at an existing file")
+        let resultAttrs = try FileManager.default.attributesOfItem(atPath: result.url.path)
+        XCTAssertEqual((resultAttrs[.size] as? Int), result.outputBytes,
+                       "result.url must be the compressed output of outputBytes")
+    }
+
+    func test_compressCBZ_sweepsOrphanedTmpFromCrashedRun() throws {
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString + ".cbz")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        _ = try makeSyntheticCBZ(at: tmp)
+
+        // Simulate a tmp file left behind by a prior crashed run: same stem,
+        // a different (dead) PID suffix. Current cleanup only removes the
+        // live PID's tmp, so this orphan would otherwise linger forever.
+        let orphan = tmp.deletingPathExtension().appendingPathExtension("cbz.tmp.999999")
+        try Data("stale".utf8).write(to: orphan)
+        defer { try? FileManager.default.removeItem(at: orphan) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.path), "Sanity: orphan planted")
+
+        _ = try CBZCompressor.compressCBZ(
+            at: tmp, maxDim: 2000, jpegQuality: 0.85, grayQuality: 0.80, skipThreshold: 0.95
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path),
+                       "Orphaned .cbz.tmp.<oldpid> from a crashed run must be swept")
     }
 }

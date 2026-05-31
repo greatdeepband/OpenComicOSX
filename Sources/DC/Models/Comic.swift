@@ -97,9 +97,12 @@ enum PageSource {
         case .zip(let archiveURL, let entryPath):
             let label = (entryPath as NSString).lastPathComponent
             Task { await DCLogger.shared.log("DECODE START  zip:\(label)") }
-            guard let archive = try? Archive(url: archiveURL, accessMode: .read),
-                  let entry = archive[entryPath] else {
-                Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — entry not found") }
+            guard let archive = try? Archive(url: archiveURL, accessMode: .read) else {
+                Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — could not open archive at \(archiveURL.path)") }
+                return nil
+            }
+            guard let entry = archive[entryPath] else {
+                Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — entry '\(entryPath)' not found in archive") }
                 return nil
             }
             let imageSource = CGImageSourceCreateIncremental(nil)
@@ -130,9 +133,12 @@ enum PageSource {
             return image
         case .zipData(let archiveData, let entryPath):
             let label = (entryPath as NSString).lastPathComponent
-            guard let archive = try? Archive(data: archiveData, accessMode: .read),
-                  let entry = archive[entryPath] else {
-                Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — entry not found") }
+            guard let archive = try? Archive(data: archiveData, accessMode: .read) else {
+                Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — could not open in-memory archive (\(archiveData.count)B)") }
+                return nil
+            }
+            guard let entry = archive[entryPath] else {
+                Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — entry '\(entryPath)' not found in archive") }
                 return nil
             }
             let imageSource = CGImageSourceCreateIncremental(nil)
@@ -185,14 +191,26 @@ enum PageSource {
         case .zip(let archiveURL, let entryPath):
             // Stream just the image metadata from the ZIP entry — no full decode.
             guard let archive = try? Archive(url: archiveURL, accessMode: .read),
-                  let entry = archive[entryPath] else { return CGSize(width: 1, height: 1) }
+                  let entry = archive[entryPath] else {
+                Task { await DCLogger.shared.log("NATURAL_SIZE FAIL  zip:\((entryPath as NSString).lastPathComponent) — archive open or entry lookup failed, falling back to 1×1") }
+                return CGSize(width: 1, height: 1)
+            }
             return imageSizeFromArchiveEntry(archive, entry)
         case .zipData(let archiveData, let entryPath):
             guard let archive = try? Archive(data: archiveData, accessMode: .read),
-                  let entry = archive[entryPath] else { return CGSize(width: 1, height: 1) }
+                  let entry = archive[entryPath] else {
+                Task { await DCLogger.shared.log("NATURAL_SIZE FAIL  zipData:\((entryPath as NSString).lastPathComponent) — archive open or entry lookup failed, falling back to 1×1") }
+                return CGSize(width: 1, height: 1)
+            }
             return imageSizeFromArchiveEntry(archive, entry)
         }
     }
+
+    /// Sentinel thrown to abort `archive.extract` once enough header bytes are
+    /// buffered. A dedicated type (not `CancellationError`) so a generic
+    /// `catch is CancellationError` elsewhere can never conflate this early-exit
+    /// I/O optimization with a real user-initiated task cancellation.
+    private enum HeaderReadComplete: Error { case enoughBytes }
 
     /// Extract just the image header bytes to determine dimensions — no full decode.
     private func imageSizeFromArchiveEntry(_ archive: Archive, _ entry: Entry) -> CGSize {
@@ -201,15 +219,21 @@ enum PageSource {
         do {
             try archive.extract(entry, bufferSize: UInt32(headerSize)) { chunk in
                 headerData.append(chunk)
-                if headerData.count >= Int(headerSize) { throw CancellationError() }
+                if headerData.count >= Int(headerSize) { throw HeaderReadComplete.enoughBytes }
             }
-        } catch is CancellationError { /* expected — we only want the header */ }
-        catch { return CGSize(width: 1, height: 1) }
+        } catch HeaderReadComplete.enoughBytes { /* expected — we only want the header */ }
+        catch {
+            Task { await DCLogger.shared.log("NATURAL_SIZE FAIL  \((entry.path as NSString).lastPathComponent) — header extract error: \(error), falling back to 1×1") }
+            return CGSize(width: 1, height: 1)
+        }
         guard let src = CGImageSourceCreateWithData(headerData as CFData, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
               let w = props[kCGImagePropertyPixelWidth] as? CGFloat,
               let h = props[kCGImagePropertyPixelHeight] as? CGFloat,
-              w > 0, h > 0 else { return CGSize(width: 1, height: 1) }
+              w > 0, h > 0 else {
+            Task { await DCLogger.shared.log("NATURAL_SIZE FAIL  \((entry.path as NSString).lastPathComponent) — could not read dimensions from \(headerData.count)B header, falling back to 1×1") }
+            return CGSize(width: 1, height: 1)
+        }
         return CGSize(width: w, height: h)
     }
 }

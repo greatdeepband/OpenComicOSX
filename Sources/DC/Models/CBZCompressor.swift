@@ -60,6 +60,14 @@ enum CBZCompressor {
         guard let dest = CGImageDestinationCreateWithData(
             outData, UTType.jpeg.identifier as CFString, 1, nil
         ) else { return nil }
+        // Color fidelity: the thumbnail CGImage carries the source's color
+        // space (Display P3 / AdobeRGB survive the thumbnail decode), and
+        // CGImageDestinationAddImage embeds that space as an ICC profile — so
+        // wide-gamut profiles round-trip without a silent sRGB shift. Verified
+        // by test_recompressJPEG_preservesWideGamutProfile. EXIF orientation
+        // is intentionally NOT re-emitted: kCGImageSourceCreateThumbnailWithTransform
+        // already baked the rotation into the pixels, so re-adding the tag
+        // would double-rotate.
         let destProps: [CFString: Any] = [
             kCGImageDestinationLossyCompressionQuality: quality
         ]
@@ -180,6 +188,20 @@ enum CBZCompressionError: Error {
 
 extension CBZCompressor {
 
+    /// Removes every sibling tmp file of the form `<name>.cbz.tmp.<pid>` next
+    /// to `url`, regardless of which process wrote it. Cleans up both our own
+    /// stale tmp and orphans abandoned by a process that crashed mid-compression.
+    static func sweepOrphanedTmpFiles(for url: URL) {
+        let dir = url.deletingLastPathComponent()
+        let prefix = url.lastPathComponent + ".tmp."   // e.g. "Foo.cbz.tmp."
+        guard let siblings = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil, options: .skipsHiddenFiles
+        ) else { return }
+        for sibling in siblings where sibling.lastPathComponent.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: sibling)
+        }
+    }
+
     /// Recompresses every JPEG entry inside the CBZ at `url`, writes a new
     /// CBZ to a sibling `.tmp` file, then atomic-renames it back over the
     /// original (so a crash mid-compression never destroys the source).
@@ -218,7 +240,11 @@ extension CBZCompressor {
 
         let tmpURL = url.deletingPathExtension()
             .appendingPathExtension("cbz.tmp.\(ProcessInfo.processInfo.processIdentifier)")
-        try? FileManager.default.removeItem(at: tmpURL)
+        // Sweep our own previous tmp AND any orphans left by crashed runs:
+        // every sibling matching `<name>.cbz.tmp.*` (any PID suffix). Without
+        // this, a crash mid-compression strands a tmp file in the user's
+        // comic folder forever — invisible until they browse it in Finder.
+        sweepOrphanedTmpFiles(for: url)
         let outArchive: Archive
         do {
             outArchive = try Archive(url: tmpURL, accessMode: .create)
@@ -347,10 +373,13 @@ extension CBZCompressor {
                 pngsPassed: passedPNG, pngsConverted: convertedPNG, othersPassed: passedOther
             )
         }
-        _ = try FileManager.default.replaceItemAt(url, withItemAt: tmpURL)
+        // replaceItemAt may hand back a different URL than `url` (e.g. a
+        // case-folded path on a case-insensitive volume). Use the resolved
+        // URL so the result reflects the file's actual on-disk location.
+        let resolvedURL = (try FileManager.default.replaceItemAt(url, withItemAt: tmpURL)) ?? url
 
         return CBZCompressionResult(
-            url: url, inputBytes: inputBytes, outputBytes: outputBytes,
+            url: resolvedURL, inputBytes: inputBytes, outputBytes: outputBytes,
             jpegsSeen: seenJPEG, jpegsRewritten: rewrote,
             jpegsSkippedBitonal: skippedBitonal,
             jpegsSkippedThreshold: skippedThreshold,

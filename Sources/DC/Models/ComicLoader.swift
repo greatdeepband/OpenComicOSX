@@ -262,6 +262,7 @@ enum ComicLoader {
               let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let contents = root["lsarContents"] as? [[String: Any]]
         else {
+            Task { await DCLogger.shared.log("[CBR] lsar -j listing unavailable/unparseable for \(url.lastPathComponent) — falling back to full extraction") }
             return loadCoverWithUnarFull(url: url)
         }
         let firstImage = contents
