@@ -322,10 +322,19 @@ actor MetalPageManager {
         guard let page = doc.page(at: pageIndex) else { return nil }
         let mediaBox = page.bounds(for: .mediaBox)
         // Render at 2× for Retina clarity. Matches the PDF scale used by the
-        // single/double page path via `PageSource.decode()`.
-        let scale: CGFloat = 2.0
-        let width = max(1, Int(mediaBox.width * scale))
-        let height = max(1, Int(mediaBox.height * scale))
+        // single/double page path via `PageSource.decode()`. Clamp the result
+        // to the Metal texture limit so an unusually large vector page can't
+        // produce an oversized buffer/texture (which SIGABRTs in makeTexture).
+        let baseScale: CGFloat = 2.0
+        let rawW = Int((mediaBox.width * baseScale).rounded())
+        let rawH = Int((mediaBox.height * baseScale).rounded())
+        let capped = Self.cappedSize(width: rawW, height: rawH,
+                                     maxDimension: Int(ReaderConstants.maxTextureDimension))
+        let width = max(1, capped.width)
+        let height = max(1, capped.height)
+        // Effective scale after clamping — keeps the page drawn to fill the
+        // (possibly reduced) buffer instead of being cropped.
+        let scale = CGFloat(width) / max(mediaBox.width, 1)
 
         guard let buffer = makePixelBuffer(width: width, height: height) else { return nil }
 
@@ -360,11 +369,46 @@ actor MetalPageManager {
             kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailFromImageAlways: false
         ]
-        guard let src = CGImageSourceCreateWithData(data as CFData, options as CFDictionary),
-              let cgImage = CGImageSourceCreateImageAtIndex(src, 0, options as CFDictionary) else {
+        guard let src = CGImageSourceCreateWithData(data as CFData, options as CFDictionary) else {
             return nil
         }
+
+        // Cap the decode so neither axis exceeds the Metal texture limit. An
+        // MTLTextureDescriptor larger than the device limit (16384) SIGABRTs in
+        // makeTexture — reachable with very tall webtoon strips (e.g. 1080 ×
+        // 20000+). When the source fits, decode at full resolution exactly as
+        // before; only oversized pages take the downsampling thumbnail path
+        // (which still carries the source color profile, like the compressor).
+        let cap = Int(ReaderConstants.maxTextureDimension)
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        let srcW = (props?[kCGImagePropertyPixelWidth] as? Int) ?? 0
+        let srcH = (props?[kCGImagePropertyPixelHeight] as? Int) ?? 0
+
+        let cgImage: CGImage?
+        if srcW > cap || srcH > cap {
+            let thumbOptions: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: cap,
+                kCGImageSourceShouldCache: false
+            ]
+            cgImage = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOptions as CFDictionary)
+        } else {
+            cgImage = CGImageSourceCreateImageAtIndex(src, 0, options as CFDictionary)
+        }
+        guard let cgImage else { return nil }
         return renderCGImageToBuffer(cgImage)
+    }
+
+    /// Scales a source pixel size down proportionally so neither axis exceeds
+    /// `maxDimension`; returns it unchanged when it already fits. Pure helper,
+    /// shared by the image and PDF decode paths and unit-tested directly.
+    static func cappedSize(width: Int, height: Int, maxDimension: Int) -> (width: Int, height: Int) {
+        guard width > maxDimension || height > maxDimension, width > 0, height > 0 else {
+            return (max(width, 0), max(height, 0))
+        }
+        let scale = Double(maxDimension) / Double(max(width, height))
+        return (max(1, Int((Double(width) * scale).rounded())),
+                max(1, Int((Double(height) * scale).rounded())))
     }
 
     private func renderCGImageToBuffer(_ cgImage: CGImage) -> CVPixelBuffer? {

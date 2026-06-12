@@ -98,6 +98,12 @@ final class MetalPageRenderer {
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         guard width > 0, height > 0 else { return nil }
+        // makeTexture SIGABRTs on a descriptor exceeding the device limit.
+        // The decode path downsamples to stay under it; this guard converts any
+        // miss (e.g. dimensions unreadable at decode time) into a non-rendered
+        // page rather than a crash.
+        let maxDim = Int(ReaderConstants.maxTextureDimension)
+        guard width <= maxDim, height <= maxDim else { return nil }
         guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else {
             return nil
         }

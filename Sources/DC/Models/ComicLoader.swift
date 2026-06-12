@@ -671,6 +671,14 @@ enum ComicLoader {
 
     // MARK: - Shell helpers
 
+    // NOTE on the four helpers below: each does `try task.run()` inside a
+    // do/catch rather than `try?`. Reading `terminationStatus` (or calling
+    // `waitUntilExit`) on a Process that never launched raises an ObjC
+    // `NSInvalidArgumentException` — an uncatchable crash. `run()` throws when
+    // the executable is missing, which is exactly the `bundledToolPath`
+    // bare-name fallback case (`unar`/`lsar` neither bundled nor in Homebrew).
+    // Returning a failure sentinel here lets callers fall back gracefully.
+
     @discardableResult
     private static func shell(_ command: String, args: [String]) -> Int32 {
         let task = Process()
@@ -678,7 +686,7 @@ enum ComicLoader {
         task.arguments = [command] + args
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
-        try? task.run()
+        do { try task.run() } catch { return -1 }
         task.waitUntilExit()
         return task.terminationStatus
     }
@@ -690,7 +698,7 @@ enum ComicLoader {
         task.arguments = args
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
-        try? task.run()
+        do { try task.run() } catch { return -1 }
         task.waitUntilExit()
         return task.terminationStatus
     }
@@ -703,10 +711,17 @@ enum ComicLoader {
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
-        try? task.run()
+        do { try task.run() } catch { return nil }
+        // Drain the pipe BEFORE waiting. A child that writes more than the
+        // pipe buffer (~64 KB — e.g. `lsar -j` on a many-page archive, or
+        // `tar -tf` on a large CBT) blocks on write() until the buffer is
+        // read; calling waitUntilExit() first then deadlocks both processes
+        // (parent waits for exit, child waits for the parent to read).
+        // readDataToEndOfFile drains continuously until the child closes the
+        // pipe at exit.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
         guard task.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8)
     }
 
@@ -718,10 +733,11 @@ enum ComicLoader {
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
-        try? task.run()
+        do { try task.run() } catch { return nil }
+        // Drain before wait — see shellOutput above for why.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
         guard task.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8)
     }
 }

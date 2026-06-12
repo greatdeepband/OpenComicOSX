@@ -109,9 +109,16 @@ struct ReaderView: View {
         case .rightArrow, .keyD:  if !isVertical { vm.nextPage() }
         case .upArrow, .keyW:     if !isVertical { vm.zoomIn() }
         case .downArrow, .keyS:   if !isVertical { vm.zoomOut() }
-        case .keyQ:               library.openAdjacentComic(offset: -1, currentMode: vm.readingMode.rawValue)
-        case .keyE:               library.openAdjacentComic(offset:  1, currentMode: vm.readingMode.rawValue)
-        case .backspace, .keyZ:  library.closeComic()
+        // Persist BEFORE leaving the comic — the toolbar buttons do this, but
+        // the keyboard equivalents previously didn't, so exiting a vertical
+        // comic via Q/E/Z/Backspace silently discarded the session's scroll
+        // offset (only persistCurrentPosition saves it in vertical modes).
+        case .keyQ:               vm.persistCurrentPosition()
+                                  library.openAdjacentComic(offset: -1, currentMode: vm.readingMode.rawValue)
+        case .keyE:               vm.persistCurrentPosition()
+                                  library.openAdjacentComic(offset:  1, currentMode: vm.readingMode.rawValue)
+        case .backspace, .keyZ:  vm.persistCurrentPosition()
+                                  library.closeComic()
         case .cmdF:               toggleFullscreen()
         case .key1:               vm.readingMode = .singlePage;     vm.saveMode()
         case .key2:               vm.readingMode = .doublePage;     vm.saveMode()
