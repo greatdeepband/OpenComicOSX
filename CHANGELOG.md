@@ -1,5 +1,38 @@
 # DC Reader — Changelog
 
+## v0.15.2 — 2026-06-12 — security + stability audit fixes
+
+A focused round of fixes from a full-repo audit covering security, concurrency/stability, and user-facing failure modes. One of these is a remote-code-execution path and two are silent data-loss paths in the compression feature, so this is a recommended update for anyone who opens downloaded comic archives. No user-facing feature changes.
+
+### Security
+
+- **Argument-injection RCE via a crafted `.cbt` (tar) file is closed.** The cover-thumbnail path passed an archive-derived member name to `tar` as a positional operand. macOS `tar` (bsdtar/libarchive) permutes options after operands, so a member named like `--use-compress-program=…` was parsed as an option and could execute an arbitrary program — and this ran automatically during library thumbnail generation, before the user ever opened the file. A `--` separator now forces the member name to be treated as an operand. The `unar` cover path (which is not getopt-based and has no `--`) gets a leading-dash guard that falls back to full extraction, which passes no member operand at all.
+
+### Fixed
+
+- **Compressing an encrypted or partly-corrupt CBZ no longer destroys it.** ZIPFoundation silently skips encrypted entries (and the decode loop dropped any unreadable entry), and the only pre-replace check was an output-vs-input byte comparison — which a short or empty output passes. Under the destructive "delete originals" default this replaced the original with a near-empty archive and lost the comic. Compression now tracks dropped entries and refuses to replace the original when any page could not be read (new `CBZCompressionError.unreadableEntries`); the original is left untouched and the failure is reported in the batch summary.
+- **Re-compressing with "Keep originals" no longer deletes the pristine backup.** The keep-originals path removed any existing `<name>-original.cbz` before copying — but on a second compression of the same comic that file *is* the pristine backup from the first run, so it was overwritten with a copy of the already-compressed file. The backup target now uniquifies (`-original`, `-original-2`, …) and never overwrites an existing file.
+- **Vertical-scroll reading position is no longer lost on a keyboard exit.** The toolbar back/next buttons persisted position before leaving, but the keyboard equivalents (`Q`/`E`/`Z`/`Backspace`) did not — and only that persist path saves the scroll offset in vertical modes. Exiting a vertical comic with the keyboard silently reset it to the top. All keyboard exit paths now persist first.
+- **Listing a large archive no longer deadlocks the loader.** The subprocess stdout helpers called `waitUntilExit()` before draining the pipe; a child writing more than the ~64 KB pipe buffer (`lsar -j` on a many-page archive, `tar -tf` on a large CBT) blocked on write while the app blocked on wait — a permanent hang with a wedged child process. The pipe is now drained before waiting.
+- **A missing `unar`/`lsar` no longer crashes the app.** The subprocess helpers read `terminationStatus` after a swallowed `try?` launch; on a process that never launched (the bare-name fallback when the tool is neither bundled nor in Homebrew) that raised an uncatchable exception. Launch failure is now handled and callers fall back gracefully.
+- **Very large pages no longer abort the renderer.** The Metal decode path decoded at native resolution; a texture exceeding the device limit (16384 px) crashed in `makeTexture`, reachable with tall webtoon-style strips. Oversized pages are now downsampled at decode (normal pages are unchanged and keep their color profile), PDF page rendering is clamped the same way, and the texture upload guards the limit as a final backstop.
+
+### Tests
+
+- Suite grows from 28 to 38: an empty/unreadable-archive abort-and-preserve-original guard, backup-target collision handling, and the texture-dimension cap helper (tall/wide/both-over strips, degenerate input).
+
+### Files
+
+- `Sources/DC/Models/ComicLoader.swift` — `--` separator + leading-dash guard for cover extraction; subprocess helpers drain-before-wait and handle launch failure.
+- `Sources/DC/Models/CBZCompressor.swift` — dropped-entry tracking + integrity guard; `unreadableEntries` error with `LocalizedError`.
+- `Sources/DC/Models/CompressionService.swift` — non-destructive `backupURL(for:)`; friendlier error messages.
+- `Sources/DC/Views/ReaderView.swift` — persist position on keyboard exit paths.
+- `Sources/DC/ViewModels/MetalPageManager.swift` — decode-time dimension cap + pure `cappedSize(...)` helper.
+- `Sources/DC/Views/MetalPageRenderer.swift` — texture-dimension backstop in `upload`.
+- `Tests/DCTests/{CBZCompressorTests,CompressionServiceTests,MetalPageManagerTests}.swift` — new coverage.
+
+---
+
 ## v0.15.1 — 2026-05-31 — compression hardening + clearer page diagnostics
 
 A round of robustness fixes from a code audit of the compression pipeline and the comic-loading paths, plus expanded test coverage. No user-facing feature changes.
