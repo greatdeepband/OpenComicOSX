@@ -30,7 +30,10 @@ BUILD="$PKG/.build/arm64-apple-macosx/release/DC"
 DSYM="$PKG/.build/arm64-apple-macosx/release/DC.dSYM"
 DIST="$PKG/dist"
 APP="$DIST/OpenComic.app"
-ZIP="$DIST/OpenComic.app.zip"
+VERSION="$(cat "$PKG/VERSION")"
+# Release-asset naming convention: OpenComic-<version>.zip (the Homebrew cask
+# at homebrew/Formula/open-comic.rb downloads exactly this name).
+ZIP="$DIST/OpenComic-${VERSION}.zip"
 
 echo "==> Cleaning dist/"
 rm -rf "$DIST"
@@ -111,45 +114,11 @@ cp "$PKG/AppBundle/Resources/bin/lsar" "$APP/Contents/Resources/bin/"
 chmod +x "$APP/Contents/Resources/bin/unar"
 chmod +x "$APP/Contents/Resources/bin/lsar"
 
-# Entitlements (matches dev build)
-cat > "$APP/Contents/Resources/app.entitlements" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key>
-    <false/>
-    <key>com.apple.security.files.user-selected.read-write</key>
-    <true/>
-</dict>
-</plist>
-EOF
-
-# Info.plist (note: CFBundleIconFile names the icon WITHOUT extension)
-cat > "$APP/Contents/Info.plist" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key><string>en</string>
-    <key>CFBundleExecutable</key><string>DC</string>
-    <key>CFBundleIdentifier</key><string>com.opncomic.open-comic</string>
-    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleName</key><string>Open Comic</string>
-    <key>CFBundleDisplayName</key><string>Open Comic</string>
-    <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>CFBundleIconName</key><string>AppIcon</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.14.0</string>
-    <key>CFBundleVersion</key><string>0.14.0</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>LSApplicationCategoryType</key><string>public.app-category.graphics-design</string>
-    <key>NSHumanReadableCopyright</key><string>Copyright 2026. All rights reserved.</string>
-    <key>NSPrincipalClass</key><string>NSApplication</string>
-    <key>NSHighResolutionCapable</key><true/>
-</dict>
-</plist>
-EOF
+# Entitlements + Info.plist from the single canonical sources in AppBundle/
+# (shared with build_app.sh; __VERSION__ substituted from the VERSION file —
+# no per-script heredocs to drift out of sync).
+cp "$PKG/AppBundle/DC.entitlements" "$APP/Contents/Resources/app.entitlements"
+sed "s/__VERSION__/$VERSION/g" "$PKG/AppBundle/Info.plist" > "$APP/Contents/Info.plist"
 
 # Sign nested executables FIRST (codesign --deep used to be enough; on
 # modern macOS the recommended order is leaves-up).
@@ -179,8 +148,8 @@ System requirements:
 
 To install on the target Mac:
 
-  1. Copy OpenComic.app (or unzip OpenComic.app.zip) into /Applications/
-     or anywhere you like.
+  1. Unzip the downloaded OpenComic-<version>.zip and move OpenComic.app
+     into /Applications/ (or anywhere you like).
 
   2. First-launch Gatekeeper prompt:
      Because this build is ad-hoc signed (not notarized via an Apple

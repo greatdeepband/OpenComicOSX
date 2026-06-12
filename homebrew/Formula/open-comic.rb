@@ -8,8 +8,8 @@
 #   brew install --cask ./homebrew/Formula/open-comic.rb
 
 class OpenComic < Cask
-  version "0.14.0"
-  sha256 "5ff98261ec6a27465ddd95566c630671711b5ed607ba11c904d0210c14ad1d25"
+  version "0.15.2"
+  sha256 "16277a56a31183cfccdd9af115e301c0958b119eb9ffcfb9b512ebee59fc1043"
 
   url "https://github.com/greatdeepband/OpenComicOSX/releases/download/v#{version}/OpenComic-#{version}.zip"
   name "Open Comic"

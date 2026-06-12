@@ -1,45 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Canonical Info.plist TEMPLATE for the app bundle. Both build_app.sh and
+  build_production.sh substitute __VERSION__ (from the repo-root VERSION file)
+  and write the result to Contents/Info.plist. This is the single source of
+  truth for bundle identity — do not hard-code these values in the build
+  scripts.
+
+  CFBundleIdentifier is LOAD-BEARING: all user data (galleries, favorites,
+  reading positions, thumbnail cache) is keyed to it via UserDefaults /
+  Application Support. Changing it silently orphans every existing user's
+  library, so it must stay com.opncomic.open-comic even though "opncomic" is a
+  typo — a rename needs a data-migration path, not an edit here.
+-->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key>
-    <string>com.przemek.opencomic</string>
-    <key>CFBundleName</key>
-    <string>Open Comic</string>
-    <key>CFBundleDisplayName</key>
-    <string>Open Comic</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.3.0</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleExecutable</key>
-    <string>DC</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>CFBundleIconFile</key>
-    <string>DC</string>
-    <key>CFBundleDocumentTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleTypeName</key>
-            <string>Comic Book Archive</string>
-            <key>CFBundleTypeExtensions</key>
-            <array>
-                <string>cbz</string>
-                <string>cbr</string>
-                <string>cbt</string>
-                <string>cb7</string>
-                <string>pdf</string>
-            </array>
-            <key>CFBundleTypeRole</key>
-            <string>Viewer</string>
-        </dict>
-    </array>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>DC</string>
+    <key>CFBundleIdentifier</key><string>com.opncomic.open-comic</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>Open Comic</string>
+    <key>CFBundleDisplayName</key><string>Open Comic</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+    <key>CFBundleVersion</key><string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.graphics-design</string>
+    <key>NSHumanReadableCopyright</key><string>Copyright © 2026. All rights reserved.</string>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

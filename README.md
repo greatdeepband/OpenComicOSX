@@ -2,6 +2,26 @@
 
 A native macOS comic book reader built with SwiftUI, AppKit, and Metal. Designed for large libraries, smooth reading, and pixel-perfect vertical scrolling.
 
+## Download
+
+**Requirements:** Apple Silicon Mac (M1 or newer), macOS 14 (Sonoma) or later.
+
+**Option A — direct download (no build needed):**
+
+1. Grab the latest **`OpenComic-<version>.zip`** from the [**Releases**](https://github.com/greatdeepband/OpenComicOSX/releases/latest) page.
+2. Unzip it and move **`OpenComic.app`** into `/Applications`.
+3. First launch: because the app is ad-hoc signed (not notarized through an Apple Developer account), Gatekeeper blocks it the first time. **Right-click the app → Open → Open**, or, if that option is missing on macOS 15+, go to **System Settings → Privacy & Security → Open Anyway**. From a terminal you can instead run `xattr -dr com.apple.quarantine /Applications/OpenComic.app`. Only needed once.
+
+**Option B — Homebrew:**
+
+```bash
+brew install --cask greatdeepband/tap/open-comic   # once a tap is published
+# …or directly from this repo's checkout:
+brew install --cask ./homebrew/Formula/open-comic.rb
+```
+
+`unar`/`lsar` (for CBR/CB7) ship inside the app bundle, so no extra dependencies are required.
+
 ## Features
 
 - **Formats:** CBZ, CBR, CB7, CBT, and PDF.
