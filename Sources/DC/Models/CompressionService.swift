@@ -65,6 +65,26 @@ final class CompressionService: ObservableObject {
 
     private var runningTask: Task<Void, Never>? = nil
 
+    /// Returns a `<stem>-original.cbz` URL next to `url` that does not already
+    /// exist on disk, so preserving the original never overwrites an existing
+    /// file. Tries `<stem>-original.cbz` first, then `-original-2`, `-3`, …
+    /// `nonisolated` so it can be unit-tested off the main actor; it touches no
+    /// instance state. Note this is best-effort, not atomic against a racing
+    /// writer — the compressor's tmp-write + atomic `replaceItemAt` is what
+    /// actually protects the source file from a concurrent run.
+    nonisolated static func backupURL(for url: URL) -> URL {
+        let stem = url.deletingPathExtension().lastPathComponent
+        let parent = url.deletingLastPathComponent()
+        let first = parent.appendingPathComponent("\(stem)-original.cbz")
+        if !FileManager.default.fileExists(atPath: first.path) { return first }
+        var n = 2
+        while true {
+            let candidate = parent.appendingPathComponent("\(stem)-original-\(n).cbz")
+            if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+            n += 1
+        }
+    }
+
     /// Kicks off a batch run over `urls`. Idempotent — if a batch is already
     /// running, the second call is ignored.
     ///
@@ -112,13 +132,17 @@ final class CompressionService: ObservableObject {
                 // at `<name>-original.cbz`.
                 var sidecarURL: URL? = nil
                 if !deleteOriginals {
-                    let stem = url.deletingPathExtension().lastPathComponent
-                    let parent = url.deletingLastPathComponent()
-                    let target = parent.appendingPathComponent("\(stem)-original.cbz")
+                    // Never overwrite an existing file when preserving the
+                    // original. The old code removed any pre-existing
+                    // `<name>-original.cbz` first — but on a second compression
+                    // of the same comic that file IS the pristine backup from
+                    // the first run, so deleting it and copying the (already
+                    // compressed) current file over it destroyed the only
+                    // full-quality copy. `backupURL(for:)` returns the first
+                    // non-colliding name instead, so an existing backup (or an
+                    // unrelated user file of that name) is left intact.
+                    let target = Self.backupURL(for: url)
                     do {
-                        if FileManager.default.fileExists(atPath: target.path) {
-                            try FileManager.default.removeItem(at: target)
-                        }
                         try FileManager.default.copyItem(at: url, to: target)
                         sidecarURL = target
                     } catch {
@@ -167,7 +191,7 @@ final class CompressionService: ObservableObject {
                     return
                 } catch {
                     summary.failed += 1
-                    summary.errors.append((url, "\(error)"))
+                    summary.errors.append((url, error.localizedDescription))
                     if let s = sidecarURL { try? FileManager.default.removeItem(at: s) }
                 }
             }

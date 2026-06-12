@@ -245,8 +245,14 @@ enum ComicLoader {
         try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmpDir) }
 
-        // Extract only the single cover entry.
-        let result = shell("tar", args: ["-xf", url.path, "-C", tmpDir.path, entryPath])
+        // Extract only the single cover entry. `entryPath` is a member name
+        // read out of the archive's own listing — i.e. attacker-controlled for
+        // a downloaded comic. bsdtar permutes options after operands, so a
+        // member named like `--use-compress-program=…` would otherwise be
+        // parsed as an option and execute an arbitrary program. The `--`
+        // separator forces everything after it to be treated as an operand
+        // (a member name to extract), never an option.
+        let result = shell("tar", args: ["-xf", url.path, "-C", tmpDir.path, "--", entryPath])
         guard result == 0 else { return nil }
         return firstImageInDirectory(tmpDir)
     }
@@ -274,6 +280,13 @@ enum ComicLoader {
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
             .first
         guard let entryPath = firstImage else { return loadCoverWithUnarFull(url: url) }
+        // `entryPath` comes from the archive's own listing (attacker-controlled
+        // for a downloaded comic). unar is not getopt-based, so it has no `--`
+        // end-of-options separator — the only way a member name can be misread
+        // as a flag is if it begins with "-". In that case skip the single-file
+        // optimization and fall back to full extraction, which passes no
+        // member operand at all and so cannot be confused for an option.
+        guard !entryPath.hasPrefix("-") else { return loadCoverWithUnarFull(url: url) }
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
         try? FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)

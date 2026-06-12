@@ -173,6 +173,43 @@ final class CBZCompressorTests: XCTestCase {
                        "result.url must be the compressed output of outputBytes")
     }
 
+    /// An archive with no readable entries (e.g. an encrypted CBZ, whose
+    /// entries ZIPFoundation silently skips) must NOT be replaced — doing so
+    /// would destroy the user's comic. The compressor must throw and leave the
+    /// original byte-for-byte untouched.
+    func test_compressCBZ_emptyArchive_throwsAndPreservesOriginal() throws {
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString + ".cbz")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        // A valid, well-formed empty ZIP: just the 22-byte End-Of-Central-
+        // Directory record. Passes the `PK` magic-byte check, opens cleanly,
+        // and its iterator yields zero entries — the same shape a fully
+        // encrypted archive presents to ZIPFoundation.
+        let emptyZip = Data([0x50, 0x4B, 0x05, 0x06] + Array(repeating: UInt8(0), count: 18))
+        try emptyZip.write(to: tmp)
+
+        XCTAssertThrowsError(
+            try CBZCompressor.compressCBZ(
+                at: tmp, maxDim: 2000, jpegQuality: 0.85, grayQuality: 0.80, skipThreshold: 0.95
+            ),
+            "Compressing an archive with no readable entries must throw, not replace the original"
+        ) { error in
+            guard case CBZCompressionError.unreadableEntries(let dropped, let total) = error else {
+                return XCTFail("Expected .unreadableEntries, got \(error)")
+            }
+            XCTAssertEqual(total, 0)
+            XCTAssertEqual(dropped, 0)
+        }
+
+        // The original file must be exactly as it was — not shrunk, not replaced.
+        let after = try Data(contentsOf: tmp)
+        XCTAssertEqual(after, emptyZip, "Original must be left untouched on abort")
+        // And no orphaned tmp left behind.
+        let leftovers = try FileManager.default.contentsOfDirectory(
+            at: tmp.deletingLastPathComponent(), includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(tmp.lastPathComponent + ".tmp.") }
+        XCTAssertTrue(leftovers.isEmpty, "Aborted compression must clean up its tmp archive")
+    }
+
     func test_compressCBZ_sweepsOrphanedTmpFromCrashedRun() throws {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString + ".cbz")
         defer { try? FileManager.default.removeItem(at: tmp) }

@@ -184,6 +184,27 @@ enum CBZCompressionError: Error {
     case notACBZ
     case invalidArchive
     case ioFailure(String)
+    /// The source archive yielded no readable entries, or some entries failed
+    /// to extract. Replacing the original with a short archive in this case
+    /// would silently destroy pages, so compression is aborted instead.
+    case unreadableEntries(dropped: Int, total: Int)
+}
+
+extension CBZCompressionError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .notACBZ:        return "Not a CBZ (ZIP) archive."
+        case .invalidArchive: return "The archive could not be opened."
+        case .ioFailure(let detail): return "I/O error: \(detail)"
+        case .unreadableEntries(let dropped, let total):
+            if total == 0 {
+                return "The archive contains no readable pages — it may be "
+                    + "encrypted or corrupt. The original was left untouched."
+            }
+            return "\(dropped) of \(total) entries could not be read (encrypted "
+                + "or corrupt). The original was left untouched to avoid data loss."
+        }
+    }
 }
 
 extension CBZCompressor {
@@ -257,6 +278,7 @@ extension CBZCompressor {
 
         let entries = Array(inArchive.makeIterator())
         let total = entries.count
+        var droppedEntries = 0
         for (idx, entry) in entries.enumerated() {
             if Task.isCancelled {
                 try? FileManager.default.removeItem(at: tmpURL)
@@ -268,6 +290,11 @@ extension CBZCompressor {
             do {
                 _ = try inArchive.extract(entry) { data.append($0) }
             } catch {
+                // This entry could not be extracted (corrupt, or encrypted —
+                // ZIPFoundation can't decrypt). Record it: dropping it from the
+                // output would silently lose a page, so the post-loop guard
+                // refuses to replace the original when droppedEntries > 0.
+                droppedEntries += 1
                 continue
             }
             let isJPEG = name.hasSuffix(".jpg") || name.hasSuffix(".jpeg")
@@ -358,6 +385,20 @@ extension CBZCompressor {
                     data.subdata(in: Int(pos)..<Int(pos) + size)
                 }
             }
+        }
+
+        // Data-integrity guard: never replace the original with an archive that
+        // is missing pages. An empty iterator means the source was unreadable
+        // (most commonly an *encrypted* CBZ — ZIPFoundation silently skips
+        // encrypted entries, so `entries` comes back empty even though the file
+        // is large and valid-looking), and any droppedEntries means an image
+        // failed to extract mid-loop. In either case the tmp archive is short by
+        // one or more pages; replacing the source with it — especially under the
+        // destructive "delete originals" default — would permanently destroy the
+        // user's comic. Abort and leave the original untouched.
+        if total == 0 || droppedEntries > 0 {
+            try? FileManager.default.removeItem(at: tmpURL)
+            throw CBZCompressionError.unreadableEntries(dropped: droppedEntries, total: total)
         }
 
         let tmpAttrs = try? FileManager.default.attributesOfItem(atPath: tmpURL.path)
