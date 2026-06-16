@@ -1,0 +1,165 @@
+import SwiftUI
+
+/// Modal sheet rendered while a `CompressionService` is `.running`,
+/// `.finished`, `.cancelled`, or `.failed`. Binds to the service for
+/// live progress and shows a per-file error list at the end.
+struct CompressionProgressSheet: View {
+    @ObservedObject var service: CompressionService
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            Divider()
+            content
+            Divider()
+            footer
+        }
+        .padding(20)
+        .frame(width: 560)
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        switch service.state {
+        case .idle:
+            Text("Compression").font(.title3).bold()
+        case .running:
+            Text("Compressing comics…").font(.title3).bold()
+        case .finished:
+            Text("Compression complete").font(.title3).bold()
+        case .cancelled:
+            Text("Compression cancelled").font(.title3).bold()
+        case .failed:
+            Text("Compression failed").font(.title3).bold()
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch service.state {
+        case .idle:
+            Text("Idle.")
+        case .running:
+            VStack(alignment: .leading, spacing: 6) {
+                // Smooth bar: combine file-level progress with within-file
+                // entry-level progress. For a 1-file batch with 245 pages,
+                // this gives us 0% → 100% across the entries instead of
+                // sitting at 0% until the whole file is done.
+                let fileFraction: Double = {
+                    guard service.entryTotal > 0 else { return 0 }
+                    return Double(service.entryCompleted) / Double(service.entryTotal)
+                }()
+                let totalProgress = (Double(service.filesCompleted) + fileFraction)
+                    / Double(max(service.filesTotal, 1))
+                ProgressView(value: min(max(totalProgress, 0), 1))
+                if service.filesTotal > 1 {
+                    Text("File \(min(service.filesCompleted + 1, service.filesTotal)) of \(service.filesTotal)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if service.entryTotal > 0 {
+                    Text("Page \(service.entryCompleted) of \(service.entryTotal)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if let url = service.currentFileURL {
+                    Text(url.lastPathComponent)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+        case .finished(let summary), .cancelled(let summary):
+            summaryView(summary)
+        case .failed(let error):
+            Text(error).font(.callout).foregroundStyle(.red)
+        }
+    }
+
+    @ViewBuilder
+    private func summaryView(_ summary: CompressionService.BatchSummary) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            statRow("Compressed:",    "\(summary.succeeded) of \(summary.attempted)")
+            statRow("Skipped (non-CBZ):", "\(summary.skippedNonCBZ)")
+            statRow("Failed:",        "\(summary.failed)")
+            let saved = summary.totalInputBytes - summary.totalOutputBytes
+            if summary.totalInputBytes > 0 {
+                let pct = Double(saved) / Double(summary.totalInputBytes) * 100
+                statRow(
+                    "Total bytes:",
+                    "\(byteString(summary.totalInputBytes)) → \(byteString(summary.totalOutputBytes)) (saved \(byteString(max(0, saved))), \(String(format: "%.1f", pct))%)"
+                )
+            }
+
+            // Per-entry-type breakdown — explains WHY compression was
+            // marginal when it was. If "PNGs passed through: N" is high
+            // relative to "JPEGs touched", the CBZ is mostly PNG and
+            // would only shrink under an opt-in PNG→JPEG conversion mode.
+            let totalEntries = summary.totalJpegsSeen + summary.totalPngsPassed + summary.totalOthersPassed
+            if totalEntries > 0 {
+                Divider()
+                Text("Entries").font(.callout).bold()
+                statRow("JPEGs rewritten:",  "\(summary.totalJpegsRewritten) of \(summary.totalJpegsSeen)")
+                if summary.totalJpegsSkipped > 0 {
+                    statRow(
+                        "JPEGs skipped:",
+                        "\(summary.totalJpegsSkipped) (already small, bitonal, or decode failure)"
+                    )
+                }
+                if summary.totalPngsConverted > 0 {
+                    statRow("PNGs converted to JPEG:", "\(summary.totalPngsConverted)")
+                }
+                if summary.totalPngsPassed > 0 {
+                    statRow("PNGs passed through:", "\(summary.totalPngsPassed)")
+                }
+                if summary.totalOthersPassed > 0 {
+                    statRow("Other entries passed:", "\(summary.totalOthersPassed)")
+                }
+            }
+
+            if !summary.errors.isEmpty {
+                Divider()
+                Text("Errors:").font(.callout).bold()
+                ScrollView { VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(summary.errors.enumerated()), id: \.offset) { _, e in
+                        Text("• \(e.url.lastPathComponent): \(e.message)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } }.frame(maxHeight: 120)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func statRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).font(.callout).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).font(.callout)
+        }
+    }
+
+    private func byteString(_ bytes: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
+    @ViewBuilder
+    private var footer: some View {
+        HStack {
+            Spacer()
+            switch service.state {
+            case .running:
+                Button("Cancel", role: .cancel) { service.cancel() }
+            case .idle, .finished, .cancelled, .failed:
+                Button("Done") {
+                    service.acknowledge()
+                    onDismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+    }
+}
