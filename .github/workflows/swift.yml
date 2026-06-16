@@ -12,29 +12,35 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Build & Test (macOS 14)
-    runs-on: macos-14
+    name: Build & Test (macOS 26)
+    runs-on: macos-26
     timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select Xcode
-        # macos-14 runners ship multiple Xcode versions; pin to the latest
-        # 15.x available so swift-tools-version: 5.10 resolves correctly.
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app
-
-      - name: Swift version
-        run: swift --version
+      - name: Toolchain versions
+        # The app uses macOS 26 (Tahoe) Liquid Glass APIs (GlassEffectContainer,
+        # .glassEffect) which require the macOS 26 SDK to compile, and relies on
+        # Swift 6 region-based isolation for its concurrent var captures. The
+        # macos-26 runner's default Xcode (26.x) provides both. No xcode-select
+        # pin: a stale pin (Xcode 15.4 on macos-14) is what previously broke this
+        # workflow. These echoes record the exact toolchain in every CI log.
+        run: |
+          xcodebuild -version
+          swift --version
+          xcrun --show-sdk-version
 
       - name: Cache SwiftPM dependencies
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('Package.resolved') }}
+          # ImageOS (e.g. "macos26") scopes the cache to the runner image, so the
+          # toolchain bump cannot restore an incompatible .build from the old image.
+          key: ${{ runner.os }}-${{ env.ImageOS }}-spm-${{ hashFiles('Package.resolved') }}
           restore-keys: |
-            ${{ runner.os }}-spm-
+            ${{ runner.os }}-${{ env.ImageOS }}-spm-
 
       - name: Build (release)
         run: swift build -c release
