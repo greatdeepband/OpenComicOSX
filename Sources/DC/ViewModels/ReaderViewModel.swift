@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 final class ReaderViewModel: ObservableObject {
     @Published var currentPage: Int = 0
+    @Published var scrollRequestNonce: Int = 0
     @Published var scale: CGFloat = 1.0
     @Published var readingMode: ReadingMode = .singlePage
     @Published var isRTL: Bool = false
@@ -150,6 +151,7 @@ final class ReaderViewModel: ObservableObject {
         var p = max(0, min(page, pageCount - 1))   // CLAMP, not guard-return
         if readingMode == .doublePage { p = Self.spreadAlignedLeftIndex(for: p, pages: comic.pages) }
         currentPage = p
+        scrollRequestNonce &+= 1
         savePosition()
         resetZoom()
         triggerPrefetch()

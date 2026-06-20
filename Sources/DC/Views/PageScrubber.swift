@@ -42,7 +42,6 @@ struct PageScrubber: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var dragPage: Int?
-    @State private var isHovering: Bool = false
 
     private var displayPage: Int { dragPage ?? vm.currentPage }
 
@@ -56,7 +55,9 @@ struct PageScrubber: View {
                                             pageCount: vm.pageCount,
                                             isRTL: vm.isRTL)
                 let isDragging = dragPage != nil
-                let trackHeight: CGFloat = (isDragging || isHovering) ? 6 : 4
+                // Track reacts ONLY while actively dragging — no hover/idle
+                // highlight (the section must never light up on its own).
+                let trackHeight: CGFloat = isDragging ? 6 : 4
                 let thumbSize: CGFloat  = (!reduceMotion && isDragging) ? 16 : 13
 
                 ZStack(alignment: .leading) {
@@ -119,19 +120,12 @@ struct PageScrubber: View {
                             dragPage = nil
                         }
                 )
-                .onHover { isHovering = $0 }
             }
             .frame(height: ReaderConstants.scrubberStripHeight)
-            // Keyboard navigation
-            .focusable()
-            .onKeyPress(.leftArrow) {
-                vm.isRTL ? vm.nextPage() : vm.previousPage()
-                return .handled
-            }
-            .onKeyPress(.rightArrow) {
-                vm.isRTL ? vm.previousPage() : vm.nextPage()
-                return .handled
-            }
+            // No `.focusable()`: it drew a macOS keyboard focus ring (the blue
+            // outline that "lit up" on the strip) and the app-wide KeyMonitor
+            // already handles ←/→ paging, so nothing functional is lost. The
+            // strip now never highlights — on hover, focus, or idle.
             // VoiceOver / accessibility
             .accessibilityElement()
             // Note: AccessibilityTraits has no `.isAdjustable` / `.adjustable`

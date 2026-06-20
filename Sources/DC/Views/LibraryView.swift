@@ -288,6 +288,10 @@ struct LibraryDetail: View {
     @EnvironmentObject var library: LibraryViewModel
     @Binding var debugMode: Bool
 
+    init(debugMode: Binding<Bool>) {
+        self._debugMode = debugMode
+    }
+
     var body: some View {
         switch library.selectedSection ?? .home {
         case .home:
@@ -344,6 +348,16 @@ struct LibraryGridPane: View {
     let sourceURLs: [URL]
     @Binding var debugMode: Bool
 
+    init(section: LibrarySection, title: String, emptyTitle: String, emptyHint: String,
+         sourceURLs: [URL], debugMode: Binding<Bool>) {
+        self.section = section
+        self.title = title
+        self.emptyTitle = emptyTitle
+        self.emptyHint = emptyHint
+        self.sourceURLs = sourceURLs
+        self._debugMode = debugMode
+    }
+
     @State private var selectedURL: URL?
 
     var body: some View {
@@ -351,7 +365,12 @@ struct LibraryGridPane: View {
             PaneToolbar(section: section, title: title, debugMode: $debugMode)
             Divider()
             if filteredURLs.isEmpty {
-                EmptyPane(title: emptyTitle, hint: emptyHint)
+                EmptyPane(
+                    title: emptyTitle,
+                    hint: emptyHint,
+                    actionLabel: "Add Comics…",
+                    action: { library.openFilePicker() }
+                )
             } else {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: 16) {
@@ -462,23 +481,32 @@ struct LibraryGalleryPane: View {
     let gallery: Gallery
     @Binding var debugMode: Bool
 
+    init(gallery: Gallery, debugMode: Binding<Bool>) {
+        self.gallery = gallery
+        self._debugMode = debugMode
+    }
+
     @State private var selectedURL: URL?
+
+    @ViewBuilder private var galleryToolbar: some View {
+        let addButton = Button {
+            pickComicsOrFolders { urls in addToGallery(urls) }
+        } label: {
+            Label("Add", systemImage: "plus.circle.fill")
+        }
+        .help("Add comics or folders to this gallery")
+
+        PaneToolbar(
+            section: .gallery(gallery.id),
+            title: gallery.name,
+            debugMode: $debugMode,
+            trailing: { addButton }
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            PaneToolbar(
-                section: .gallery(gallery.id),
-                title: gallery.name,
-                debugMode: $debugMode,
-                trailing: {
-                    Button {
-                        pickComicsOrFolders { urls in addToGallery(urls) }
-                    } label: {
-                        Label("Add", systemImage: "plus.circle.fill")
-                    }
-                    .help("Add comics or folders to this gallery")
-                }
-            )
+            galleryToolbar
             Divider()
 
             if gallery.comics.isEmpty {
@@ -641,8 +669,20 @@ struct PaneToolbar<Trailing: View>: View {
             searchField
             sortMenu
             zoomStepper
+
+            Button {
+                library.openFilePicker()
+            } label: {
+                Label("Add to Library…", systemImage: "plus.circle")
+                    .labelStyle(.iconOnly)
+            }
+            .buttonStyle(.plain)
+            .help("Add to Library…")
+            .accessibilityLabel("Add to Library")
+
             trailing()
 
+            #if DEBUG
             Divider().frame(height: 18)
 
             Button {
@@ -655,6 +695,7 @@ struct PaneToolbar<Trailing: View>: View {
             .help(debugMode ? "Disable memory debug" : "Enable memory debug")
             .accessibilityLabel("Memory usage")
             .accessibilityValue(debugMode ? "On" : "Off")
+            #endif
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -864,6 +905,10 @@ enum LibrarySort {
 struct LibraryHome: View {
     @EnvironmentObject var library: LibraryViewModel
     @Binding var debugMode: Bool
+
+    init(debugMode: Binding<Bool>) {
+        self._debugMode = debugMode
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1316,7 +1361,7 @@ struct ComicCard: View {
                 }
                 .overlay(alignment: .bottomTrailing) {
                     let fav = library.isFavorite(url: url)
-                    if isHovering || fav {
+                    if isHovering || fav || isSelected {
                         Button {
                             library.toggleFavorite(url: url)
                         } label: {

@@ -76,6 +76,13 @@ struct MetalPageView: NSViewRepresentable {
     /// can't enter the inset band.
     var topContentInset: CGFloat = 0
 
+    /// One-shot scroll signal raised only by an intentional `goTo` (scrubber
+    /// release, bookmark tap, etc.). The vertical layout observer in
+    /// `updateNSView` fires `scrollToPage` only when this nonce changes,
+    /// so user-driven scrolls (which update `currentPage` without bumping
+    /// the nonce) never trigger a programmatic scroll-to.
+    var scrollRequestNonce: Int = 0
+
     var onPageChanged: (Int) -> Void
     var onOffsetChanged: (Double) -> Void
     var onMagnificationChanged: ((CGFloat) -> Void)?
@@ -571,6 +578,24 @@ struct MetalPageView: NSViewRepresentable {
             }
         }
 
+        // Vertical-mode programmatic scroll: fire when an intentional `goTo`
+        // bumps the nonce (scrubber release, bookmark tap, etc.). User-driven
+        // scrolls update `currentPage` via the scroll observer but do NOT bump
+        // `scrollRequestNonce`, so this block never races with free scrolling.
+        //
+        // ORDERING: runs AFTER the rebuild block above. If a rebuild just ran,
+        // `rebuildLayout()` has already refreshed `pageYOffsets` synchronously,
+        // so `scrollToPage` can compute the correct Y immediately.
+        // For the `verticalDouble` rebuild path the coordinator's `rebuildLayout`
+        // is also synchronous (no dispatch), so no additional async deferral is
+        // needed here — we match the same model as the `restorePage` synchronous
+        // restore at line ~500.
+        if case .verticalStack = layout,
+           scrollRequestNonce != context.coordinator.lastScrollRequestNonce {
+            context.coordinator.lastScrollRequestNonce = scrollRequestNonce
+            context.coordinator.scrollToPage(currentPage)
+        }
+
         context.coordinator.updateVisibleRange()
     }
 
@@ -789,6 +814,10 @@ extension MetalPageView {
         var currentPage: Int = 0
         var lastLayout: ReadingLayout = .verticalStack(pagesPerRow: 1)
         var lastCurrentPage: Int = -1
+        /// Tracks the last `scrollRequestNonce` value we acted on. Initialised to
+        /// 0 so the first `updateNSView` (nonce 0 == 0) does NOT spuriously
+        /// scroll — appear-time restore is `restorePage`'s job.
+        var lastScrollRequestNonce: Int = 0
         var isRTL: Bool = false
         var lastIsRTL: Bool = false
 
@@ -859,6 +888,12 @@ extension MetalPageView {
         /// `CACurrentMediaTime()` at the mouse-down. Reserved for future use;
         /// escalation timing is handled by the async Task sleep.
         var pendingLoupeDownTime: TimeInterval = 0
+        /// True only while a `.leftMouseDown` that was ACCEPTED for tap/loupe
+        /// (i.e. NOT exempted as a navbar-band or window-resize click) is in
+        /// flight. The `.leftMouseUp` tap-turn fires only when this is set, so a
+        /// click anywhere on the top-bar chrome can never produce a stale
+        /// page-turn from a previous down's coordinates.
+        var loupeGestureArmed: Bool = false
 
         var onPageNavSwipe: ((Int) -> Void)?
         var onComicNavSwipe: ((Int) -> Void)?

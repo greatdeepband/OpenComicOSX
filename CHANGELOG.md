@@ -1,5 +1,22 @@
 # DC Reader — Changelog
 
+## v0.16.1 — 2026-06-20 — reader & library fixes
+
+Fixes to the 0.16.0 reader and library, from hands-on testing.
+
+### Fixed
+
+- **The page scrubber now navigates in vertical and vertical-double modes.** Dragging or clicking the scrubber — and tapping a bookmark — scrolls the view to that page; previously it moved the page indicator but not the page in the continuous-scroll modes.
+- **Clicking the reader's top bar no longer turns the page.** A stray tap-turn fired on clicks over the toolbar (and even its buttons); page-turning is now confined to the page area.
+- **The page scrubber no longer shows a stray highlight.** Removed the keyboard focus ring and hover highlight on the scrubber strip — it reacts only while you're dragging it.
+
+### Changed
+
+- A hairline separator now sits under the reader's button row.
+- Library: the favorite control is discoverable (shown when a card is selected, not hover-only); a visible "Add to Library" button appears in every pane; and the empty Favorites / Recents / All Comics states now offer an action button. The developer memory monitor no longer appears in release builds.
+
+---
+
 ## v0.16.0 — 2026-06-20 — reader features, accessibility, and distribution
 
 A large feature release: a live page scrubber, bookmarks, manga / right-to-left reading, a full VoiceOver and keyboard-accessibility pass, a native macOS app shell, and distribution hardening — on top of the security and stability fixes from the 0.15.x line.

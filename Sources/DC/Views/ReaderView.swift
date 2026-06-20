@@ -98,11 +98,16 @@ struct ReaderView: View {
             // Top bar overlay — sits visually above the reader content.
             // Geometry invariant: bar (topBarHeight - scrubberStripHeight = 50pt)
             // + scrubber (scrubberStripHeight = 22pt) = topBarHeight (72pt).
-            // The Divider is intentionally omitted: its ~1pt would push the
-            // scrubber's bottom edge outside isInTopBarBand, which is the exact
-            // placement bug this commit fixes.
+            // The separator under the buttons is drawn as an OVERLAY (not a
+            // layout Divider) so it adds no height — keeping the scrubber's
+            // bottom edge at window-Y == topBarHeight, inside isInTopBarBand.
             VStack(spacing: 0) {
                 readerTopBar
+                    .overlay(alignment: .bottom) {
+                        Rectangle()
+                            .fill(Color.primary.opacity(ReaderConstants.toolbarSegmentDividerOpacity))
+                            .frame(height: 1)
+                    }
                 // Scrubber strip — framed at scrubberStripHeight so its bottom
                 // edge sits at window-Y == topBarHeight → inside the band.
                 PageScrubber(vm: vm)
@@ -196,6 +201,7 @@ struct ReaderView: View {
             restoreOffset: nil,
             pageManager: vm.pageManager,
             topContentInset: readerTopBarHeight,
+            scrollRequestNonce: vm.scrollRequestNonce,
             onPageChanged: { _ in /* single-page does not scroll between pages */ },
             onOffsetChanged: { _ in /* single-page ignores scroll fraction */ },
             onMagnificationChanged: { newScale in
@@ -231,6 +237,7 @@ struct ReaderView: View {
             restoreOffset: nil,
             pageManager: vm.pageManager,
             topContentInset: readerTopBarHeight,
+            scrollRequestNonce: vm.scrollRequestNonce,
             onPageChanged: { _ in /* double-page advances via keyboard, not scroll */ },
             onOffsetChanged: { _ in /* double-page ignores scroll fraction */ },
             onMagnificationChanged: { newScale in
@@ -286,6 +293,7 @@ struct ReaderView: View {
                 }(),
                 pageManager: vm.pageManager,
                 topContentInset: readerTopBarHeight,
+                scrollRequestNonce: vm.scrollRequestNonce,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
                 onOffsetChanged: { fraction in
                     vm.scrollOffsetFraction = fraction

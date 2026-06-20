@@ -132,6 +132,11 @@ extension MetalPageView.Coordinator {
     ) {
         switch event.type {
         case .leftMouseDown:
+            // A fresh down disarms tap-turn until this down is ACCEPTED below.
+            // An exempted down (navbar band / resize edge) returns early and
+            // leaves this false, so the matching .leftMouseUp can't fire a
+            // page-turn from the previous accepted down's coordinates.
+            loupeGestureArmed = false
             // Window-frame resize hot zone guard (verbatim from vertical path).
             let p = event.locationInWindow
             let f = window.frame
@@ -166,6 +171,7 @@ extension MetalPageView.Coordinator {
             let win = window
             pendingLoupeDownLocation = svLocal
             pendingLoupeDownTime = CACurrentMediaTime()
+            loupeGestureArmed = true   // down accepted → tap-turn may fire on up
 
             pendingLoupeTimer = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(LoupeHoldThreshold))
@@ -206,6 +212,12 @@ extension MetalPageView.Coordinator {
                 // Quick tap — cursor was never hidden; restore unconditionally
                 // (no-ops if the cursor is already visible).
                 guard event.clickCount == 1 else { showCursorIfNeeded(); return }
+                // Only turn the page if THIS gesture's down was accepted (not a
+                // navbar / scrubber / resize click). Without this, an exempted
+                // down still reached here and turned the page using a stale
+                // down-x — the "clicking the navbar turns pages" bug.
+                guard loupeGestureArmed else { showCursorIfNeeded(); return }
+                loupeGestureArmed = false
                 // Turn the page using the stored down-x for direction.
                 switch tapTurnDirection(
                     downX: pendingLoupeDownLocation.x,
