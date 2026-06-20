@@ -38,12 +38,40 @@ extension MetalPageView.Coordinator {
         // edges (left / right / bottom / top — fade-to-black at the page
         // edge in every direction).
         //
-        // NSScrollView's effective coords here are TOP-ORIGIN (the
-        // documentView is `isFlipped = true`, which propagates through
-        // the clipView). The top strip is the band `[0, topBarHeight]`.
+        // The navbar sits OVER the scrollView in window-coordinate space.
+        // `event.locationInWindow` uses BOTTOM-LEFT origin (proven by
+        // `updateLoupe` at :240-243 which maps y via `windowHeight - windowPt.y`).
+        // The top toolbar band therefore has the LARGEST y values.
+        // We use `isInTopBarBand` (window coords) — NOT a scroll-view-local
+        // test — so the guard is geometrically correct regardless of
+        // NSScrollView's flipped coordinate system.
         let svLocal = scrollView.convert(event.locationInWindow, from: nil)
-        let inTopStrip = svLocal.y < ReaderConstants.topBarHeight
 
+        // Vertical-stack layouts retain the original immediate-loupe behaviour.
+        // Paged layouts (singlePage / doubleSpread) use the hold-for-loupe /
+        // tap-to-turn state machine below.
+        switch layout {
+        case .verticalStack:
+            handleLoupeEventVertical(
+                event, window: window, scrollView: scrollView,
+                svLocal: svLocal
+            )
+        case .singlePage, .doubleSpread:
+            handleLoupeEventPaged(
+                event, window: window, scrollView: scrollView,
+                svLocal: svLocal
+            )
+        }
+    }
+
+    // MARK: - Vertical-stack loupe (unchanged behaviour)
+
+    private func handleLoupeEventVertical(
+        _ event: NSEvent,
+        window: NSWindow,
+        scrollView: NSScrollView,
+        svLocal: CGPoint
+    ) {
         switch event.type {
         case .leftMouseDown:
             // Window-frame resize hot zone guard. AppKit reserves a thin
@@ -73,7 +101,11 @@ extension MetalPageView.Coordinator {
             let inYCorner = p.y < c || p.y > f.height - c
             let inCorner  = inXCorner && inYCorner
             if inEdge || inCorner { return }
-            if inTopStrip { return }
+            // Top-bar exemption: window coords are bottom-left origin →
+            // the toolbar band occupies the LARGEST y values.
+            if isInTopBarBand(locationInWindowY: p.y,
+                              windowHeight: f.height,
+                              topBarHeight: ReaderConstants.topBarHeight) { return }
             loupeDragActive = true
             updateLoupe(at: event.locationInWindow, in: window)
         case .leftMouseDragged:
@@ -85,6 +117,105 @@ extension MetalPageView.Coordinator {
                 showCursorIfNeeded()
                 hideLoupe()
             }
+        default:
+            break
+        }
+    }
+
+    // MARK: - Paged loupe (hold-for-loupe / tap-to-turn)
+
+    private func handleLoupeEventPaged(
+        _ event: NSEvent,
+        window: NSWindow,
+        scrollView: NSScrollView,
+        svLocal: CGPoint
+    ) {
+        switch event.type {
+        case .leftMouseDown:
+            // Window-frame resize hot zone guard (verbatim from vertical path).
+            let p = event.locationInWindow
+            let f = window.frame
+            let m = ReaderConstants.windowResizeMargin
+            let inEdge =
+                p.x < m ||
+                p.x > f.width  - m ||
+                p.y < m ||
+                p.y > f.height - m
+            let c = ReaderConstants.windowResizeCornerMargin
+            let inXCorner = p.x < c || p.x > f.width  - c
+            let inYCorner = p.y < c || p.y > f.height - c
+            let inCorner  = inXCorner && inYCorner
+            if inEdge || inCorner {
+                pendingLoupeTimer?.cancel(); pendingLoupeTimer = nil
+                return
+            }
+            // Top-bar exemption: window coords are bottom-left origin →
+            // the toolbar band occupies the LARGEST y values. Cancel any
+            // stale timer so a later .leftMouseUp can't fire a page-turn.
+            if isInTopBarBand(locationInWindowY: p.y,
+                              windowHeight: f.height,
+                              topBarHeight: ReaderConstants.topBarHeight) {
+                pendingLoupeTimer?.cancel(); pendingLoupeTimer = nil
+                return
+            }
+            guard event.clickCount == 1 else { return }
+
+            // Capture window point and scroll-view-local position; do NOT
+            // activate the loupe or hide the cursor yet.
+            let downWindowPt = event.locationInWindow
+            let win = window
+            pendingLoupeDownLocation = svLocal
+            pendingLoupeDownTime = CACurrentMediaTime()
+
+            pendingLoupeTimer = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(LoupeHoldThreshold))
+                guard let self, self.pendingLoupeTimer != nil else { return }
+                self.loupeDragActive = true
+                self.updateLoupe(at: downWindowPt, in: win)   // escalation hides the cursor
+                self.pendingLoupeTimer = nil
+            }
+
+        case .leftMouseDragged:
+            if pendingLoupeTimer != nil {
+                // Gesture still pending — check if the finger moved too far.
+                let dx = svLocal.x - pendingLoupeDownLocation.x
+                let dy = svLocal.y - pendingLoupeDownLocation.y
+                let movement = (dx * dx + dy * dy).squareRoot()
+                if movement > LoupeMoveTolerance {
+                    pendingLoupeTimer?.cancel()
+                    pendingLoupeTimer = nil
+                    loupeDragActive = true
+                    updateLoupe(at: event.locationInWindow, in: window)
+                }
+            } else if loupeDragActive {
+                updateLoupe(at: event.locationInWindow, in: window)
+            }
+            // else: no pending timer and no active loupe — ignore (drag after
+            // a pass-through down event such as resize or top-strip).
+
+        case .leftMouseUp:
+            pendingLoupeTimer?.cancel()
+            pendingLoupeTimer = nil
+
+            if loupeDragActive {
+                // End active loupe session.
+                loupeDragActive = false
+                showCursorIfNeeded()
+                hideLoupe()
+            } else {
+                // Quick tap — cursor was never hidden; restore unconditionally
+                // (no-ops if the cursor is already visible).
+                guard event.clickCount == 1 else { showCursorIfNeeded(); return }
+                // Turn the page using the stored down-x for direction.
+                switch tapTurnDirection(
+                    downX: pendingLoupeDownLocation.x,
+                    viewportWidth: scrollView.frame.width
+                ) {
+                case .previous: onPageNavSwipe?(-1)
+                case .next:     onPageNavSwipe?(+1)
+                }
+            }
+
         default:
             break
         }

@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import CoreVideo
 import ImageIO
+import os
 import PDFKit
 import ZIPFoundation
 
@@ -57,11 +58,31 @@ actor MetalPageManager {
     /// microsecond op.
     fileprivate nonisolated let thumbnailStore = ThumbnailStore()
 
-    /// Fires on the main actor after a thumbnail decode succeeds.
-    /// Consumers (the reader's `Coordinator`) wire this to upload the
-    /// `CGImage` into the renderer's `thumbnailRing` so the next render
-    /// can use it as a placeholder.
-    nonisolated(unsafe) var onThumbReady: ((Int, CGImage) -> Void)?
+    /// Lock-guarded storage for the thumbnail-ready callback.
+    /// Access via `setOnThumbReady(_:)` (write) and the internal
+    /// `onThumbReadyLock.withLock { $0 }` snapshot pattern (read).
+    /// Using `OSAllocatedUnfairLock` (available macOS 14+) avoids the
+    /// data race that `nonisolated(unsafe) var` introduced: `decodeThumb`
+    /// is nonisolated and runs on arbitrary cooperative-pool threads, so
+    /// a plain `var` without synchronisation is a write/read race.
+    private let onThumbReadyLock = OSAllocatedUnfairLock<((Int, CGImage) -> Void)?>(initialState: nil)
+
+    /// Sets the thumbnail-ready callback. Safe to call from any isolation
+    /// context, including `@MainActor` (the typical caller site in
+    /// `MetalPageView.makeNSView`). Replaces the previous
+    /// `nonisolated(unsafe) var onThumbReady` assignment.
+    nonisolated func setOnThumbReady(_ cb: ((Int, CGImage) -> Void)?) {
+        onThumbReadyLock.withLock { $0 = cb }
+    }
+
+    /// Snapshots the current callback under the lock and, if set, invokes it
+    /// on the main actor with `(pageIndex, image)`. This mirrors the exact
+    /// read-then-call pattern in `decodeThumb` and is exposed `internal` so
+    /// tests can exercise the lock's read path concurrently with writes.
+    nonisolated func invokeOnThumbReady(pageIndex: Int, image: CGImage) async {
+        let cb = onThumbReadyLock.withLock { $0 }
+        if let cb { await MainActor.run { cb(pageIndex, image) } }
+    }
 
     /// Decode a single page from a PageSource into a BGRA CVPixelBuffer.
     /// Returns nil if decoding fails. Caches successful results and evicts
@@ -81,7 +102,7 @@ actor MetalPageManager {
         case .file(let fileURL):
             buffer = decodeFilePage(at: fileURL)
         case .pdf(let doc, let pdfIndex):
-            buffer = decodePDFPage(doc: doc, pageIndex: pdfIndex)
+            buffer = await decodePDFPage(doc: doc, pageIndex: pdfIndex)
         }
 
         if let buffer {
@@ -137,14 +158,12 @@ actor MetalPageManager {
         case .zipData(let data, let entryPath):
             image = decodeThumbFromZipData(archiveData: data, entryPath: entryPath)
         case .pdf(let doc, let pdfIndex):
-            image = decodeThumbFromPDF(doc: doc, pageIndex: pdfIndex)
+            image = await decodeThumbFromPDF(doc: doc, pageIndex: pdfIndex)
         }
 
         if let image {
             await thumbnailStore.store(image, for: pageIndex)
-            if let cb = onThumbReady {
-                await MainActor.run { cb(pageIndex, image) }
-            }
+            await invokeOnThumbReady(pageIndex: pageIndex, image: image)
         }
         return image
     }
@@ -207,27 +226,20 @@ actor MetalPageManager {
         return makeThumb(from: src)
     }
 
-    nonisolated private func decodeThumbFromPDF(doc: PDFDocument, pageIndex: Int) -> CGImage? {
-        guard let page = doc.page(at: pageIndex) else { return nil }
-        let bounds = page.bounds(for: .mediaBox)
-        // Preserve aspect: bound the longer edge to thumbMaxPixel.
-        let maxEdge = CGFloat(ReaderConstants.thumbMaxPixel)
-        let longer = max(bounds.width, bounds.height)
-        let scale = longer > 0 ? maxEdge / longer : 1
-        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-        let nsImage = page.thumbnail(of: size, for: .mediaBox)
-        var proposedRect = CGRect(origin: .zero, size: nsImage.size)
-        return nsImage.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil)
+    /// PDF thumbnail decode. The `page.bounds`/`page.thumbnail` work is owned
+    /// by `PDFKitGate`'s serial executor (PDFKit is not thread-safe), so the
+    /// PDF branch of `preScanThumbnails`' parallel `withTaskGroup` is
+    /// effectively serialized through the gate — the accepted trade-off.
+    nonisolated private func decodeThumbFromPDF(doc: PDFDocument, pageIndex: Int) async -> CGImage? {
+        await PDFKitGate.shared.thumbnail(doc, pageIndex: pageIndex)
     }
 
     nonisolated private func extractEntry(archive: Archive, entry: Entry) -> Data? {
-        var data = Data()
         do {
-            _ = try archive.extract(entry) { chunk in data.append(chunk) }
+            return try archive.extractEntryData(entry, cap: ReaderConstants.maxUncompressedBytes)
         } catch {
             return nil
         }
-        return data
     }
 
     nonisolated private func makeThumb(from src: CGImageSource) -> CGImage? {
@@ -301,13 +313,12 @@ actor MetalPageManager {
     }
 
     private func decodeArchiveEntry(archive: Archive, entry: Entry) -> CVPixelBuffer? {
-        var entryData = Data()
         do {
-            try archive.extract(entry) { chunk in entryData.append(chunk) }
+            let entryData = try archive.extractEntryData(entry, cap: ReaderConstants.maxUncompressedBytes)
+            return decodeImageData(entryData)
         } catch {
             return nil
         }
-        return decodeImageData(entryData)
     }
 
     private func decodeFilePage(at url: URL) -> CVPixelBuffer? {
@@ -318,46 +329,14 @@ actor MetalPageManager {
         return decodeImageData(data)
     }
 
-    private func decodePDFPage(doc: PDFDocument, pageIndex: Int) -> CVPixelBuffer? {
-        guard let page = doc.page(at: pageIndex) else { return nil }
-        let mediaBox = page.bounds(for: .mediaBox)
-        // Render at 2× for Retina clarity. Matches the PDF scale used by the
-        // single/double page path via `PageSource.decode()`. Clamp the result
-        // to the Metal texture limit so an unusually large vector page can't
-        // produce an oversized buffer/texture (which SIGABRTs in makeTexture).
-        let baseScale: CGFloat = 2.0
-        let rawW = Int((mediaBox.width * baseScale).rounded())
-        let rawH = Int((mediaBox.height * baseScale).rounded())
-        let capped = Self.cappedSize(width: rawW, height: rawH,
-                                     maxDimension: Int(ReaderConstants.maxTextureDimension))
-        let width = max(1, capped.width)
-        let height = max(1, capped.height)
-        // Effective scale after clamping — keeps the page drawn to fill the
-        // (possibly reduced) buffer instead of being cropped.
-        let scale = CGFloat(width) / max(mediaBox.width, 1)
-
-        guard let buffer = makePixelBuffer(width: width, height: height) else { return nil }
-
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-
-        guard let ctx = CGContext(
-            data: CVPixelBufferGetBaseAddress(buffer),
-            width: width, height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
-
-        // White background (PDFs are opaque pages; the transparent pixel
-        // buffer would otherwise show the reader's black behind clear areas).
-        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
-        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        ctx.scaleBy(x: scale, y: scale)
-        page.draw(with: .mediaBox, to: ctx)
-        return buffer
+    /// Full-res PDF page decode. PDFKit is not thread-safe, so the actual
+    /// `page.bounds`/`page.draw` (and the CVPixelBuffer build over it) now live
+    /// inside `PDFKitGate`'s serial executor. The requested 2× Retina size is
+    /// `PDFKitGate.naturalSize` (mediaBox × 2); `renderPage` re-clamps it to
+    /// the Metal texture limit before drawing.
+    private func decodePDFPage(doc: PDFDocument, pageIndex: Int) async -> CVPixelBuffer? {
+        let pixelSize = await PDFKitGate.shared.naturalSize(doc, index: pageIndex)
+        return await PDFKitGate.shared.renderPage(doc, index: pageIndex, pixelSize: pixelSize)
     }
 
     // MARK: - Shared helpers

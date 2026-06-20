@@ -8,7 +8,7 @@ import Darwin.Mach
 ///
 /// Stats are:
 ///   - Published to the UI via @Published properties (for the debug overlay).
-///   - Written to DCLogger (/tmp/dc_debug.log) so they can be tailed remotely.
+///   - Written to DCLogger (~/Library/Caches/<bundle-id>/dc_debug.log) so they can be reviewed.
 ///
 /// Usage:
 ///   MemoryMonitor.shared.start(library: libraryViewModel)

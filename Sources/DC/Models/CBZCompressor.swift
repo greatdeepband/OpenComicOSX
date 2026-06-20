@@ -209,6 +209,18 @@ extension CBZCompressionError: LocalizedError {
 
 extension CBZCompressor {
 
+    /// Returns a slice of `buffer` starting at `pos` with byte count `size`.
+    /// Throws `CBZCompressionError.ioFailure` if the range would exceed the
+    /// buffer bounds. Internal (not private) so `@testable` tests can call it
+    /// directly to verify the overrun guard without going through ZIPFoundation.
+    static func providerSlice(_ buffer: Data, pos: Int64, size: Int) throws -> Data {
+        let end = Int(pos) + size
+        guard end <= buffer.count else {
+            throw CBZCompressionError.ioFailure("provider overrun: \(end) > \(buffer.count)")
+        }
+        return buffer.subdata(in: Int(pos)..<end)
+    }
+
     /// Removes every sibling tmp file of the form `<name>.cbz.tmp.<pid>` next
     /// to `url`, regardless of which process wrote it. Cleans up both our own
     /// stale tmp and orphans abandoned by a process that crashed mid-compression.
@@ -279,6 +291,11 @@ extension CBZCompressor {
         let entries = Array(inArchive.makeIterator())
         let total = entries.count
         var droppedEntries = 0
+        // Wrap the processing loop so that any thrown write error (overrun,
+        // archive corruption, etc.) removes the stranded tmp file before
+        // re-throwing. CancellationError is excluded — its own path above
+        // already removes the tmp and throws.
+        do {
         for (idx, entry) in entries.enumerated() {
             if Task.isCancelled {
                 try? FileManager.default.removeItem(at: tmpURL)
@@ -314,17 +331,23 @@ extension CBZCompressor {
                             uncompressedSize: Int64(newBytes.count),
                             compressionMethod: .deflate
                         ) { pos, size in
-                            newBytes.subdata(in: Int(pos)..<Int(pos) + size)
+                            try CBZCompressor.providerSlice(newBytes, pos: pos, size: size)
                         }
                         rewrote += 1
+                    } catch let encodeError as CBZCompressionError {
+                        // A CBZCompressionError (e.g. provider overrun) must not be
+                        // swallowed — surface it immediately rather than falling back.
+                        throw encodeError
                     } catch {
+                        // Archive write failure for the re-encoded bytes: fall back
+                        // to storing the original JPEG entry unchanged.
                         failedJPEG += 1
                         try outArchive.addEntry(
                             with: entry.path, type: .file,
                             uncompressedSize: Int64(data.count),
                             compressionMethod: .deflate
                         ) { pos, size in
-                            data.subdata(in: Int(pos)..<Int(pos) + size)
+                            try CBZCompressor.providerSlice(data, pos: pos, size: size)
                         }
                     }
                 } else {
@@ -334,7 +357,7 @@ extension CBZCompressor {
                         uncompressedSize: Int64(data.count),
                         compressionMethod: .deflate
                     ) { pos, size in
-                        data.subdata(in: Int(pos)..<Int(pos) + size)
+                        try CBZCompressor.providerSlice(data, pos: pos, size: size)
                     }
                 }
             } else if isPNG {
@@ -362,7 +385,7 @@ extension CBZCompressor {
                         uncompressedSize: Int64(newBytes.count),
                         compressionMethod: .deflate
                     ) { pos, size in
-                        newBytes.subdata(in: Int(pos)..<Int(pos) + size)
+                        try CBZCompressor.providerSlice(newBytes, pos: pos, size: size)
                     }
                     convertedPNG += 1
                     continue
@@ -373,7 +396,7 @@ extension CBZCompressor {
                     uncompressedSize: Int64(data.count),
                     compressionMethod: .deflate
                 ) { pos, size in
-                    data.subdata(in: Int(pos)..<Int(pos) + size)
+                    try CBZCompressor.providerSlice(data, pos: pos, size: size)
                 }
             } else {
                 passedOther += 1
@@ -382,9 +405,13 @@ extension CBZCompressor {
                     uncompressedSize: Int64(data.count),
                     compressionMethod: .deflate
                 ) { pos, size in
-                    data.subdata(in: Int(pos)..<Int(pos) + size)
+                    try CBZCompressor.providerSlice(data, pos: pos, size: size)
                 }
             }
+        }
+        } catch let e where !(e is CancellationError) {
+            try? FileManager.default.removeItem(at: tmpURL)
+            throw e
         }
 
         // Data-integrity guard: never replace the original with an archive that

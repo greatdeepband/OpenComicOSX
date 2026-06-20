@@ -19,7 +19,7 @@ struct CompressionPromptSheet: View {
     let onConfirm: (_ deleteOriginals: Bool, _ convertPNGs: Bool, _ remember: Bool) -> Void
     let onCancel: () -> Void
 
-    @State private var deleteOriginals: Bool = true
+    @State private var deleteOriginals: Bool = false
     @State private var convertPNGs: Bool = false
     @State private var rememberChoice: Bool = false
 
@@ -74,9 +74,10 @@ struct CompressionPromptSheet: View {
             // If the user previously ticked Remember, seed the toggles from
             // their saved choice so the prompt (when it does appear) shows
             // the same defaults they'd otherwise auto-skip with.
-            if CompressionPreferences.hasRememberedChoice {
-                deleteOriginals = CompressionPreferences.rememberedDeleteOriginals
-                convertPNGs = CompressionPreferences.rememberedConvertPNGs
+            if CompressionPreferences.hasRememberedChoice() {
+                deleteOriginals = CompressionPreferences.rememberedDeleteOriginals()
+                convertPNGs = CompressionPreferences.rememberedConvertPNGs()
+                rememberChoice = true
             }
         }
     }
@@ -90,23 +91,23 @@ enum CompressionPreferences {
     static let convertPNGsKey       = "cbz.compression.convertPNGs.choice"
     static let promptRememberedKey  = "cbz.compression.deleteOriginals.remembered"
 
-    static var hasRememberedChoice: Bool {
-        UserDefaults.standard.bool(forKey: promptRememberedKey)
+    static func hasRememberedChoice(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: promptRememberedKey)
     }
-    static var rememberedDeleteOriginals: Bool {
-        UserDefaults.standard.bool(forKey: deleteOriginalsKey)
+    static func rememberedDeleteOriginals(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: deleteOriginalsKey)
     }
-    static var rememberedConvertPNGs: Bool {
-        UserDefaults.standard.bool(forKey: convertPNGsKey)
+    static func rememberedConvertPNGs(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: convertPNGsKey)
     }
-    static func remember(deleteOriginals: Bool, convertPNGs: Bool) {
-        UserDefaults.standard.set(true, forKey: promptRememberedKey)
-        UserDefaults.standard.set(deleteOriginals, forKey: deleteOriginalsKey)
-        UserDefaults.standard.set(convertPNGs, forKey: convertPNGsKey)
+    static func remember(deleteOriginals: Bool, convertPNGs: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: promptRememberedKey)
+        defaults.set(deleteOriginals, forKey: deleteOriginalsKey)
+        defaults.set(convertPNGs, forKey: convertPNGsKey)
     }
-    static func reset() {
-        UserDefaults.standard.removeObject(forKey: promptRememberedKey)
-        UserDefaults.standard.removeObject(forKey: deleteOriginalsKey)
-        UserDefaults.standard.removeObject(forKey: convertPNGsKey)
+    static func reset(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: promptRememberedKey)
+        defaults.removeObject(forKey: deleteOriginalsKey)
+        defaults.removeObject(forKey: convertPNGsKey)
     }
 }

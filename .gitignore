@@ -21,7 +21,7 @@ venv/
 
 # Swift Package Manager
 .build/
-*.resolved
+# Package.resolved IS committed (lockfile for reproducible builds) — do not ignore it.
 
 # Build artifacts
 *.log

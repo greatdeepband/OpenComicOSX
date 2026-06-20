@@ -35,6 +35,19 @@ VERSION="$(cat "$PKG/VERSION")"
 # at homebrew/Formula/open-comic.rb downloads exactly this name).
 ZIP="$DIST/OpenComic-${VERSION}.zip"
 
+# --- Signing configuration -------------------------------------------------
+# Sign by SHA-1 fingerprint (encoding-proof; the cert CN contains a Unicode 'Ł').
+# Override: SIGN_ID=<hash|CN-substring|->. SIGN_ID="-" selects offline ad-hoc signing.
+# Find the hash with:  security find-identity -v -p codesigning
+SIGN_ID="${SIGN_ID:-EBB1CCB5713D0E31F507B31FD9302BCA33C34B8F}"
+
+# Ad-hoc cannot carry a trusted timestamp. A real Developer ID identity REQUIRES the Apple
+# timestamp authority (network); an untimestamped Developer-ID binary is rejected by
+# notarization, so on the real path a timestamp failure must be fatal (set -e aborts) —
+# never fall through to an untimestamped signature.
+if [ "$SIGN_ID" = "-" ]; then TS="--timestamp=none"; else TS="--timestamp"; fi
+# ---------------------------------------------------------------------------
+
 echo "==> Cleaning dist/"
 rm -rf "$DIST"
 mkdir -p "$DIST"
@@ -114,71 +127,81 @@ cp "$PKG/AppBundle/Resources/bin/lsar" "$APP/Contents/Resources/bin/"
 chmod +x "$APP/Contents/Resources/bin/unar"
 chmod +x "$APP/Contents/Resources/bin/lsar"
 
+# Ship the third-party license notices INSIDE the app — LGPL-2.1 §6(d) requires the license
+# (and the corresponding-source pointer) to accompany the DISTRIBUTED work, not just the repo.
+echo "==> Bundling third-party license notices"
+mkdir -p "$APP/Contents/Resources/licenses"
+cp "$PKG/THIRD_PARTY_LICENSES.md" "$APP/Contents/Resources/licenses/"
+cp -R "$PKG/LICENSES" "$APP/Contents/Resources/licenses/"
+
 # Entitlements + Info.plist from the single canonical sources in AppBundle/
 # (shared with build_app.sh; __VERSION__ substituted from the VERSION file —
 # no per-script heredocs to drift out of sync).
 cp "$PKG/AppBundle/DC.entitlements" "$APP/Contents/Resources/app.entitlements"
 sed "s/__VERSION__/$VERSION/g" "$PKG/AppBundle/Info.plist" > "$APP/Contents/Info.plist"
 
-# Sign nested executables FIRST (codesign --deep used to be enough; on
-# modern macOS the recommended order is leaves-up).
-echo "==> Code-signing nested binaries"
-codesign --force --options runtime --sign - "$APP/Contents/Resources/bin/unar"
-codesign --force --options runtime --sign - "$APP/Contents/Resources/bin/lsar"
+# Leaves-up signing. The CLIs in Resources/bin/ are NOT auto-signed by the bundle sign
+# (codesign only auto-signs code in standard nested locations), so sign them first; then the
+# bundle sign covers Contents/MacOS/DC and seals Resources/. NO --deep on sign (deprecated).
+echo "==> Code-signing nested binaries (identity: $SIGN_ID)"
+codesign --force --options runtime $TS --sign "$SIGN_ID" "$APP/Contents/Resources/bin/unar"
+codesign --force --options runtime $TS --sign "$SIGN_ID" "$APP/Contents/Resources/bin/lsar"
 
-# Now sign the bundle as a whole; --deep re-signs anything we missed.
-echo "==> Code-signing bundle (deep ad-hoc)"
-codesign --force --deep --sign - "$APP"
+# Re-verify the leaves (informational log; codesign -d writes to stderr, hence 2>&1).
+for leaf in unar lsar; do
+    codesign -dv --verbose=4 "$APP/Contents/Resources/bin/$leaf" 2>&1 \
+        | grep -E 'flags|Timestamp|Authority' | sed "s/^/   [$leaf] /" || true
+done
 
-# Verify the signature is valid and seals everything
+# Sign the bundle. Entitlements from the source tree (single source of truth).
+echo "==> Code-signing bundle"
+codesign --force --options runtime $TS \
+    --entitlements "$PKG/AppBundle/DC.entitlements" \
+    --sign "$SIGN_ID" "$APP"
+
+# Verify. --deep on VERIFY is correct and intended even though signing drops it: verify-deep
+# inspects all nested code; only signing-deep is deprecated. Do not "fix" this to non-deep.
 echo
 echo "==> Verifying bundle"
 codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | sed 's/^/   /'
 echo
-codesign -dv "$APP" 2>&1 | sed 's/^/   /'
+codesign -dvvv "$APP" 2>&1 | sed 's/^/   /'
 
 # README for the receiving Mac
 cat > "$DIST/README.txt" << 'EOF'
-OpenComic — production build
-============================
+OpenComic — release build
+=========================
 
 System requirements:
   - Apple Silicon Mac (M1 / M2 / M3 / M4 ...)
   - macOS 14 (Sonoma) or newer
 
-To install on the target Mac:
+Install:
+  1. Unzip OpenComic-<version>.zip.
+  2. Drag OpenComic.app into /Applications.
+  3. Double-click to launch.
 
-  1. Unzip the downloaded OpenComic-<version>.zip and move OpenComic.app
-     into /Applications/ (or anywhere you like).
+This build is signed with a Developer ID certificate and notarized by Apple, so it
+launches normally — no Gatekeeper workaround is required.
 
-  2. First-launch Gatekeeper prompt:
-     Because this build is ad-hoc signed (not notarized via an Apple
-     Developer account), macOS will refuse to open it on first try
-     with: "Open Comic can't be opened because the developer cannot
-     be verified."
-
-     EITHER:
-       Right-click (or Control-click) the .app -> "Open" -> "Open" in
-       the confirmation dialog. Only required once; after that it
-       launches normally.
-     OR, from a Terminal:
-       xattr -dr com.apple.quarantine /path/to/OpenComic.app
-       open /path/to/OpenComic.app
+Developers / local un-notarized builds only:
+  A build produced without notarization (e.g. SIGN_ID="-" ./build_production.sh) is not
+  recognized by Gatekeeper. Launch it once via right-click (Control-click) -> Open -> Open.
 
 What's inside:
   - The DC executable (arm64 release build, debug symbols stripped)
   - Shaders.metal (compiled at runtime by the renderer)
   - lsar / unar (bundled, no Homebrew needed for CBR / CB7)
   - AppIcon.icns
+  - licenses/ (THIRD_PARTY_LICENSES.md + full LGPL-2.1 text)
   - app.entitlements (sandbox=false, file-read-write granted)
 
-If you keep the .dSYM file alongside the .app, crashes can be
-symbolicated later with `atos` / `lldb`.
+If you keep the .dSYM file alongside the .app, crashes can be symbolicated later with
+`atos` / `lldb`.
 
 For the developer:
-  - To rebuild: ./build_production.sh from the project root.
-  - Bundle is fully self-contained except for system frameworks and
-    /usr/lib/swift/* (OS-shipped on macOS 10.14.4+).
+  - Dev build (ad-hoc, offline):     SIGN_ID="-" ./build_production.sh
+  - Release (signed + notarized):    NOTARIZE=1 ./build_production.sh
 EOF
 
 # Pack as zip for transfer (ditto preserves bundle metadata and
@@ -187,6 +210,74 @@ echo "==> Packaging as .zip"
 cd "$DIST"
 ditto -c -k --keepParent OpenComic.app "$ZIP"
 cd - > /dev/null
+
+# --- Notarization + stapling (gated) ---------------------------------------
+# Enable with NOTARIZE=1 and a real SIGN_ID. Off by default so the common dev/CI build
+# stays offline. Requires the one-time keychain profile (see error message below).
+if [ "${NOTARIZE:-}" = "1" ]; then
+    # Toolchain precondition — notarytool needs full Xcode, not just Command Line Tools.
+    xcrun --find notarytool >/dev/null 2>&1 || {
+        echo "ERROR: notarytool not found. Install full Xcode and run xcode-select --switch." >&2
+        exit 1
+    }
+    if [ "$SIGN_ID" = "-" ]; then
+        echo "ERROR: cannot notarize an ad-hoc bundle. Set SIGN_ID to a Developer ID identity." >&2
+        exit 1
+    fi
+    PROFILE="${NOTARY_PROFILE:-OpenComic}"
+    # Local, OFFLINE existence check (notarytool stores the profile as a generic-password item).
+    # Avoids `notarytool history`, which is a network round-trip when the profile exists and
+    # would give a false "not found" on any transient network/credential problem.
+    if ! security find-generic-password -s "com.apple.gke.notary.tool" -a "$PROFILE" >/dev/null 2>&1; then
+        echo "ERROR: notarytool profile '$PROFILE' not found in the keychain. Create it once with:" >&2
+        echo "  xcrun notarytool store-credentials \"$PROFILE\" \\" >&2
+        echo "    --key AuthKey_XXXXXX.p8 --key-id <KEY_ID> --issuer <ISSUER_ID>" >&2
+        exit 1
+    fi
+
+    echo "==> Submitting to Apple notary service (profile: $PROFILE)"
+    # Capture the exit code WITHOUT letting set -e abort before we can show the log/error.
+    SUBMIT_RC=0
+    NOTARY_ERR="$(mktemp)"
+    SUBMIT_JSON="$(xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --output-format json --wait 2>"$NOTARY_ERR")" || SUBMIT_RC=$?
+    echo "$SUBMIT_JSON" | sed 's/^/   /'
+    [ -s "$NOTARY_ERR" ] && { echo "   --- notarytool stderr ---"; sed 's/^/   /' "$NOTARY_ERR"; }
+    rm -f "$NOTARY_ERR"
+
+    # Parse id + status from JSON (plutil ships with macOS). Tolerate non-JSON on hard failure.
+    SUBMIT_ID="$(printf '%s' "$SUBMIT_JSON" | plutil -extract id raw -o - - 2>/dev/null || true)"
+    STATUS="$(printf '%s' "$SUBMIT_JSON" | plutil -extract status raw -o - - 2>/dev/null || true)"
+
+    # Always fetch the log — an Accepted submission can still carry warnings; guard it (|| true)
+    # so a flaky log fetch doesn't fail an otherwise-good build.
+    if [ -n "$SUBMIT_ID" ]; then
+        echo "==> Notary log ($SUBMIT_ID)"
+        xcrun notarytool log "$SUBMIT_ID" --keychain-profile "$PROFILE" 2>&1 | sed 's/^/   /' || true
+    fi
+
+    if [ "$SUBMIT_RC" -ne 0 ] || [ "$STATUS" != "Accepted" ]; then
+        echo "ERROR: notarization not Accepted (rc=$SUBMIT_RC, status=${STATUS:-unknown}); see log above." >&2
+        exit 1
+    fi
+
+    echo "==> Stapling ticket into the bundle"
+    xcrun stapler staple "$APP"
+
+    echo "==> Re-zipping the stapled app (the distributable must be the post-staple copy)"
+    rm -f "$ZIP"
+    cd "$DIST" && ditto -c -k --keepParent OpenComic.app "$ZIP" && cd - > /dev/null
+
+    echo "==> Verifying the stapled artifact on an EXTRACTED copy"
+    CHECK_DIR="$(mktemp -d)"
+    ditto -x -k "$ZIP" "$CHECK_DIR"
+    xcrun stapler validate "$CHECK_DIR/OpenComic.app" 2>&1 | sed 's/^/   /'
+    spctl -a -vvv --type exec "$CHECK_DIR/OpenComic.app" 2>&1 | sed 's/^/   /'
+    rm -rf "$CHECK_DIR"
+
+    echo "==> Homebrew cask sha256 (compute from THIS stapled zip):"
+    shasum -a 256 "$ZIP" | sed 's/^/   /'
+fi
+# ---------------------------------------------------------------------------
 
 echo
 echo "==> Done."

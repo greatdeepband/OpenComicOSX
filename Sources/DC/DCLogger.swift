@@ -1,10 +1,11 @@
 import Foundation
 
-/// Lightweight debug logger. Writes timestamped lines to /tmp/dc_debug.log.
+/// Lightweight debug logger. Writes timestamped lines to a per-user app
+/// Caches directory (e.g. ~/Library/Caches/<bundle-id>/dc_debug.log).
 ///
 /// Default behaviour:
 ///   • DEBUG builds — enabled. Log captures everything for live debugging.
-///   • Release builds — disabled. Release users don't write /tmp/dc_debug.log
+///   • Release builds — disabled. Release users don't write dc_debug.log
 ///     by default. Flip `DCLogger.shared.enabled = true` at runtime (e.g.
 ///     when guiding a user through reproducing a bug report) to capture.
 ///
@@ -21,15 +22,31 @@ actor DCLogger {
     var enabled = false
     #endif
 
-    private let logURL = URL(fileURLWithPath: "/tmp/dc_debug.log")
+    /// Resolved lazily; `nil` means the directory could not be created —
+    /// in that case all writes are silently skipped.
+    private let logURL: URL? = {
+        let fm = FileManager.default
+        guard let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let bundleID = Bundle.main.bundleIdentifier ?? "open-comic"
+        let dir = caches.appendingPathComponent(bundleID, isDirectory: true)
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            return nil
+        }
+        return dir.appendingPathComponent("dc_debug.log")
+    }()
     private var handle: FileHandle?
     private var isTruncated = false
 
     private init() {}
 
     /// Lazy-opens the file handle on first write, so DCLogger works without an explicit start call.
+    /// Returns without creating a handle if the log directory is unavailable.
     private func ensureHandle() {
-        guard handle == nil else { return }
+        guard handle == nil, let logURL else { return }
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         handle = try? FileHandle(forWritingTo: logURL)
     }
@@ -40,7 +57,7 @@ actor DCLogger {
         guard !isTruncated else { return }
         isTruncated = true
         ensureHandle()
-        await raw("=== DC Debug Log started \(Date()) ===")
+        raw("=== DC Debug Log started \(Date()) ===")
     }
 
     func log(_ message: String) async {
@@ -55,10 +72,11 @@ actor DCLogger {
             try? handle?.write(contentsOf: data)
         }
         let ts = Self.timestamp()
-        await raw("[\(ts)] \(message)")
+        raw("[\(ts)] \(message)")
     }
 
     private func raw(_ line: String) {
+        guard logURL != nil else { return } // no usable log dir — skip silently
         ensureHandle()
         let data = (line + "\n").data(using: .utf8) ?? Data()
         do {

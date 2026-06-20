@@ -1,4 +1,6 @@
 import XCTest
+import CoreGraphics
+import os
 @testable import DC
 
 final class MetalPageManagerTests: XCTestCase {
@@ -46,5 +48,73 @@ final class MetalPageManagerTests: XCTestCase {
         XCTAssertEqual(MetalPageManager.cappedSize(width: 0, height: 0, maxDimension: cap).width, 0)
         let neg = MetalPageManager.cappedSize(width: -5, height: 10, maxDimension: cap)
         XCTAssertGreaterThanOrEqual(neg.width, 0)
+    }
+
+    // MARK: - onThumbReady lock stress test
+
+    /// Hammers both the WRITE path (`setOnThumbReady`) and the READ+CALL path
+    /// (`invokeOnThumbReady`, which mirrors `decodeThumb`'s
+    /// `lock.withLock { $0 }` snapshot → `MainActor.run { cb(...) }` pattern)
+    /// from many concurrent tasks simultaneously.
+    ///
+    /// Goals:
+    ///   1. No crash / EXC_BAD_ACCESS under concurrent write+read interleave.
+    ///   2. `callCount` never goes negative (no double-free / corrupt counter).
+    ///   3. No Swift warning: every local is used.
+    ///
+    /// Note: TSan is unavailable in this build environment. High iteration
+    /// count + real task-group concurrency maximises scheduler interleaving so
+    /// a data race on the old `nonisolated(unsafe) var` would manifest as a
+    /// crash or a corrupt counter — neither of which should occur here.
+    func test_setOnThumbReady_concurrentStress_noCrash() async {
+        let manager = MetalPageManager()
+        let iterations = 2000
+        let callCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+
+        // Make a 1×1 CGImage to pass through invokeOnThumbReady — exercising
+        // the production read-then-call path with a real image argument.
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue
+        let ctx = CGContext(data: nil, width: 1, height: 1,
+                            bitsPerComponent: 8, bytesPerRow: 4,
+                            space: colorSpace, bitmapInfo: bitmapInfo)!
+        let dummyImage = ctx.makeImage()!
+
+        // Concurrent task group: every iteration both writes (set/clear) AND
+        // reads+invokes the callback via the same lock path as decodeThumb.
+        // The interleaving exercises write-while-read and read-while-write
+        // races that the old nonisolated(unsafe) var couldn't protect against.
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<iterations {
+                group.addTask {
+                    if i % 2 == 0 {
+                        // WRITE: install a counting callback.
+                        manager.setOnThumbReady { _, _ in
+                            callCount.withLock { $0 += 1 }
+                        }
+                    } else {
+                        // WRITE: clear the callback.
+                        manager.setOnThumbReady(nil)
+                    }
+                    // READ+CALL: snapshot the closure under the lock and invoke
+                    // it on the main actor — mirroring decodeThumb lines
+                    // `let cb = onThumbReadyLock.withLock { $0 }` followed by
+                    // `if let cb { await MainActor.run { cb(pageIndex, image) } }`.
+                    // dummyImage is passed here so the variable is live and the
+                    // callback receives a valid CGImage (as production does).
+                    await manager.invokeOnThumbReady(pageIndex: i, image: dummyImage)
+                }
+            }
+        }
+
+        // Drain: clear the callback so any subsequent stray MainActor work
+        // that arrives late hits a nil closure and no-ops.
+        manager.setOnThumbReady(nil)
+
+        // callCount >= 0 is always true; the real assertion is "we reached
+        // this line without a crash, hang, or EXC_BAD_ACCESS."
+        let finalCount = callCount.withLock { $0 }
+        XCTAssertGreaterThanOrEqual(finalCount, 0,
+            "Stress completed without crash (callCount=\(finalCount))")
     }
 }

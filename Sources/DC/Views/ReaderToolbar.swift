@@ -32,7 +32,7 @@ struct ReaderToolbar: View {
 
                 TransportCapsule(vm: vm, library: library)
             }
-            .frame(height: ReaderConstants.topBarHeight)
+            .frame(height: ReaderConstants.topBarHeight - ReaderConstants.scrubberStripHeight)
         }
     }
 
@@ -94,6 +94,7 @@ private struct SegmentDivider: View {
         Rectangle()
             .fill(Color.primary.opacity(ReaderConstants.toolbarSegmentDividerOpacity))
             .frame(width: 1, height: ReaderConstants.toolbarCapsuleHeight - 8)
+            .accessibilityHidden(true)
     }
 }
 
@@ -136,7 +137,8 @@ private struct TransportCapsule: View {
                 segmentButton(
                     systemImage: "chevron.left.2",
                     disabled: library.adjacentComicURL(offset: -1) == nil,
-                    help: "Previous comic (Q)"
+                    help: "Previous comic (Q)",
+                    accessibilityLabel: "Previous comic"
                 ) {
                     vm.persistCurrentPosition()
                     library.openAdjacentComic(offset: -1,
@@ -144,11 +146,12 @@ private struct TransportCapsule: View {
                 }
                 SegmentDivider()
                 segmentButton(
-                    systemImage: "chevron.left",
-                    disabled: vm.currentPage == 0 || isVertical,
-                    help: "Previous page (←/A)"
+                    systemImage: vm.isRTL ? "chevron.right" : "chevron.left",
+                    disabled: vm.isRTL ? (vm.currentPage >= vm.pageCount - 1 || isVertical) : (vm.currentPage == 0 || isVertical),
+                    help: vm.isRTL ? "Next page (←/A)" : "Previous page (←/A)",
+                    accessibilityLabel: vm.isRTL ? "Next page" : "Previous page"
                 ) {
-                    vm.previousPage()
+                    vm.isRTL ? vm.nextPage() : vm.previousPage()
                 }
                 SegmentDivider()
                 Text("\(vm.currentPage + 1) / \(vm.pageCount)")
@@ -156,19 +159,22 @@ private struct TransportCapsule: View {
                     .font(.callout)
                     .frame(minWidth: 72)
                     .padding(.horizontal, 8)
+                    .accessibilityLabel("Page \(vm.currentPage + 1) of \(vm.pageCount)")
                 SegmentDivider()
                 segmentButton(
-                    systemImage: "chevron.right",
-                    disabled: vm.currentPage >= vm.pageCount - 1 || isVertical,
-                    help: "Next page (→/D)"
+                    systemImage: vm.isRTL ? "chevron.left" : "chevron.right",
+                    disabled: vm.isRTL ? (vm.currentPage == 0 || isVertical) : (vm.currentPage >= vm.pageCount - 1 || isVertical),
+                    help: vm.isRTL ? "Previous page (→/D)" : "Next page (→/D)",
+                    accessibilityLabel: vm.isRTL ? "Previous page" : "Next page"
                 ) {
-                    vm.nextPage()
+                    vm.isRTL ? vm.previousPage() : vm.nextPage()
                 }
                 SegmentDivider()
                 segmentButton(
                     systemImage: "chevron.right.2",
                     disabled: library.adjacentComicURL(offset: 1) == nil,
-                    help: "Next comic (E)"
+                    help: "Next comic (E)",
+                    accessibilityLabel: "Next comic"
                 ) {
                     vm.persistCurrentPosition()
                     library.openAdjacentComic(offset: 1,
@@ -182,6 +188,7 @@ private struct TransportCapsule: View {
     private func segmentButton(systemImage: String,
                                disabled: Bool,
                                help: String,
+                               accessibilityLabel: String,
                                action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemImage)
@@ -191,6 +198,7 @@ private struct TransportCapsule: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .help(help)
+        .accessibilityLabel(accessibilityLabel)
     }
 }
 
@@ -200,6 +208,7 @@ private struct TrailingCapsule: View {
     @ObservedObject var vm: ReaderViewModel
     @ObservedObject var library: LibraryViewModel
     var onToggleFullScreen: () -> Void
+    @State private var showBookmarks: Bool = false
 
     var body: some View {
         ToolbarCapsule {
@@ -217,8 +226,47 @@ private struct TrailingCapsule: View {
                     }
                     .buttonStyle(.plain)
                     .help(fav ? "Remove from Favorites" : "Add to Favorites")
+                    .accessibilityLabel("Favorite")
+                    .accessibilityValue(fav ? "On" : "Off")
+                    .accessibilityAddTraits(fav ? [.isSelected] : [])
                     SegmentDivider()
                 }
+
+                // Bookmark toggle — fills when the current page is bookmarked.
+                Button {
+                    vm.toggleBookmarkCurrentPage()
+                } label: {
+                    Image(systemName: vm.isCurrentPageBookmarked ? "bookmark.fill" : "bookmark")
+                        .frame(width: 32,
+                               height: ReaderConstants.toolbarCapsuleHeight)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("d", modifiers: .command)
+                .help("Bookmark this page")
+                .accessibilityLabel("Bookmark this page")
+                .accessibilityValue(vm.isCurrentPageBookmarked ? "On" : "Off")
+                .accessibilityAddTraits(vm.isCurrentPageBookmarked ? [.isSelected] : [])
+
+                SegmentDivider()
+
+                // Bookmarks list — opens a non-modal popover.
+                Button {
+                    showBookmarks = true
+                } label: {
+                    Image(systemName: "bookmark.circle")
+                        .frame(width: 32,
+                               height: ReaderConstants.toolbarCapsuleHeight)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Show bookmarks")
+                .accessibilityLabel("Show bookmarks")
+                .popover(isPresented: $showBookmarks, arrowEdge: .bottom) {
+                    BookmarksListView(vm: vm, isPresented: $showBookmarks)
+                }
+
+                SegmentDivider()
 
                 Menu {
                     Section("Zoom") {
@@ -243,14 +291,33 @@ private struct TrailingCapsule: View {
                                     Text(mode.rawValue)
                                     if vm.readingMode == mode {
                                         Image(systemName: "checkmark")
+                                            .accessibilityHidden(true)
                                     }
                                 }
                             }
+                            .accessibilityValue(vm.readingMode == mode ? "Active" : "")
+                            .accessibilityAddTraits(vm.readingMode == mode ? [.isSelected] : [])
                         }
+                    }
+                    Section("Reading Direction") {
+                        Button {
+                            vm.toggleReadingDirection()
+                        } label: {
+                            if vm.isRTL {
+                                HStack {
+                                    Text("Right-to-Left (RTL)")
+                                    Image(systemName: "checkmark")
+                                        .accessibilityHidden(true)
+                                }
+                            } else {
+                                Text("Left-to-Right (LTR)")
+                            }
+                        }
+                        .accessibilityLabel("Reading Direction")
+                        .accessibilityValue(vm.isRTL ? "Right-to-Left" : "Left-to-Right")
                     }
                     Section {
                         Button("Toggle Full Screen") { onToggleFullScreen() }
-                            .keyboardShortcut("f", modifiers: [.command, .control])
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -260,7 +327,97 @@ private struct TrailingCapsule: View {
                 }
                 .menuStyle(.borderlessButton)
                 .help("More options")
+                .accessibilityLabel("More options")
             }
         }
+    }
+}
+
+// MARK: - Bookmarks list popover
+
+private struct BookmarksListView: View {
+    @ObservedObject var vm: ReaderViewModel
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header row
+            HStack {
+                Text("Bookmarks")
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button {
+                    isPresented = false
+                } label: {
+                    Image(systemName: "xmark.circle")
+                        .font(.body)
+                }
+                .buttonStyle(.plain)
+                .help("Close bookmarks")
+                .accessibilityLabel("Close bookmarks")
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 8)
+
+            Divider()
+
+            if vm.bookmarkedPages.isEmpty {
+                Text("No bookmarks.")
+                    .foregroundStyle(.secondary)
+                    .padding(16)
+                    .accessibilityLabel("No bookmarks")
+            } else {
+                List {
+                    ForEach(vm.bookmarkedPages, id: \.self) { page in
+                        let isCurrent = page == vm.currentPage
+                        Button {
+                            vm.goTo(page: page)
+                            isPresented = false
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isCurrent ? "bookmark.fill" : "bookmark")
+                                    .foregroundStyle(isCurrent ? Color.accentColor : Color.secondary)
+                                    .frame(width: 16)
+                                Text("Page \(page + 1)")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                if isCurrent {
+                                    Text("Current")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.accentColor.opacity(0.12), in: Capsule())
+                                }
+                            }
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Go to page \(page + 1)\(isCurrent ? ", current page" : "")")
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) {
+                                ReadingPositionStore.toggleBookmark(page: page, for: vm.comic.url)
+                                vm.bookmarkedPages = ReadingPositionStore.bookmarks(for: vm.comic.url)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                ReadingPositionStore.toggleBookmark(page: page, for: vm.comic.url)
+                                vm.bookmarkedPages = ReadingPositionStore.bookmarks(for: vm.comic.url)
+                            } label: {
+                                Label("Remove Bookmark", systemImage: "bookmark.slash")
+                            }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .frame(minWidth: 280, minHeight: vm.bookmarkedPages.isEmpty ? 100 : 240)
+        .onExitCommand { isPresented = false }
     }
 }

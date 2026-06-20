@@ -105,14 +105,14 @@ enum PageSource {
                 Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — entry '\(entryPath)' not found in archive") }
                 return nil
             }
-            let imageSource = CGImageSourceCreateIncremental(nil)
-            var accumulated = Data()
+            // Decompression-bomb guard — same shared cap as the .zipData path.
+            let accumulated: Data
             do {
-                try archive.extract(entry) { chunk in
-                    accumulated.append(chunk)
-                    CGImageSourceUpdateData(imageSource, accumulated as CFData, false)
-                }
-                CGImageSourceUpdateData(imageSource, accumulated as CFData, true)
+                accumulated = try archive.extractEntryData(
+                    entry, cap: ReaderConstants.maxUncompressedBytes)
+            } catch Archive.CappedExtractError.entryTooLarge {
+                Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — entry exceeded \(ReaderConstants.maxUncompressedBytes)B uncompressed cap (decompression bomb), aborted") }
+                return nil
             } catch {
                 Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — extract error: \(error)") }
                 return nil
@@ -124,7 +124,8 @@ enum PageSource {
                 kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceShouldCacheImmediately: true
             ]
-            guard let cgImg = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
+            guard let src = CGImageSourceCreateWithData(accumulated as CFData, nil),
+                  let cgImg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else {
                 Task { await DCLogger.shared.log("DECODE FAIL   zip:\(label) — CGImageSource thumbnail failed") }
                 return nil
             }
@@ -141,14 +142,19 @@ enum PageSource {
                 Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — entry '\(entryPath)' not found in archive") }
                 return nil
             }
-            let imageSource = CGImageSourceCreateIncremental(nil)
-            var accumulated = Data()
+            // Decompression-bomb guard (second of two layers; the first is
+            // ComicLoader's pre-flight central-directory sum). Route through the
+            // shared capped-extract helper — `extractEntryData` is the single
+            // implementation of the streaming byte counter. A lying central
+            // directory that under-declares `uncompressedSize` trips this cap
+            // at first decode before the inflated data reaches RAM.
+            let accumulated: Data
             do {
-                try archive.extract(entry) { chunk in
-                    accumulated.append(chunk)
-                    CGImageSourceUpdateData(imageSource, accumulated as CFData, false)
-                }
-                CGImageSourceUpdateData(imageSource, accumulated as CFData, true)
+                accumulated = try archive.extractEntryData(
+                    entry, cap: ReaderConstants.maxUncompressedBytes)
+            } catch Archive.CappedExtractError.entryTooLarge {
+                Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — entry exceeded \(ReaderConstants.maxUncompressedBytes)B uncompressed cap (decompression bomb), aborted") }
+                return nil
             } catch {
                 Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — extract error: \(error)") }
                 return nil
@@ -160,7 +166,8 @@ enum PageSource {
                 kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceShouldCacheImmediately: true
             ]
-            guard let cgImg = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, options as CFDictionary) else {
+            guard let src = CGImageSourceCreateWithData(accumulated as CFData, nil),
+                  let cgImg = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else {
                 Task { await DCLogger.shared.log("DECODE FAIL   zipData:\(label) — CGImageSource thumbnail failed") }
                 return nil
             }
@@ -252,10 +259,25 @@ struct ComicPage: Identifiable {
         naturalSize.width / max(naturalSize.height, 1) > 1.2
     }
 
-    init(id: Int, source: PageSource) {
+    /// - Parameter naturalSize: when supplied, the page uses this precomputed
+    ///   size instead of deriving it from `source.naturalSize`. For `.pdf`
+    ///   sources the size MUST be precomputed via `PDFKitGate` and injected
+    ///   here so the (non-thread-safe) `source.naturalSize`'s `.pdf` branch is
+    ///   never hit off the gate's serial executor. Non-PDF call sites can keep
+    ///   passing `nil` and rely on the synchronous metadata read.
+    init(id: Int, source: PageSource, naturalSize: CGSize? = nil) {
         self.id = id
         self.source = source
-        self.naturalSize = source.naturalSize
+        self.naturalSize = naturalSize ?? source.naturalSize
+    }
+
+    /// Testing-only initializer that lets callers supply an explicit
+    /// `naturalSize` (and therefore control `isSpread`) without needing a
+    /// real image file or archive.  Not intended for production call-sites.
+    init(id: Int, source: PageSource, naturalSize: CGSize) {
+        self.id = id
+        self.source = source
+        self.naturalSize = naturalSize
     }
 }
 
@@ -265,7 +287,6 @@ enum ComicFormat: String, CaseIterable {
     case cb7 = "cb7"
     case cbt = "cbt"
     case pdf = "pdf"
-    case epub = "epub"
 
     static func from(url: URL) -> ComicFormat? {
         let ext = url.pathExtension.lowercased()

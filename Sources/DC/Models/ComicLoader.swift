@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import PDFKit
 import ZIPFoundation
+import os
 
 /// Loads a comic from disk into a `Comic` model.
 /// Pages are NOT decoded into memory at load time — only file URLs / PDF page refs are stored.
@@ -12,12 +13,25 @@ enum ComicLoader {
         case unsupportedFormat(String)
         case noImagesFound
         case extractionFailed(String)
+        /// Archive declares more entries than `maxArchiveEntries` (entry-count
+        /// bomb) — the associated value is the declared count.
+        case tooManyEntries(Int)
+        /// Archive's declared uncompressed size exceeds `maxUncompressedBytes`
+        /// (decompression bomb) — associated value is the declared total.
+        case archiveTooLarge(Int64)
+        /// An entry's path would escape the extraction directory (absolute
+        /// path, `..` traversal, or an escaping symlink) — i.e. a zip-slip /
+        /// tar-slip attack. Associated value is the offending entry name.
+        case unsafeEntryPath(String)
 
         var errorDescription: String? {
             switch self {
             case .unsupportedFormat(let ext): return "Unsupported format: \(ext)"
             case .noImagesFound: return "No images found in the archive."
             case .extractionFailed(let msg): return "Extraction failed: \(msg)"
+            case .tooManyEntries(let n): return "Archive declares too many entries (\(n)); refusing to extract."
+            case .archiveTooLarge(let bytes): return "Archive declares an uncompressed size that is too large (\(bytes) bytes); refusing to extract."
+            case .unsafeEntryPath(let path): return "Archive contains an unsafe entry path that would escape the extraction directory: \(path)"
             }
         }
     }
@@ -50,7 +64,7 @@ enum ComicLoader {
         return name
     }
 
-    static func load(url: URL) throws -> Comic {
+    static func load(url: URL) async throws -> Comic {
         guard let format = ComicFormat.from(url: url) else {
             throw LoadError.unsupportedFormat(url.pathExtension)
         }
@@ -58,33 +72,30 @@ enum ComicLoader {
         case .cbz:
             return try loadCBZ(url: url)
         case .pdf:
-            return try loadPDF(url: url)
+            return try await loadPDF(url: url)
         case .cbr, .cb7:
             return try loadWithUnar(url: url)
         case .cbt:
             return try loadTAR(url: url)
-        case .epub:
-            throw LoadError.unsupportedFormat("epub (coming soon)")
         }
     }
 
     // MARK: - Cover-only fast load (for thumbnails)
 
-    static func loadCover(url: URL) -> NSImage? {
+    static func loadCover(url: URL) async -> NSImage? {
         guard let format = ComicFormat.from(url: url) else { return nil }
         switch format {
         case .cbz:  return loadCoverCBZ(url: url)
-        case .pdf:  return loadCoverPDF(url: url)
+        case .pdf:  return await loadCoverPDF(url: url)
         case .cbr, .cb7: return loadCoverWithUnar(url: url)
         case .cbt:  return loadCoverTAR(url: url)
-        case .epub: return nil
         }
     }
 
     /// Fast path for bulk thumbnail generation: returns a CGImage already scaled
     /// to the 200×280 thumbnail canvas, skipping the NSImage wrapper entirely.
     /// This avoids the redundant scaledCGImage() pass in saveThumbnailAndCache.
-    static func loadCoverCGImage(url: URL) -> CGImage? {
+    static func loadCoverCGImage(url: URL) async -> CGImage? {
         guard let format = ComicFormat.from(url: url) else { return nil }
         let maxPixels = 560  // 280pt × 2 Retina
         let w = 400, h = 560 // 200pt × 2 Retina
@@ -95,13 +106,11 @@ enum ComicLoader {
         case .cbz:
             rawCG = loadCoverCGImageCBZ(url: url, maxPixels: maxPixels)
         case .pdf:
-            rawCG = loadCoverPDF(url: url).flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
+            rawCG = await loadCoverPDF(url: url).flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
         case .cbr, .cb7:
             rawCG = loadCoverWithUnar(url: url).flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
         case .cbt:
             rawCG = loadCoverTAR(url: url).flatMap { $0.cgImage(forProposedRect: nil, context: nil, hints: nil) }
-        case .epub:
-            return nil
         }
         guard let src = rawCG else { return nil }
 
@@ -135,15 +144,12 @@ enum ComicLoader {
             .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
         guard let firstEntry = entries.first else { return nil }
 
-        let imageSource = CGImageSourceCreateIncremental(nil)
-        var accumulated = Data()
+        let accumulated: Data
         do {
-            try archive.extract(firstEntry) { chunk in
-                accumulated.append(chunk)
-                CGImageSourceUpdateData(imageSource, accumulated as CFData, false)
-            }
-            CGImageSourceUpdateData(imageSource, accumulated as CFData, true)
+            accumulated = try archive.extractEntryData(firstEntry, cap: ReaderConstants.maxUncompressedBytes)
         } catch { return nil }
+        let imageSource = CGImageSourceCreateIncremental(nil)
+        CGImageSourceUpdateData(imageSource, accumulated as CFData, true)
 
         let opts: [CFString: Any] = [
             kCGImageSourceThumbnailMaxPixelSize: maxPixels,
@@ -175,27 +181,18 @@ enum ComicLoader {
 
         guard let firstEntry = entries.first else { return nil }
 
-        // Stream the entry bytes directly into an incremental CGImageSource.
-        // The consumer closure is called in chunks (~64 KB each), so we never
-        // hold the full decompressed image in RAM as a single Data allocation.
-        let imageSource = CGImageSourceCreateIncremental(nil)
-        var lastData = Data()
-        var success = false
-
+        // Extract the cover entry through the capped helper so a lying central
+        // directory cannot inflate an attacker-controlled entry without bound.
+        let coverData: Data
         do {
-            try archive.extract(firstEntry) { chunk in
-                lastData.append(chunk)
-                // Feed each chunk to the incremental decoder.
-                CGImageSourceUpdateData(imageSource, lastData as CFData, false)
-            }
-            // Signal end-of-data so the decoder can finalise.
-            CGImageSourceUpdateData(imageSource, lastData as CFData, true)
-            success = true
+            coverData = try archive.extractEntryData(firstEntry, cap: ReaderConstants.maxUncompressedBytes)
         } catch {
-            Task { await DCLogger.shared.log("[CBZ] stream extract failed for \(url.lastPathComponent): \(error)") }
+            Task { await DCLogger.shared.log("[CBZ] capped extract failed for \(url.lastPathComponent): \(error)") }
+            return nil
         }
-
-        guard success else { return nil }
+        let imageSource = CGImageSourceCreateIncremental(nil)
+        // Feed the full (bounded) bytes and signal end-of-data in one step.
+        CGImageSourceUpdateData(imageSource, coverData as CFData, true)
 
         // Decode at thumbnail resolution — never loads the full-res bitmap.
         let maxPixels = 560
@@ -211,25 +208,25 @@ enum ComicLoader {
         return NSImage(cgImage: cgThumb, size: .zero)
     }
 
-    private static func loadCoverPDF(url: URL) -> NSImage? {
-        guard let doc = PDFDocument(url: url), let page = doc.page(at: 0) else { return nil }
-        let bounds = page.bounds(for: .mediaBox)
-        let scale: CGFloat = 1.0
-        let size = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-        let image = NSImage(size: size)
-        image.lockFocus()
-        if let ctx = NSGraphicsContext.current?.cgContext {
-            ctx.scaleBy(x: scale, y: scale)
-            page.draw(with: .mediaBox, to: ctx)
+    /// PDF cover render. PDFKit is not thread-safe and covers are loaded with
+    /// concurrency (see `LibraryViewModel`'s `withTaskGroup`), so the page draw
+    /// is owned by `PDFKitGate`'s serial executor. The gate renders into a BGRA
+    /// `CVPixelBuffer` at the page's natural (2×) size, which is then wrapped as
+    /// an `NSImage`; the caller downscales to the thumbnail canvas afterwards.
+    private static func loadCoverPDF(url: URL) async -> NSImage? {
+        guard let doc = PDFDocument(url: url) else { return nil }
+        guard await PDFKitGate.shared.pageCount(doc) > 0 else { return nil }
+        let size = await PDFKitGate.shared.naturalSize(doc, index: 0)
+        guard let buffer = await PDFKitGate.shared.renderPage(doc, index: 0, pixelSize: size) else {
+            return nil
         }
-        image.unlockFocus()
-        return image
+        return makeNSImageFromPixelBuffer(buffer)
     }
 
     private static func loadCoverTAR(url: URL) -> NSImage? {
         // List entries with tar -tf, find the first image, extract only that file.
         let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
-        guard let listing = shellOutput("tar", args: ["-tf", url.path]) else { return nil }
+        guard let listing = shellOutputFull(systemTarPath, args: ["-tf", url.path]) else { return nil }
         let firstImage = listing
             .components(separatedBy: "\n")
             .filter { line in
@@ -239,6 +236,14 @@ enum ComicLoader {
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
             .first
         guard let entryPath = firstImage else { return nil }
+        // `entryPath` is a member name from the archive's own listing — i.e.
+        // attacker-controlled for a downloaded comic. Reject a name that would
+        // escape the extraction directory (absolute / `..`) before we ask tar
+        // to write it. (The cover path is best-effort, so we just bail to nil.)
+        guard !isUnsafeEntryName(entryPath) else {
+            Task { await DCLogger.shared.log("[CBT] cover entry name rejected as unsafe: \(entryPath)") }
+            return nil
+        }
 
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
@@ -252,7 +257,7 @@ enum ComicLoader {
         // parsed as an option and execute an arbitrary program. The `--`
         // separator forces everything after it to be treated as an operand
         // (a member name to extract), never an option.
-        let result = shell("tar", args: ["-xf", url.path, "-C", tmpDir.path, "--", entryPath])
+        let result = shellFull(systemTarPath, args: ["-xf", url.path, "-C", tmpDir.path, "--", entryPath])
         guard result == 0 else { return nil }
         return firstImageInDirectory(tmpDir)
     }
@@ -363,7 +368,11 @@ enum ComicLoader {
         // Memory cost: compressed file size (50-200 MB typical).
         let archiveData: Data
         do {
-            archiveData = try Data(contentsOf: url)
+            // .mappedIfSafe lets the OS page the file in lazily on local
+            // storage (no upfront full-file RAM copy); it transparently falls
+            // back to a normal read on network/removable volumes where mmap is
+            // unsafe. Page decodes then read from the mapped bytes on demand.
+            archiveData = try Data(contentsOf: url, options: .mappedIfSafe)
         } catch {
             Task { await DCLogger.shared.log("[CBZ] Data(contentsOf:) failed for \(url.lastPathComponent): \(error)") }
             throw LoadError.extractionFailed("Could not read ZIP archive from disk: \(error.localizedDescription)")
@@ -375,6 +384,11 @@ enum ComicLoader {
             Task { await DCLogger.shared.log("[CBZ] Archive(data:) failed for \(url.lastPathComponent): \(error)") }
             throw LoadError.extractionFailed("Could not open ZIP archive: \(error.localizedDescription)")
         }
+        // Pre-flight validation (zip-slip + entry-count + declared-size bomb).
+        // CBZ defers actual decompression to decode time, so this only trusts
+        // the central directory; a lying central directory is caught at first
+        // decode by the streaming counter in `Comic.swift`'s `.zipData` path.
+        try validateCBZ(archive)
         let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif"])
         let entries = archive
             .filter { entry in
@@ -392,16 +406,170 @@ enum ComicLoader {
 
     // MARK: - PDF
 
-    private static func loadPDF(url: URL) throws -> Comic {
+    private static func loadPDF(url: URL) async throws -> Comic {
         guard let doc = PDFDocument(url: url) else {
             throw LoadError.extractionFailed("Could not open PDF.")
         }
+        // All PDFKit access goes through the gate. Page count and per-page
+        // natural size are read on the gate's serial executor, then injected
+        // into each `ComicPage` so the (non-thread-safe) `PageSource.naturalSize`
+        // `.pdf` branch is never invoked at runtime.
+        let count = await PDFKitGate.shared.pageCount(doc)
         var pages: [ComicPage] = []
-        for i in 0..<doc.pageCount {
-            pages.append(ComicPage(id: i, source: .pdf(doc, i)))
+        for i in 0..<count {
+            let sz = await PDFKitGate.shared.naturalSize(doc, index: i)
+            pages.append(ComicPage(id: i, source: .pdf(doc, i), naturalSize: sz))
         }
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
         return Comic(url: url, format: .pdf, pages: pages)
+    }
+
+    // MARK: - Pre-extraction validation (zip-slip + decompression-bomb caps)
+
+    /// True if a member NAME alone is unsafe — i.e. it would write outside the
+    /// extraction directory. Catches absolute paths and any `..` traversal
+    /// component. Reused at the cover paths (`loadCoverTAR`) where the chosen
+    /// entry name is attacker-controlled.
+    private static func isUnsafeEntryName(_ name: String) -> Bool {
+        if name.hasPrefix("/") { return true }                 // absolute
+        // Normalise to forward-slash components and reject any `..` segment.
+        let components = name.replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        return components.contains("..")
+    }
+
+    /// True if a SYMLINK escapes the extraction directory. Resolves the link
+    /// target relative to the link's own directory and rejects a target that is
+    /// absolute or climbs above the root. The link entry's own name is assumed
+    /// already checked via `isUnsafeEntryName`.
+    private static func symlinkEscapes(entryName: String, target: String) -> Bool {
+        if target.hasPrefix("/") { return true }               // absolute target
+        let entryDir = (entryName as NSString).deletingLastPathComponent
+        // Resolve the target relative to the link's own directory, then walk the
+        // components keeping a running depth below the extraction root. A `..`
+        // that pops the depth below zero at any point means the link escapes the
+        // root — regardless of where in the path it appears (so
+        // `pages/../../etc/passwd` is caught, not just a leading `..`).
+        let joined = entryDir.isEmpty ? target : entryDir + "/" + target
+        var depth = 0
+        for component in joined.replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/", omittingEmptySubsequences: true).map(String.init) {
+            if component == "." { continue }
+            if component == ".." {
+                depth -= 1
+                if depth < 0 { return true }   // climbed above the root
+            } else {
+                depth += 1
+            }
+        }
+        return false
+    }
+
+    /// Validates a tar (CBT) archive before extraction: lists entry NAMES with
+    /// `tar -tf` (robust — never parses the locale/space-fragile `-tv` size
+    /// columns), enforces the entry-count cap, and rejects any zip-slip name.
+    /// tar listings do not reliably expose per-entry uncompressed size, so the
+    /// size bomb cap is NOT enforced here (documented limitation — entry-count
+    /// cap only for CBT).
+    private static func validateTAR(url: URL) throws {
+        guard let listing = shellOutputFull(systemTarPath, args: ["-tf", url.path]) else {
+            throw LoadError.extractionFailed("tar listing failed")
+        }
+        let names = listing.components(separatedBy: "\n").filter { !$0.isEmpty }
+        if names.count > ReaderConstants.maxArchiveEntries {
+            throw LoadError.tooManyEntries(names.count)
+        }
+        for name in names where isUnsafeEntryName(name) {
+            throw LoadError.unsafeEntryPath(name)
+        }
+        // CBT: per-entry size not reliably available from tar; entry-count cap
+        // is the only bomb guard. Streaming size is still bounded at decode of
+        // the extracted files via the OS image decoder's own limits.
+    }
+
+    /// Validates a CBR/CB7 archive before extraction using `lsar -j` JSON:
+    /// entry-count cap, zip-slip names, escaping symlinks, and the uncompressed
+    /// size cap (sum of `XADFileSize`). Solid-RAR fallback: if total size sums
+    /// to 0 while entries exist (lsar can omit `XADFileSize` for solid blocks),
+    /// fall back to a tighter 1_000-entry cap and log.
+    private static func validateUnar(url: URL) throws {
+        let lsarPath = bundledToolPath("lsar")
+        guard let jsonStr = shellOutputFull(lsarPath, args: ["-j", url.path]),
+              let jsonData = jsonStr.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let contents = root["lsarContents"] as? [[String: Any]]
+        else {
+            // lsar unavailable/unparseable — let extraction proceed (it will
+            // fail loudly if the archive is genuinely broken). Logged for audit.
+            Task { await DCLogger.shared.log("[CBR] lsar -j listing unavailable/unparseable for \(url.lastPathComponent) — skipping pre-flight validation") }
+            return
+        }
+        if contents.count > ReaderConstants.maxArchiveEntries {
+            throw LoadError.tooManyEntries(contents.count)
+        }
+        var totalSize: Int64 = 0
+        for entry in contents {
+            guard let name = entry["XADFileName"] as? String else { continue }
+            if isUnsafeEntryName(name) { throw LoadError.unsafeEntryPath(name) }
+            // Symlink escape test.
+            let isSymlink = (entry["XADIsSymbolicLink"] as? NSNumber)?.boolValue
+                ?? (entry["XADIsSymbolicLink"] as? Bool) ?? false
+            if isSymlink, let target = entry["XADLinkDestination"] as? String,
+               symlinkEscapes(entryName: name, target: target) {
+                throw LoadError.unsafeEntryPath(name)
+            }
+            if let size = entry["XADFileSize"] as? Int64 {
+                totalSize += size
+            } else if let size = (entry["XADFileSize"] as? NSNumber)?.int64Value {
+                totalSize += size
+            }
+        }
+        if totalSize == 0 && !contents.isEmpty {
+            // Solid-RAR or a format where lsar omits per-entry sizes. We can't
+            // sum a bomb cap, so apply a tighter entry-count cap instead.
+            if contents.count > 1_000 {
+                Task { await DCLogger.shared.log("[CBR] solid-archive size unavailable for \(url.lastPathComponent); applying 1_000-entry cap (\(contents.count) entries)") }
+                throw LoadError.tooManyEntries(contents.count)
+            }
+            Task { await DCLogger.shared.log("[CBR] solid-archive size unavailable for \(url.lastPathComponent); proceeding under 1_000-entry cap (\(contents.count) entries)") }
+        } else if totalSize > ReaderConstants.maxUncompressedBytes {
+            throw LoadError.archiveTooLarge(totalSize)
+        }
+    }
+
+    /// Validates a CBZ archive before its (deferred) decode by walking the
+    /// central directory: entry-count cap, zip-slip names, escaping symlinks,
+    /// and the uncompressed size cap (sum of central-dir `uncompressedSize`).
+    /// NOTE: because `loadCBZ` defers extraction to decode time, this pre-flight
+    /// sum trusts the central directory; a *lying* central directory is caught
+    /// only at first decode by the streaming byte counter in `Comic.swift`.
+    private static func validateCBZ(_ archive: Archive) throws {
+        var count = 0
+        var totalSize: Int64 = 0
+        for entry in archive {
+            count += 1
+            if count > ReaderConstants.maxArchiveEntries {
+                throw LoadError.tooManyEntries(count)
+            }
+            let path = entry.path
+            if isUnsafeEntryName(path) { throw LoadError.unsafeEntryPath(path) }
+            if entry.type == .symlink {
+                // Read the link target (stored as the entry's content) and test
+                // for escape. Cheap — symlink bodies are a few bytes; the cap
+                // guards against a malicious .symlink entry with a huge body.
+                let targetData = (try? archive.extractEntryData(
+                    entry, cap: ReaderConstants.maxUncompressedBytes, skipCRC32: true)) ?? Data()
+                if let target = String(data: targetData, encoding: .utf8),
+                   symlinkEscapes(entryName: path, target: target) {
+                    throw LoadError.unsafeEntryPath(path)
+                }
+            }
+            totalSize += Int64(entry.uncompressedSize)
+        }
+        if totalSize > ReaderConstants.maxUncompressedBytes {
+            throw LoadError.archiveTooLarge(totalSize)
+        }
     }
 
     // MARK: - TAR (CBT)
@@ -414,13 +582,26 @@ enum ComicLoader {
             if !pages.isEmpty { return Comic(url: url, format: .cbt, pages: pages) }
         }
 
+        // Pre-extraction validation (zip-slip + entry-count bomb) — BEFORE we
+        // write anything to disk.
+        try validateTAR(url: url)
+
         try? FileManager.default.removeItem(at: cacheDir)
         try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        let result = shell("tar", args: ["-xf", url.path, "-C", cacheDir.path])
+        // Clean up the cacheDir on any failure AFTER this point. `success` is
+        // flipped immediately after the non-empty page check below (BEFORE the
+        // best-effort manifest write); the manifest is not a success condition,
+        // and the pages point INTO cacheDir so a premature delete corrupts a
+        // good load.
+        var success = false
+        defer { if !success { try? FileManager.default.removeItem(at: cacheDir) } }
+
+        let result = shellFull(systemTarPath, args: ["-xf", url.path, "-C", cacheDir.path])
         guard result == 0 else { throw LoadError.extractionFailed("tar exited \(result)") }
 
         let pages = try pagesFromDirectory(cacheDir)
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
+        success = true
         let comic = Comic(url: url, format: .cbt, pages: pages)
         // Write cache manifest for content-based staleness check on next open.
         if let meta = tarArchiveMetadata(url: url) {
@@ -444,8 +625,17 @@ enum ComicLoader {
             }
         }
 
+        // Pre-extraction validation (zip-slip + entry-count + size bomb) —
+        // BEFORE we write anything to disk.
+        try validateUnar(url: url)
+
         try? FileManager.default.removeItem(at: cacheDir)
         try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        // Clean up cacheDir on any failure after this point. success flips
+        // immediately after the non-empty page check (before the manifest).
+        var success = false
+        defer { if !success { try? FileManager.default.removeItem(at: cacheDir) } }
+
         let result = shellFull(unarPath, args: ["-o", cacheDir.path, "-force-overwrite", url.path])
         guard result == 0 else {
             throw LoadError.extractionFailed(
@@ -455,6 +645,7 @@ enum ComicLoader {
 
         let pages = try pagesFromDirectory(cacheDir)
         guard !pages.isEmpty else { throw LoadError.noImagesFound }
+        success = true
         let comic = Comic(url: url, format: ComicFormat.from(url: url)!, pages: pages)
         // Write cache manifest for content-based staleness check on next open.
         if let meta = unrarArchiveMetadata(url: url) {
@@ -588,7 +779,7 @@ enum ComicLoader {
         case .cbz:  return cbzArchiveMetadata(url: url)
         case .cbr, .cb7: return unrarArchiveMetadata(url: url)
         case .cbt:  return tarArchiveMetadata(url: url)
-        case .pdf, .epub: return nil
+        case .pdf: return nil
         }
     }
 
@@ -632,7 +823,7 @@ enum ComicLoader {
 
     /// Uses tar -tf to get image entry count (size not available from tar listing).
     private static func tarArchiveMetadata(url: URL) -> ArchiveMetadata? {
-        guard let listing = shellOutput("tar", args: ["-tf", url.path]) else { return nil }
+        guard let listing = shellOutputFull(systemTarPath, args: ["-tf", url.path]) else { return nil }
         let imageExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff"])
         let count = listing
             .components(separatedBy: "\n")
@@ -671,24 +862,54 @@ enum ComicLoader {
 
     // MARK: - Shell helpers
 
-    // NOTE on the four helpers below: each does `try task.run()` inside a
+    /// Absolute path to the system tar. We invoke this directly rather than via
+    /// `/usr/bin/env tar` so a poisoned `PATH` can never substitute a different
+    /// `tar` binary. (`unar`/`lsar` are likewise resolved to absolute paths via
+    /// `bundledToolPath`.)
+    private static let systemTarPath = "/usr/bin/tar"
+
+    // NOTE on the two helpers below: each does `try task.run()` inside a
     // do/catch rather than `try?`. Reading `terminationStatus` (or calling
     // `waitUntilExit`) on a Process that never launched raises an ObjC
     // `NSInvalidArgumentException` — an uncatchable crash. `run()` throws when
     // the executable is missing, which is exactly the `bundledToolPath`
     // bare-name fallback case (`unar`/`lsar` neither bundled nor in Homebrew).
     // Returning a failure sentinel here lets callers fall back gracefully.
+    //
+    // Both arm a watchdog (see `armWatchdog`) BEFORE the blocking
+    // `waitUntilExit()`/`readDataToEndOfFile()`. A malicious or corrupt archive
+    // can wedge the child forever; the watchdog terminates then kills it after
+    // `ReaderConstants.subprocessTimeout`. Killing the child closes its stdout,
+    // so a parent blocked in `readDataToEndOfFile()` (an UNBOUNDED sync read
+    // that no semaphore could interrupt) gets EOF and returns.
 
-    @discardableResult
-    private static func shell(_ command: String, args: [String]) -> Int32 {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = [command] + args
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        do { try task.run() } catch { return -1 }
-        task.waitUntilExit()
-        return task.terminationStatus
+    /// Arms a one-shot watchdog that terminates+kills `task` after
+    /// `subprocessTimeout`, and returns the lock the caller's
+    /// `terminationHandler` uses to cancel the kill on normal exit.
+    ///
+    /// The `Bool` state is the single-shot flag: whichever of {normal exit,
+    /// watchdog} flips it from `false` to `true` first wins, and the loser is a
+    /// no-op. `terminationHandler` must set it to `true` (under the lock) before
+    /// the watchdog fires to cancel the kill; the watchdog only kills if it was
+    /// still `false`. The flag is read/written exclusively under the unfair
+    /// lock, so there is no race between the two callbacks.
+    private static func armWatchdog(_ task: Process) -> OSAllocatedUnfairLock<Bool> {
+        // false = not-yet-handled; the first writer to flip it to true wins.
+        let handled = OSAllocatedUnfairLock<Bool>(initialState: false)
+        DispatchQueue.global().asyncAfter(deadline: .now() + ReaderConstants.subprocessTimeout) {
+            let shouldKill = handled.withLock { state -> Bool in
+                if state { return false }   // already exited normally — stand down
+                state = true
+                return true
+            }
+            guard shouldKill else { return }
+            task.terminate()                // SIGTERM first
+            if task.isRunning {
+                kill(task.processIdentifier, SIGKILL)   // closes child stdout → unblocks read
+            }
+            Task { await DCLogger.shared.log("[SUBPROC] watchdog killed a subprocess after \(ReaderConstants.subprocessTimeout)s timeout") }
+        }
+        return handled
     }
 
     @discardableResult
@@ -699,30 +920,12 @@ enum ComicLoader {
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice
         do { try task.run() } catch { return -1 }
+        // Arm the watchdog BEFORE the blocking wait. terminationHandler claims
+        // the single-shot flag on normal exit, cancelling the kill.
+        let handled = armWatchdog(task)
+        task.terminationHandler = { _ in handled.withLock { $0 = true } }
         task.waitUntilExit()
         return task.terminationStatus
-    }
-
-    /// Runs a command and returns its stdout as a String, or nil on failure.
-    private static func shellOutput(_ command: String, args: [String]) -> String? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        task.arguments = [command] + args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-        do { try task.run() } catch { return nil }
-        // Drain the pipe BEFORE waiting. A child that writes more than the
-        // pipe buffer (~64 KB — e.g. `lsar -j` on a many-page archive, or
-        // `tar -tf` on a large CBT) blocks on write() until the buffer is
-        // read; calling waitUntilExit() first then deadlocks both processes
-        // (parent waits for exit, child waits for the parent to read).
-        // readDataToEndOfFile drains continuously until the child closes the
-        // pipe at exit.
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        guard task.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8)
     }
 
     /// Runs a full-path executable and returns its stdout as a String, or nil on failure.
@@ -734,7 +937,15 @@ enum ComicLoader {
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
         do { try task.run() } catch { return nil }
-        // Drain before wait — see shellOutput above for why.
+        // Arm the watchdog BEFORE the blocking read. A child that writes more
+        // than the pipe buffer (~64 KB — e.g. `lsar -j` on a many-page archive,
+        // or `tar -tf` on a large CBT) blocks on write() until the buffer is
+        // read; reading first (rather than waiting first) avoids that deadlock.
+        // readDataToEndOfFile is an unbounded sync read — if the child wedges,
+        // only the watchdog's SIGKILL (which closes the child's stdout) can
+        // unblock it. terminationHandler cancels the kill on normal exit.
+        let handled = armWatchdog(task)
+        task.terminationHandler = { _ in handled.withLock { $0 = true } }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         task.waitUntilExit()
         guard task.terminationStatus == 0 else { return nil }

@@ -8,6 +8,8 @@ final class ReaderViewModel: ObservableObject {
     @Published var currentPage: Int = 0
     @Published var scale: CGFloat = 1.0
     @Published var readingMode: ReadingMode = .singlePage
+    @Published var isRTL: Bool = false
+    @Published var bookmarkedPages: [Int] = []
     /// Updated by ReaderView via GeometryReader so toolbar actions have the real size.
     @Published var containerSize: CGSize = CGSize(width: 900, height: 600)
 
@@ -37,6 +39,7 @@ final class ReaderViewModel: ObservableObject {
     /// applying it would jump the user to a wrong page on mode switch.
     var scrollOffsetPagesPerRow: Int = 1
     private(set) var savedScrollOffset: Double? = nil
+    private(set) var savedScrollPagesPerRow: Int? = nil
 
     /// Background task that decodes a low-res thumbnail for every page in
     /// the comic. Used as the render-path placeholder when full-res isn't
@@ -54,10 +57,14 @@ final class ReaderViewModel: ObservableObject {
             self.isRestoringPosition = true
         }
         self.savedScrollOffset = ReadingPositionStore.scrollOffset(for: comic.url)
+        self.savedScrollPagesPerRow = ReadingPositionStore.scrollPagesPerRow(for: comic.url)
         if let savedMode = ReadingPositionStore.mode(for: comic.url),
            let mode = ReadingMode(rawValue: savedMode) {
             self.readingMode = mode
         }
+        let dir = ReadingPositionStore.readingDirection(for: comic.url) ?? ReadingPositionStore.lastReadingDirection()
+        isRTL = (dir == "rtl")
+        self.bookmarkedPages = ReadingPositionStore.bookmarks(for: comic.url)
         // Kick off initial prefetch. All four reading modes drive their own
         // re-renders via MetalPageView's onTextureReady callback path; no
         // SwiftUI cache-version bump is needed here.
@@ -122,12 +129,41 @@ final class ReaderViewModel: ObservableObject {
         triggerPrefetch()
     }
 
+    /// Returns the left index of the pair/solo that contains page `p`,
+    /// walking the same step logic as `nextPage()`: a slot is solo (step 1)
+    /// when `pages[i].isSpread` OR `pages[i+1].isSpread`; otherwise it is a
+    /// normal pair (step 2).  Keeps the slider and the prev/next buttons in
+    /// sync when spread pages shift all later pairs off even/odd boundaries.
+    static func spreadAlignedLeftIndex(for p: Int, pages: [ComicPage]) -> Int {
+        var i = 0
+        while i < pages.count {
+            let solo = pages[i].isSpread || (i + 1 < pages.count && pages[i + 1].isSpread)
+            let next = i + (solo ? 1 : 2)
+            if p < next { return i }
+            i = next
+        }
+        return max(0, pages.count - 1)
+    }
+
     func goTo(page: Int) {
-        guard page >= 0 && page < pageCount else { return }
-        currentPage = page
+        guard pageCount > 0 else { return }
+        var p = max(0, min(page, pageCount - 1))   // CLAMP, not guard-return
+        if readingMode == .doublePage { p = Self.spreadAlignedLeftIndex(for: p, pages: comic.pages) }
+        currentPage = p
         savePosition()
         resetZoom()
         triggerPrefetch()
+    }
+
+    /// Render-only preview used by the scrubber while the user is dragging.
+    /// Sets `currentPage` for live page rendering but intentionally does NOT
+    /// call `resetZoom`, `savePosition`, or `triggerPrefetch` — those fire
+    /// only on `goTo` (drag release / commit).
+    func previewPage(_ p: Int) {
+        let q = max(0, min(p, pageCount - 1))
+        currentPage = (readingMode == .doublePage
+            ? Self.spreadAlignedLeftIndex(for: q, pages: comic.pages)
+            : q)
     }
 
     private func savePosition() {
@@ -136,6 +172,24 @@ final class ReaderViewModel: ObservableObject {
 
     func saveMode() {
         ReadingPositionStore.save(mode: readingMode.rawValue, for: comic.url)
+    }
+
+    func toggleReadingDirection() {
+        isRTL.toggle()
+        ReadingPositionStore.saveReadingDirection(isRTL ? "rtl" : "ltr", for: comic.url)
+    }
+
+    // MARK: - Bookmarks
+
+    /// True when the current page is in the bookmarks list.
+    var isCurrentPageBookmarked: Bool {
+        bookmarkedPages.contains(currentPage)
+    }
+
+    /// Toggles a bookmark on the current page and refreshes the published list.
+    func toggleBookmarkCurrentPage() {
+        ReadingPositionStore.toggleBookmark(page: currentPage, for: comic.url)
+        bookmarkedPages = ReadingPositionStore.bookmarks(for: comic.url)
     }
 
     func updateCurrentPage(_ page: Int) {
@@ -155,6 +209,7 @@ final class ReaderViewModel: ObservableObject {
         let isVertical = readingMode == .verticalScroll || readingMode == .verticalDouble
         if isVertical {
             ReadingPositionStore.save(scrollOffset: scrollOffsetFraction, for: comic.url)
+            ReadingPositionStore.save(scrollPagesPerRow: scrollOffsetPagesPerRow, for: comic.url)
         }
     }
 

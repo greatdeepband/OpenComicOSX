@@ -18,9 +18,10 @@ struct ContentView: View {
         }
         .frame(minWidth: 900, minHeight: 600)
         // Configure the NSWindow so content extends under the title-bar
-        // region. Combined with .windowStyle(.hiddenTitleBar) in DCApp, this
-        // gives us one integrated chrome strip instead of a stacked title
-        // bar + content layout.
+        // region. DCApp uses the default `.titleBar` window style; this
+        // FullSizeTitleBarConfigurator makes the title bar full-size +
+        // transparent, giving one integrated chrome strip instead of a
+        // stacked title bar + content layout.
         .background(FullSizeTitleBarConfigurator())
     }
 }

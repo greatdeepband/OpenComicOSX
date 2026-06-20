@@ -9,7 +9,6 @@ final class ComicFormatTests: XCTestCase {
         XCTAssertEqual(ComicFormat.from(url: URL(fileURLWithPath: "/tmp/a.cb7")), .cb7)
         XCTAssertEqual(ComicFormat.from(url: URL(fileURLWithPath: "/tmp/a.cbt")), .cbt)
         XCTAssertEqual(ComicFormat.from(url: URL(fileURLWithPath: "/tmp/a.pdf")), .pdf)
-        XCTAssertEqual(ComicFormat.from(url: URL(fileURLWithPath: "/tmp/a.epub")), .epub)
     }
 
     func testCaseInsensitive() {

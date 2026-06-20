@@ -69,6 +69,13 @@ extension MetalPageView.Coordinator {
             // Ensure the click is inside the scroll area (not on toolbar).
             let svLocal = scrollView.convert(event.locationInWindow, from: nil)
             guard scrollView.bounds.contains(svLocal) else { return event }
+            // Top-bar band guard (window coords, bottom-left origin):
+            // a double-click on the scrubber or toolbar should not reset zoom.
+            let winPt = event.locationInWindow
+            guard let win = scrollView.window else { return event }
+            if isInTopBarBand(locationInWindowY: winPt.y,
+                              windowHeight: win.frame.height,
+                              topBarHeight: ReaderConstants.topBarHeight) { return event }
             // Reset zoom via the scale binding rather than magnification.
             self.onMagnificationChanged?(1.0)
             return nil

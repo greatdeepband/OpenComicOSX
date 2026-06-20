@@ -8,16 +8,18 @@
 
   CFBundleIdentifier is LOAD-BEARING: all user data (galleries, favorites,
   reading positions, thumbnail cache) is keyed to it via UserDefaults /
-  Application Support. Changing it silently orphans every existing user's
-  library, so it must stay com.opncomic.open-comic even though "opncomic" is a
-  typo — a rename needs a data-migration path, not an edit here.
+  Application Support. It was corrected from the typo com.opncomic.open-comic
+  to com.opencomic.open-comic in v0.15.x (WS-D Task 6). A first-launch
+  UserDefaults migration (OpncomicDefaultsMigration.runIfNeeded) copies all
+  14 prefs keys from the old suite to the new one before LibraryViewModel
+  reads them, so no user data is lost.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key><string>en</string>
     <key>CFBundleExecutable</key><string>DC</string>
-    <key>CFBundleIdentifier</key><string>com.opncomic.open-comic</string>
+    <key>CFBundleIdentifier</key><string>com.opencomic.open-comic</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>Open Comic</string>
     <key>CFBundleDisplayName</key><string>Open Comic</string>
@@ -27,9 +29,56 @@
     <key>CFBundleShortVersionString</key><string>__VERSION__</string>
     <key>CFBundleVersion</key><string>__VERSION__</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>LSApplicationCategoryType</key><string>public.app-category.graphics-design</string>
-    <key>NSHumanReadableCopyright</key><string>Copyright © 2026. All rights reserved.</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.books</string>
+    <key>NSHumanReadableCopyright</key><string>Copyright © 2026 greatdeepband. All rights reserved.</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.opencomic.cbz</string>
+            <key>UTTypeDescription</key><string>Comic Book ZIP Archive</string>
+            <key>UTTypeConformsTo</key><array><string>public.zip-archive</string></array>
+            <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>cbz</string></array></dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.opencomic.cbr</string>
+            <key>UTTypeDescription</key><string>Comic Book RAR Archive</string>
+            <key>UTTypeConformsTo</key><array><string>public.archive</string></array>
+            <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>cbr</string></array></dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.opencomic.cb7</string>
+            <key>UTTypeDescription</key><string>Comic Book 7-Zip Archive</string>
+            <key>UTTypeConformsTo</key><array><string>public.archive</string></array>
+            <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>cb7</string></array></dict>
+        </dict>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.opencomic.cbt</string>
+            <key>UTTypeDescription</key><string>Comic Book TAR Archive</string>
+            <key>UTTypeConformsTo</key><array><string>public.archive</string></array>
+            <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>cbt</string></array></dict>
+        </dict>
+    </array>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Comic Book Archive</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Owner</string>
+            <key>LSItemContentTypes</key><array>
+                <string>com.opencomic.cbz</string>
+                <string>com.opencomic.cbr</string>
+                <string>com.opencomic.cb7</string>
+                <string>com.opencomic.cbt</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>PDF Document</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>com.adobe.pdf</string></array>
+        </dict>
+    </array>
 </dict>
 </plist>

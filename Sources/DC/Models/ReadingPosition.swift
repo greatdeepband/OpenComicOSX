@@ -47,6 +47,32 @@ struct ReadingPositionStore {
         loadOffsets()[url.path]
     }
 
+    // MARK: - Scroll pagesPerRow (layout companion for scroll offset)
+
+    private static let pagesPerRowKey = "scrollPagesPerRow"
+
+    private static func loadScrollPagesPerRow(defaults: UserDefaults) -> [String: Int] {
+        (defaults.dictionary(forKey: pagesPerRowKey) as? [String: Int]) ?? [:]
+    }
+
+    static func save(scrollPagesPerRow: Int, for url: URL, defaults: UserDefaults = .standard) {
+        var store = loadScrollPagesPerRow(defaults: defaults)
+        store[url.path] = scrollPagesPerRow
+        defaults.set(store, forKey: pagesPerRowKey)
+    }
+
+    static func scrollPagesPerRow(for url: URL, defaults: UserDefaults = .standard) -> Int? {
+        loadScrollPagesPerRow(defaults: defaults)[url.path]
+    }
+
+    /// Returns true only when the saved layout matches the current one so the
+    /// saved fraction is meaningful. A nil companion (legacy save with no
+    /// pagesPerRow recorded) is treated as a mismatch → page-based fallback.
+    static func shouldUseSavedOffset(savedPagesPerRow: Int?, currentPagesPerRow: Int) -> Bool {
+        guard let s = savedPagesPerRow else { return false }
+        return s == currentPagesPerRow
+    }
+
     // MARK: - Page count (for stats)
 
     private static let pageCountKey = "pageCounts"
@@ -84,5 +110,55 @@ struct ReadingPositionStore {
 
     static func mode(for url: URL) -> String? {
         loadModes()[url.path]
+    }
+
+    // MARK: - Reading direction (per-comic + sticky global)
+
+    private static let directionKey = "readingDirection"
+    private static let lastDirectionKey = "lastReadingDirection"
+
+    static func readingDirection(for url: URL, defaults: UserDefaults = .standard) -> String? {
+        (defaults.dictionary(forKey: directionKey) as? [String: String])?[url.path]
+    }
+
+    static func saveReadingDirection(_ dir: String, for url: URL, defaults: UserDefaults = .standard) {
+        var store = (defaults.dictionary(forKey: directionKey) as? [String: String]) ?? [:]
+        store[url.path] = dir
+        defaults.set(store, forKey: directionKey)
+        defaults.set(dir, forKey: lastDirectionKey)
+    }
+
+    static func lastReadingDirection(defaults: UserDefaults = .standard) -> String {
+        defaults.string(forKey: lastDirectionKey) ?? "ltr"
+    }
+
+    // MARK: - Bookmarks (per-comic; user intent — NOT cleared by clearAllCache)
+
+    private static let bookmarksKey = "bookmarks"
+
+    /// Returns the sorted list of bookmarked page indices for `url`.
+    static func bookmarks(for url: URL, defaults: UserDefaults = .standard) -> [Int] {
+        let store = (defaults.dictionary(forKey: bookmarksKey) as? [String: [Int]]) ?? [:]
+        return store[url.path] ?? []
+    }
+
+    /// Returns `true` when `page` is bookmarked for `url`.
+    static func isBookmarked(page: Int, for url: URL, defaults: UserDefaults = .standard) -> Bool {
+        bookmarks(for: url, defaults: defaults).contains(page)
+    }
+
+    /// Adds `page` to the bookmark list if absent, removes it if present.
+    /// The stored list is always sorted ascending.
+    static func toggleBookmark(page: Int, for url: URL, defaults: UserDefaults = .standard) {
+        var store = (defaults.dictionary(forKey: bookmarksKey) as? [String: [Int]]) ?? [:]
+        var pages = store[url.path] ?? []
+        if let idx = pages.firstIndex(of: page) {
+            pages.remove(at: idx)
+        } else {
+            pages.append(page)
+            pages.sort()
+        }
+        store[url.path] = pages
+        defaults.set(store, forKey: bookmarksKey)
     }
 }

@@ -1,5 +1,43 @@
 # DC Reader — Changelog
 
+## v0.16.0 — 2026-06-20 — reader features, accessibility, and distribution
+
+A large feature release: a live page scrubber, bookmarks, manga / right-to-left reading, a full VoiceOver and keyboard-accessibility pass, a native macOS app shell, and distribution hardening — on top of the security and stability fixes from the 0.15.x line.
+
+### Added
+
+- **Live page scrubber.** A full-width scrubber under the toolbar: drag the thumb and the page follows live; click anywhere on the track to jump there. It mirrors for right-to-left / manga reading and is operable by keyboard and VoiceOver.
+- **Bookmarks.** Bookmark any page from a toolbar button (or ⌘D); a popover lists every bookmark with the current page marked, jumps to one on click, and removes one from a right-click menu.
+- **Right-to-left / manga reading.** A reading-direction toggle flips page turns, the double-page spread layout (including a lone final page), the navigation chevrons, and the scrubber.
+- **Native macOS shell.** Menu-bar menus, keyboard shortcuts, and standard window handling.
+
+### Accessibility
+
+- VoiceOver announces page changes and reads the page canvas, the scrubber (as an adjustable control), bookmarks, and library cards (each as a single element with Open and Favorite actions).
+- Decorative imagery is hidden from VoiceOver; controls carry labels, values, and selection state.
+- Reduce Motion is honored for library transitions; Dynamic Type is respected for load-bearing text.
+
+### Changed
+
+- The reader transport was reorganized — the comic and page controls sit in one capsule, and the scrubber has its own full-width strip.
+
+### Fixed
+
+- **The page slider works.** A geometry error in the loupe / tap-to-turn region let the magnifier intercept clicks over the toolbar, so the old slider could not be dragged and clicking it turned the page. The exempt region was corrected; the loupe and tap-to-turn now apply only over the page.
+- **Bookmarks open.** The bookmark list was anchored inside a menu that tore down before it could present; it is now a standalone popover.
+- Library URLs are normalized on add and via a one-time migration, so the same comic is no longer added twice under different path spellings, and a removed comic stays removed across folder rescans.
+- Additional crash and concurrency hardening, plus the security and data-loss fixes carried up from 0.15.1 / 0.15.2.
+
+### Distribution
+
+- Developer ID signing and notarization preparation, a corrected bundle identifier (with a one-time migration of saved settings), and Homebrew cask support.
+
+### Tests
+
+- The suite grows to 154, including pure-logic cores for the scrubber position mapping, the loupe-region predicate, and library URL normalization / migration.
+
+---
+
 ## v0.15.2 — 2026-06-12 — security + stability audit fixes
 
 A focused round of fixes from a full-repo audit covering security, concurrency/stability, and user-facing failure modes. One of these is a remote-code-execution path and two are silent data-loss paths in the compression feature, so this is a recommended update for anyone who opens downloaded comic archives. No user-facing feature changes.
@@ -259,7 +297,7 @@ over a transparent strip — leading (back / Library), centred transport
 hairline dividers between segments), trailing (favorite + ellipsis
 menu). Same handlers behind every button as before; the geometry and
 material are what changed. Detailed spec lives at
-`docs/superpowers/specs/2026-04-27-reader-liquid-glass-toolbar-design.md`.
+an internal design doc.
 
 ### Added
 - **`Sources/DC/Views/ReaderToolbar.swift`** (~250 lines) — top-level
@@ -437,8 +475,8 @@ This is step B of the two-step plan toward full Metal rendering in every reading
 
 ### Process notes
 - Backup taken before the change (SHA `eaf84360…`).
-- Planned via spec `docs/superpowers/specs/2026-04-23-unify-decode-cache-step-b-design.md` + plan `docs/superpowers/plans/2026-04-23-unify-decode-cache-step-b.md`.
-- Executed with the superpowers subagent-driven-development skill: five task commits with spec+quality review between each.
+- Planned via an internal spec + plan.
+- Executed in five task commits with spec + quality review between each.
 - Commits: `1023041` (helper), `7e82ced` (NSImage cache), `2fc7346` (prefetch + callback), `5a1ab1e` (inject + rewire — T4+T5 bundled per plan), `8049038` (delete PageImageCache).
 
 ### Verification
@@ -1003,7 +1041,7 @@ All vertical/vertical-double reading modes now use the Metal GPU pipeline.
 - Two-ring architecture confirmed: `MetalPageManager` (CVPixelBuffer, 10-page cap) + `MetalPageRenderer.textureRing` (MTLTexture, 10-page cap)
 - Both rings wired with LRU eviction in render path
 - `scripts/memory_ring_test.sh`: 6-point verification script
-- `.agent/Memory_Verification.md`: architecture docs and verification steps
+- Internal architecture + verification docs
 
 **Task 9 — Old reader removed:**
 - `VerticalComicScrollView` commented out (replaced by `MetalPageView`)

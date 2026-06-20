@@ -5,7 +5,7 @@
 #   brew install --cask greatdeepband/tap/open-comic
 #
 # Or install directly from this file:
-#   brew install --cask ./homebrew/Formula/open-comic.rb
+#   brew install --cask ./homebrew/Casks/open-comic.rb
 
 class OpenComic < Cask
   version "0.15.2"
@@ -21,6 +21,10 @@ class OpenComic < Cask
   zap trash: [
     "~/Library/Application Support/DC",
     "~/Library/Application Support/com.opncomic.open-comic",
+    "~/Library/Application Support/com.opencomic.open-comic",
     "~/Library/Preferences/com.opncomic.open-comic.plist",
+    "~/Library/Preferences/com.opencomic.open-comic.plist",
+    "~/Library/Caches/com.opncomic.open-comic",
+    "~/Library/Caches/com.opencomic.open-comic",
   ]
 end

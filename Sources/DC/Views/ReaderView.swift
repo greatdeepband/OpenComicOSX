@@ -62,6 +62,18 @@ struct ReaderView: View {
                     // MetalPageView reserves the top-bar band internally
                     // via NSScrollView.contentInsets.
                     modeContent(containerSize: geo.size)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Page \(vm.currentPage+1) of \(vm.pageCount), \(vm.comic.title)")
+                        .onChange(of: vm.currentPage) { _, _ in
+                            NSAccessibility.post(
+                                element: (NSApp.keyWindow ?? NSApp.mainWindow) as Any,
+                                notification: .announcementRequested,
+                                userInfo: [
+                                    .announcement: "Page \(vm.currentPage+1) of \(vm.pageCount)",
+                                    .priority: NSAccessibilityPriorityLevel.medium.rawValue
+                                ]
+                            )
+                        }
                     // Loupe overlay — sits in the same ZStack so the top bar
                     // (rendered above in the outer ZStack) covers it as the
                     // cursor approaches the top, and the window edge clips
@@ -84,9 +96,18 @@ struct ReaderView: View {
             }
 
             // Top bar overlay — sits visually above the reader content.
+            // Geometry invariant: bar (topBarHeight - scrubberStripHeight = 50pt)
+            // + scrubber (scrubberStripHeight = 22pt) = topBarHeight (72pt).
+            // The Divider is intentionally omitted: its ~1pt would push the
+            // scrubber's bottom edge outside isInTopBarBand, which is the exact
+            // placement bug this commit fixes.
             VStack(spacing: 0) {
                 readerTopBar
-                Divider()
+                // Scrubber strip — framed at scrubberStripHeight so its bottom
+                // edge sits at window-Y == topBarHeight → inside the band.
+                PageScrubber(vm: vm)
+                    .frame(height: ReaderConstants.scrubberStripHeight)
+                    .padding(.horizontal, 24)
             }
         }
         .toolbar(.hidden, for: .windowToolbar)
@@ -105,8 +126,20 @@ struct ReaderView: View {
     private func handleKey(_ key: MonitoredKey) {
         let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble
         switch key {
-        case .leftArrow, .keyA:   if !isVertical { vm.previousPage() }
-        case .rightArrow, .keyD:  if !isVertical { vm.nextPage() }
+        case .leftArrow, .keyA:
+            if !isVertical {
+                switch navStep(forwardInput: false, isRTL: vm.isRTL) {
+                case .next: vm.nextPage()
+                case .prev: vm.previousPage()
+                }
+            }
+        case .rightArrow, .keyD:
+            if !isVertical {
+                switch navStep(forwardInput: true, isRTL: vm.isRTL) {
+                case .next: vm.nextPage()
+                case .prev: vm.previousPage()
+                }
+            }
         case .upArrow, .keyW:     if !isVertical { vm.zoomIn() }
         case .downArrow, .keyS:   if !isVertical { vm.zoomOut() }
         // Persist BEFORE leaving the comic — the toolbar buttons do this, but
@@ -119,7 +152,6 @@ struct ReaderView: View {
                                   library.openAdjacentComic(offset:  1, currentMode: vm.readingMode.rawValue)
         case .backspace, .keyZ:  vm.persistCurrentPosition()
                                   library.closeComic()
-        case .cmdF:               toggleFullscreen()
         case .key1:               vm.readingMode = .singlePage;     vm.saveMode()
         case .key2:               vm.readingMode = .doublePage;     vm.saveMode()
         case .key3:               vm.readingMode = .verticalScroll; vm.saveMode()
@@ -159,6 +191,7 @@ struct ReaderView: View {
             scale: vm.scale,
             containerWidth: containerSize.width,
             containerHeight: containerSize.height,
+            isRTL: vm.isRTL,
             restorePage: vm.currentPage,
             restoreOffset: nil,
             pageManager: vm.pageManager,
@@ -170,7 +203,10 @@ struct ReaderView: View {
             },
             onLoupeOverlay: { state in metalLoupe = state },
             onPageNavSwipe: { offset in
-                if offset > 0 { vm.nextPage() } else { vm.previousPage() }
+                switch navStep(forwardInput: offset > 0, isRTL: vm.isRTL) {
+                case .next: vm.nextPage()
+                case .prev: vm.previousPage()
+                }
             },
             onComicNavSwipe: { offset in
                 library.openAdjacentComic(offset: offset, currentMode: vm.readingMode.rawValue)
@@ -190,6 +226,7 @@ struct ReaderView: View {
             scale: vm.scale,
             containerWidth: containerSize.width,
             containerHeight: containerSize.height,
+            isRTL: vm.isRTL,
             restorePage: vm.currentPage,
             restoreOffset: nil,
             pageManager: vm.pageManager,
@@ -201,7 +238,10 @@ struct ReaderView: View {
             },
             onLoupeOverlay: { state in metalLoupe = state },
             onPageNavSwipe: { offset in
-                if offset > 0 { vm.nextPage() } else { vm.previousPage() }
+                switch navStep(forwardInput: offset > 0, isRTL: vm.isRTL) {
+                case .next: vm.nextPage()
+                case .prev: vm.previousPage()
+                }
             },
             onComicNavSwipe: { offset in
                 library.openAdjacentComic(offset: offset, currentMode: vm.readingMode.rawValue)
@@ -236,6 +276,10 @@ struct ReaderView: View {
                         return vm.scrollOffsetFraction
                     }
                     if vm.scrollOffsetFraction == 0 {
+                        guard ReadingPositionStore.shouldUseSavedOffset(
+                            savedPagesPerRow: vm.savedScrollPagesPerRow,
+                            currentPagesPerRow: pagesPerRow
+                        ) else { return nil }
                         return vm.savedScrollOffset
                     }
                     return nil
@@ -277,7 +321,7 @@ struct ReaderView: View {
 
 // MARK: - Global key monitor (singleton)
 
-enum MonitoredKey { case leftArrow, rightArrow, upArrow, downArrow, keyA, keyD, keyW, keyS, keyQ, keyE, backspace, cmdF, key1, key2, key3, key4, keyZ }
+enum MonitoredKey { case leftArrow, rightArrow, upArrow, downArrow, keyA, keyD, keyW, keyS, keyQ, keyE, backspace, key1, key2, key3, key4, keyZ }
 
 final class KeyMonitor {
     static let shared = KeyMonitor()
@@ -304,7 +348,6 @@ final class KeyMonitor {
             case (12, _, true):  handler(.keyQ);       return nil  // Q
             case (14, _, true):  handler(.keyE);       return nil  // E
             case (51, _, true):  handler(.backspace);  return nil  // ⌫
-            case (3, true, _):   handler(.cmdF);       return nil  // Cmd+F
             case (18, _, true):  handler(.key1);       return nil  // 1
             case (19, _, true):  handler(.key2);       return nil  // 2
             case (20, _, true):  handler(.key3);       return nil  // 3

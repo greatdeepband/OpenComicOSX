@@ -7,9 +7,11 @@ let package = Package(
         .macOS(.v14)
     ],
     dependencies: [
+        // Pinned for reproducible release builds. The committed Package.resolved locks the
+        // exact revision; .upToNextMinor keeps us on 0.9.x patches but never auto-jumps to 0.10+.
         .package(
             url: "https://github.com/weichsel/ZIPFoundation.git",
-            from: "0.9.19"
+            .upToNextMinor(from: "0.9.20")
         )
     ],
     targets: [

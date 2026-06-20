@@ -47,3 +47,49 @@ jobs:
 
       - name: Test
         run: swift test --parallel
+
+  bundle:
+    name: Bundle & Verify (macOS 26)
+    runs-on: macos-26
+    timeout-minutes: 20
+    # Apple certs / notary creds are intentionally NOT available here. This job only proves the
+    # production bundle assembles + ad-hoc signs + verifies — real signing + notarization is a
+    # local release step. Never set NOTARIZE in CI.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-${{ env.ImageOS }}-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ env.ImageOS }}-spm-
+
+      - name: Verify Package.resolved is not stale
+        run: |
+          swift package resolve --only-use-versions-from-resolved-file
+          git diff --exit-code Package.resolved
+
+      - name: Guard — never notarize in CI
+        run: '[ -z "${NOTARIZE:-}" ] || { echo "NOTARIZE must be unset in CI"; exit 1; }'
+
+      - name: Assemble + ad-hoc sign the production bundle
+        run: SIGN_ID="-" ./build_production.sh
+
+      - name: Verify the bundle signature
+        run: codesign --verify --deep --strict --verbose=2 dist/OpenComic.app
+
+      - name: Upload bundle artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenComic-${{ github.sha }}
+          # dist/DC.dSYM is produced by the release build today; if a future toolchain stops
+          # emitting it, drop it from this list (the script copies it conditionally).
+          path: |
+            dist/OpenComic.app
+            dist/DC.dSYM
+            dist/OpenComic-*.zip
+          if-no-files-found: error

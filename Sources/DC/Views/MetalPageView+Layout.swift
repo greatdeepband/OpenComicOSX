@@ -146,10 +146,11 @@ extension MetalPageView.Coordinator {
         }
     }
 
-    func needsRebuild(containerWidth: CGFloat, pagesPerRow: Int, pages: [ComicPage], layout: ReadingLayout, currentPage: Int, scale: CGFloat) -> Bool {
+    func needsRebuild(containerWidth: CGFloat, pagesPerRow: Int, pages: [ComicPage], layout: ReadingLayout, currentPage: Int, scale: CGFloat, isRTL: Bool) -> Bool {
         if abs(lastContainerWidth - containerWidth) > 1 { return true }
         if lastPagesPerRow != pagesPerRow { return true }
         if lastLayout != layout { return true }
+        if lastIsRTL != isRTL { return true }
         // For non-vertical layouts, a page-turn or scale change requires a
         // layout rebuild because pagePositions / pageYOffsets must reflect
         // the new page / zoomed frame size.
@@ -196,6 +197,7 @@ extension MetalPageView.Coordinator {
 
         lastContainerWidth = containerWidth
         lastPagesPerRow = pagesPerRow
+        lastIsRTL = isRTL
 
         metalView.needsDisplay = true
     }
@@ -399,13 +401,28 @@ extension MetalPageView.Coordinator {
         let xOff = (docW - totalWidth) / 2
         let yOff = (docH - spreadHeight) / 2
 
-        let leftRect = CGRect(x: xOff, y: yOff, width: pageWidth, height: leftH)
-        pagePositions[leftPage.id] = leftRect
-        pageYOffsets.append(0)
-
-        if let rp = rightPage {
-            let rightRect = CGRect(x: xOff + pageWidth + gutter, y: yOff, width: pageWidth, height: rightH)
-            pagePositions[rp.id] = rightRect
+        if rightPage != nil {
+            // Real two-page pair: honor RTL by placing the lower-index page
+            // (pages[currentPage]) in the RIGHT rect and the higher-index page
+            // (pages[currentPage+1]) in the LEFT rect when isRTL.
+            let slots = spreadSlots(currentPage: currentPage, isRTL: isRTL)
+            let slotLeft  = pages[slots.left]
+            let slotRight = pages[slots.right]
+            let slotLeftH  = (slotLeft.id == leftPage.id) ? leftH : rightH
+            let slotRightH = (slotRight.id == leftPage.id) ? leftH : rightH
+            let leftRect  = CGRect(x: xOff,                     y: yOff, width: pageWidth, height: slotLeftH)
+            let rightRect = CGRect(x: xOff + pageWidth + gutter, y: yOff, width: pageWidth, height: slotRightH)
+            pagePositions[slotLeft.id]  = leftRect
+            pagePositions[slotRight.id] = rightRect
+            pageYOffsets.append(0)
+            pageYOffsets.append(0)
+        } else {
+            // Solo page (last page with no partner, or partner is a spread):
+            // in RTL mode place it in the right slot so it appears on the correct
+            // side of the double-spread canvas.
+            let soloX: CGFloat = isRTL ? (xOff + pageWidth + gutter) : xOff
+            let soloRect = CGRect(x: soloX, y: yOff, width: pageWidth, height: leftH)
+            pagePositions[leftPage.id] = soloRect
             pageYOffsets.append(0)
         }
 

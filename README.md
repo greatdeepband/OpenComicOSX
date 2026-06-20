@@ -190,7 +190,7 @@ GitHub Actions runs `swift build -c release` and `swift test --parallel` on ever
 | `Q` | Open previous comic in gallery | Open previous comic in gallery |
 | `E` | Open next comic in gallery | Open next comic in gallery |
 | `Backspace` / `Z` | Back to library | Back to library |
-| `⌘F` | Toggle full screen | Toggle full screen |
+| `⌃⌘F` | Enter full screen | Enter full screen |
 | `1` | Switch to Single Page mode | Switch to Single Page mode |
 | `2` | Switch to Double Page mode | Switch to Double Page mode |
 | `3` | Switch to Vertical mode | Switch to Vertical mode |

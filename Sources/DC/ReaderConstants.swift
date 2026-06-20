@@ -12,10 +12,21 @@ enum ReaderConstants {
     /// Visible height of the reader's top bar overlay. Used as the scrollView's
     /// `contentInsets.top` so the page content scrolls beneath but not over
     /// it. The value is the intrinsic height of `readerTopBar` in ReaderView.
-    /// 52pt: tall enough to host 36pt Liquid-Glass capsules with breathing
-    /// room above and below them, and to read as a "real" Mac toolbar
-    /// rather than a thin chrome line.
-    static let topBarHeight: CGFloat = 52
+    /// 72pt: 36pt capsule + ~8pt breathing above/below + 22pt reserved at the
+    /// bottom for the full-width page scrubber strip (Task 3). All three call
+    /// sites in ReaderView (singlePage, doublePage, verticalScroll) and the
+    /// toolbar frame height read this one constant — raise it here to move
+    /// them all in lockstep.
+    static let topBarHeight: CGFloat = 72
+
+    /// Height of the full-width page-scrubber strip at the bottom of the top
+    /// bar overlay. The toolbar bar itself is framed at
+    /// `topBarHeight - scrubberStripHeight` (50pt) so that bar + scrubber
+    /// together exactly fill `topBarHeight` — keeping the scrubber's bottom
+    /// edge at window-Y == topBarHeight, fully inside `isInTopBarBand`.
+    /// 22pt gives a comfortable click/drag hit area (up from 14pt); the 4pt
+    /// visual track stays centred within the strip.
+    static let scrubberStripHeight: CGFloat = 22
 
     /// Width of the AppKit window-resize hot zone along each window-frame
     /// edge. The reader uses `.fullSizeContentView` + `.hiddenTitleBar`,
@@ -68,10 +79,11 @@ enum ReaderConstants {
     static let verticalZoomMinSize: CGSize = CGSize(width: 480, height: 360)
 
     /// Height of an individual Liquid-Glass capsule inside `readerTopBar`.
-    /// The capsule sits centred in the 52pt strip with ≈ 8pt of strip
-    /// remaining above and below it. 36pt accommodates the system's
-    /// standard control glyph baseline (16-18pt SF Symbols + label) with
-    /// the Liquid-Glass rim still reading as a distinct edge.
+    /// The capsule sits centred in the upper 50pt of the 72pt bar strip
+    /// (≈ 8pt above, ≈ 6pt below the capsule rim), leaving the lower 22pt
+    /// for the full-width page scrubber strip (Task 3). 36pt accommodates
+    /// the system's standard control glyph baseline (16-18pt SF Symbols +
+    /// label) with the Liquid-Glass rim still reading as a distinct edge.
     static let toolbarCapsuleHeight: CGFloat = 36
 
     /// Hairline divider opacity inside `Segmented`-style toolbar capsules.
@@ -244,4 +256,39 @@ enum ReaderConstants {
     /// long-form comic's entire page count; comics beyond 200 pages fall
     /// back to LRU eviction on the oldest thumbs.
     static let thumbnailRingCap: Int = 200
+
+    // MARK: - Memory-pressure eviction (WS-B)
+
+    /// Minimum seconds between two successive memory-pressure-triggered
+    /// evictions. macOS can fire `.warning` + `.critical` events back-to-back
+    /// (or fire the same level repeatedly); a 2 s cooldown prevents double-
+    /// eviction that would wipe pages the renderer is about to draw.
+    static let memoryPressureEvictionCooldown: Double = 2.0
+
+    // MARK: - Archive intake hardening (WS-B)
+
+    /// Wall-clock ceiling for any extraction/listing subprocess (`tar`,
+    /// `unar`, `lsar`). A malicious or corrupt archive can make an external
+    /// tool spin or block forever (e.g. an infinite-loop decompressor, or a
+    /// child that wedges with its stdout pipe full). After this deadline a
+    /// watchdog SIGTERMs then SIGKILLs the child; killing it closes the
+    /// child's stdout, which unblocks any `readDataToEndOfFile()` the parent
+    /// is stuck in. 120s is generous enough for a legitimate multi-GB CBR on
+    /// a slow disk while still bounding a hostile input.
+    static let subprocessTimeout: TimeInterval = 120
+
+    /// Max number of image entries an archive may declare before intake
+    /// rejects it. A "zip bomb of entries" (millions of tiny members) would
+    /// otherwise exhaust inodes/fds and stall extraction. 10_000 pages is far
+    /// beyond any real comic (the longest single volumes are a few hundred).
+    static let maxArchiveEntries = 10_000
+
+    /// Max total uncompressed bytes an archive may declare (pre-flight sum)
+    /// or a single entry may decode to (streaming decode counter). 8 GiB
+    /// bounds a classic decompression bomb (a few KB inflating to gigabytes)
+    /// while staying above any legitimate high-res comic volume. Enforced in
+    /// two layers: the pre-extraction sum (Step 4) catches an honest central
+    /// directory; the per-entry decode counter (Comic.swift) catches a lying
+    /// one at first decode.
+    static let maxUncompressedBytes: Int64 = 8 * 1024 * 1024 * 1024
 }

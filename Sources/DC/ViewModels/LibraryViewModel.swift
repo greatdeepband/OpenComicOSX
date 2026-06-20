@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import SwiftUI
 import Combine
+import UniformTypeIdentifiers
 
 // MARK: - Gallery model
 
@@ -16,13 +17,35 @@ struct Gallery: Identifiable, Codable {
     /// Comic URLs the user has explicitly removed from this gallery.
     /// These are permanently excluded to prevent reappearing when addFolders re-scans source folders.
     var deletedComics: Set<URL>
+    /// True for the system-managed "Imported" gallery created by importComics(_:).
+    /// Defaults to false so legacy persisted data (which lacks this key) decodes
+    /// without throwing keyNotFound — a throw would leave `galleries` empty and
+    /// wipe the user's entire library.
+    var isImported: Bool = false
 
-    init(id: UUID = UUID(), name: String, sourceFolders: [URL] = [], comics: [URL] = [], deletedComics: Set<URL> = []) {
+    enum CodingKeys: String, CodingKey {
+        case id, name, sourceFolders, comics, deletedComics, isImported
+    }
+
+    init(id: UUID = UUID(), name: String, sourceFolders: [URL] = [], comics: [URL] = [], deletedComics: Set<URL> = [], isImported: Bool = false) {
         self.id = id
         self.name = name
         self.sourceFolders = sourceFolders
         self.comics = comics
         self.deletedComics = deletedComics
+        self.isImported = isImported
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        sourceFolders = try c.decode([URL].self, forKey: .sourceFolders)
+        comics = try c.decode([URL].self, forKey: .comics)
+        deletedComics = try c.decode(Set<URL>.self, forKey: .deletedComics)
+        // decodeIfPresent so legacy galleries_v1 data without this key decodes
+        // as false rather than throwing keyNotFound (which would wipe the library).
+        isImported = try c.decodeIfPresent(Bool.self, forKey: .isImported) ?? false
     }
 }
 
@@ -101,7 +124,7 @@ final class LibraryViewModel: ObservableObject {
 
     /// Grid card size, persisted.
     @Published var cardSize: CardSize = .medium {
-        didSet { UserDefaults.standard.set(cardSize.rawValue, forKey: "library.cardSize") }
+        didSet { defaults.set(cardSize.rawValue, forKey: "library.cardSize") }
     }
 
     /// Sort order per sidebar section, keyed by `LibrarySection.storageKey`.
@@ -178,11 +201,12 @@ final class LibraryViewModel: ObservableObject {
                 changed = true
             }
         }
-        if let recent = recentComics.first(where: { $0.url == url }) {
+        if let recent = recentComics.first(where: { canonicalKey($0.url) == canonicalKey(url) }) {
             removeRecent(recent)
         }
-        if favoriteURLs.contains(url) {
-            favoriteURLs.removeAll { $0 == url }
+        if isFavorite(url: url) {
+            let key = canonicalKey(url)
+            favoriteURLs.removeAll { canonicalKey($0) == key }
             saveFavorites()
         }
         if changed { saveGalleries() }
@@ -194,8 +218,13 @@ final class LibraryViewModel: ObservableObject {
     func addComicFiles(_ urls: [URL], to galleryID: UUID) {
         guard let idx = galleries.firstIndex(where: { $0.id == galleryID }) else { return }
         var changed = false
-        for url in urls where !galleries[idx].comics.contains(url) {
-            galleries[idx].comics.append(url)
+        for url in urls {
+            let u = url.standardizedFileURL
+            guard !galleries[idx].comics.contains(u) else { continue }
+            // For named (non-imported) galleries, respect the tombstone: skip comics
+            // the user explicitly removed so they don't reappear on re-import.
+            if !galleries[idx].isImported && galleries[idx].deletedComics.contains(u) { continue }
+            galleries[idx].comics.append(u)
             changed = true
         }
         if changed { saveGalleries() }
@@ -262,9 +291,9 @@ final class LibraryViewModel: ObservableObject {
     /// prompt and run with the remembered delete-originals value.
     private func runPendingIfRemembered() {
         guard let urls = pendingCompressionURLs else { return }
-        if CompressionPreferences.hasRememberedChoice {
-            let delete = CompressionPreferences.rememberedDeleteOriginals
-            let convertPNGs = CompressionPreferences.rememberedConvertPNGs
+        if CompressionPreferences.hasRememberedChoice() {
+            let delete = CompressionPreferences.rememberedDeleteOriginals()
+            let convertPNGs = CompressionPreferences.rememberedConvertPNGs()
             pendingCompressionURLs = nil
             startBatch(urls: urls, deleteOriginals: delete, convertPNGs: convertPNGs)
         }
@@ -276,6 +305,8 @@ final class LibraryViewModel: ObservableObject {
         pendingCompressionURLs = nil
         if remember {
             CompressionPreferences.remember(deleteOriginals: deleteOriginals, convertPNGs: convertPNGs)
+        } else if CompressionPreferences.hasRememberedChoice() {
+            CompressionPreferences.reset()
         }
         startBatch(urls: urls, deleteOriginals: deleteOriginals, convertPNGs: convertPNGs)
     }
@@ -323,27 +354,27 @@ final class LibraryViewModel: ObservableObject {
             Task { await DCLogger.shared.log("[PERSIST] selectedSection encode failed: \(error)") }
             return
         }
-        UserDefaults.standard.set(data, forKey: "library.selectedSection")
+        defaults.set(data, forKey: "library.selectedSection")
     }
 
     private func saveSortPreferences() {
         let dict: [String: String] = sortPreferences.mapValues { $0.rawValue }
-        UserDefaults.standard.set(dict, forKey: "library.sortPreferences")
+        defaults.set(dict, forKey: "library.sortPreferences")
     }
 
     func loadNewLibraryState() {
-        if let data = UserDefaults.standard.data(forKey: "library.selectedSection") {
+        if let data = defaults.data(forKey: "library.selectedSection") {
             do {
                 selectedSection = try JSONDecoder().decode(LibrarySection.self, from: data)
             } catch {
                 Task { await DCLogger.shared.log("[PERSIST] selectedSection decode failed: \(error) — falling back to default") }
             }
         }
-        if let raw = UserDefaults.standard.string(forKey: "library.cardSize"),
+        if let raw = defaults.string(forKey: "library.cardSize"),
            let size = CardSize(rawValue: raw) {
             cardSize = size
         }
-        if let dict = UserDefaults.standard.dictionary(forKey: "library.sortPreferences") as? [String: String] {
+        if let dict = defaults.dictionary(forKey: "library.sortPreferences") as? [String: String] {
             var prefs: [String: LibrarySortOrder] = [:]
             for (k, v) in dict {
                 if let order = LibrarySortOrder(rawValue: v) { prefs[k] = order }
@@ -386,6 +417,11 @@ final class LibraryViewModel: ObservableObject {
     private let galleriesKey = "galleries_v1"
     private let favoritesKey = "favoriteURLs_v1"
 
+    /// The UserDefaults suite used for all persistence. Defaults to
+    /// UserDefaults.standard; tests pass an isolated suite so they never
+    /// touch the real user library.
+    private let defaults: UserDefaults
+
     /// Disk cache directory for cover thumbnails.
     static let thumbnailCacheDir: URL = {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -395,9 +431,36 @@ final class LibraryViewModel: ObservableObject {
         return dir
     }()
 
-    init() {
+    /// UTType list for the NSOpenPanel — covers every format the reader supports.
+    static let comicContentTypes: [UTType] = [.pdf]
+        + ["cbz", "cbr", "cb7", "cbt"].compactMap { UTType(filenameExtension: $0) }
+
+    init(userDefaults: UserDefaults = .standard) {
+        self.defaults = userDefaults
         loadRecents()
         loadGalleries()
+        // One-time migration: canonicalize all stored URLs to standardizedFileURL so
+        // that subsequent equality checks (dedup, tombstone, isInLibrary) are reliable.
+        // The flag prevents re-running on every launch. We run even when galleries is
+        // empty (fresh install) so the flag is always set — the empty-gallery early-
+        // return in loadGalleries() must not skip this block.
+        let normalizeURLsKey = "didNormalizeGalleryURLs_v1"
+        if !defaults.bool(forKey: normalizeURLsKey) {
+            for idx in galleries.indices {
+                // Map each URL to its canonical form, then deduplicate preserving order
+                // (standardization can collapse /tmp/x.cbz and /private/tmp/x.cbz into
+                // the same path — keep first occurrence; don't drop genuinely-distinct files).
+                var seen = Set<URL>()
+                galleries[idx].comics = galleries[idx].comics
+                    .map { $0.standardizedFileURL }
+                    .filter { seen.insert($0).inserted }
+                galleries[idx].deletedComics = Set(
+                    galleries[idx].deletedComics.map { $0.standardizedFileURL }
+                )
+            }
+            defaults.set(true, forKey: normalizeURLsKey)
+            if !galleries.isEmpty { saveGalleries() }
+        }
         loadFavorites()
         loadNewLibraryState()
         // One-time migration: wipe the entire thumbnail cache on first launch after
@@ -406,13 +469,13 @@ final class LibraryViewModel: ObservableObject {
         // would delete them anyway — but doing it upfront avoids a false "all missing" state
         // that triggers a full regeneration pass on every launch until the purge runs.
         let migrationKey = "thumbnailScheme_fnv1a_v1"
-        if !UserDefaults.standard.bool(forKey: migrationKey) {
+        if !defaults.bool(forKey: migrationKey) {
             let dir = LibraryViewModel.thumbnailCacheDir
             if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
                 for file in files { try? FileManager.default.removeItem(at: file) }
                 Task { await DCLogger.shared.log("[THUMB] Migration: cleared \(files.count) old hashValue thumbnail(s).") }
             }
-            UserDefaults.standard.set(true, forKey: migrationKey)
+            defaults.set(true, forKey: migrationKey)
         }
         // Generate any missing thumbnails and clean up orphaned files from previous sessions.
         // Thumbnail loading is fully lazy — requestThumbnail(for:) handles everything on demand.
@@ -507,7 +570,7 @@ final class LibraryViewModel: ObservableObject {
                 group.addTask(priority: .background) { [weak self] in
                     guard let self else { return }
                     // Load and scale cover entirely on the background thread.
-                    guard let cgImage = ComicLoader.loadCoverCGImage(url: url) else { return }
+                    guard let cgImage = await ComicLoader.loadCoverCGImage(url: url) else { return }
                     // Encode and write to disk on the background thread — no MainActor needed.
                     let diskURL = LibraryViewModel.thumbnailURL(for: url)
                     LibraryViewModel.saveCGImage(cgImage, to: diskURL)
@@ -567,11 +630,11 @@ final class LibraryViewModel: ObservableObject {
         panel.title = "Open Comic"
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = []
+        panel.allowedContentTypes = Self.comicContentTypes
         panel.message = "Choose a CBZ, PDF, CBR, CB7, or CBT file"
 
         if panel.runModal() == .OK, let url = panel.url {
-            Task { await load(url: url) }
+            Task { importComics([url]); await load(url: url) }
         }
     }
 
@@ -582,7 +645,7 @@ final class LibraryViewModel: ObservableObject {
         errorMessage = nil
         do {
             let comic = try await Task.detached(priority: .userInitiated) {
-                try ComicLoader.load(url: url)
+                try await ComicLoader.load(url: url)
             }.value
             openComic = comic
             lastOpenedURL = url
@@ -594,7 +657,7 @@ final class LibraryViewModel: ObservableObject {
                 guard let self else { return }
                 let thumbURL = LibraryViewModel.thumbnailURL(for: url)
                 if !FileManager.default.fileExists(atPath: thumbURL.path),
-                   let cover = ComicLoader.loadCover(url: url) {
+                   let cover = await ComicLoader.loadCover(url: url) {
                     await MainActor.run { self.saveThumbnailAndCache(cover, for: url) }
                 }
             }
@@ -664,15 +727,42 @@ final class LibraryViewModel: ObservableObject {
         saveRecents()
     }
 
+    // MARK: - File-identity helpers
+
+    /// Canonical key for a comic URL — stable across alias resolution and
+    /// across the two URL construction methods (`fileURLWithPath` vs
+    /// `URL(string: absoluteString)`).  Used by favorites and recents
+    /// persistence so entries survive app restarts and macOS symlink changes.
+    private func canonicalKey(_ url: URL) -> String {
+        url.standardizedFileURL.path
+    }
+
+    /// Idempotent migration helper: reconstructs a URL from a stored string
+    /// that may be either an old-format `absoluteString` (e.g. `file:///…`)
+    /// or an already-migrated bare POSIX path (e.g. `/Users/…`).
+    ///
+    /// - `URL(string:)` succeeds for both forms on macOS, but only returns a
+    ///   non-nil *scheme* for absolute URLs (old format). Bare paths parse as
+    ///   relative URLs with `scheme == nil` and must fall through to
+    ///   `URL(fileURLWithPath:)` to produce a proper `file://` URL.
+    private func migrateStoredURL(_ stored: String) -> URL? {
+        if let url = URL(string: stored), url.scheme != nil {
+            return url   // old format: "file:///path/to/A.cbz"
+        }
+        return URL(fileURLWithPath: stored)   // already-migrated: "/path/to/A.cbz"
+    }
+
     // MARK: - Favorites
 
     func isFavorite(url: URL) -> Bool {
-        favoriteURLs.contains(url)
+        let key = canonicalKey(url)
+        return favoriteURLs.contains { canonicalKey($0) == key }
     }
 
     func toggleFavorite(url: URL) {
+        let key = canonicalKey(url)
         if isFavorite(url: url) {
-            favoriteURLs.removeAll { $0 == url }
+            favoriteURLs.removeAll { canonicalKey($0) == key }
         } else {
             favoriteURLs.insert(url, at: 0)
         }
@@ -680,7 +770,7 @@ final class LibraryViewModel: ObservableObject {
     }
 
     private func loadFavorites() {
-        guard let data = UserDefaults.standard.data(forKey: favoritesKey) else { return }
+        guard let data = defaults.data(forKey: favoritesKey) else { return }
         let paths: [String]
         do {
             paths = try JSONDecoder().decode([String].self, from: data)
@@ -688,11 +778,14 @@ final class LibraryViewModel: ObservableObject {
             Task { await DCLogger.shared.log("[PERSIST] favorites decode failed: \(error) — favorites list will appear empty") }
             return
         }
-        favoriteURLs = paths.compactMap { URL(string: $0) }
+        // Idempotent migration: old entries are absoluteStrings ("file:///…");
+        // already-migrated entries are bare paths ("/…"). Both are handled.
+        favoriteURLs = paths.compactMap { migrateStoredURL($0) }
     }
 
     private func saveFavorites() {
-        let paths = favoriteURLs.map { $0.absoluteString }
+        // Persist as canonical bare paths — stable across URL construction methods.
+        let paths = favoriteURLs.map { canonicalKey($0) }
         let data: Data
         do {
             data = try JSONEncoder().encode(paths)
@@ -700,23 +793,33 @@ final class LibraryViewModel: ObservableObject {
             Task { await DCLogger.shared.log("[PERSIST] favorites encode failed: \(error) — favorites change not persisted") }
             return
         }
-        UserDefaults.standard.set(data, forKey: favoritesKey)
+        defaults.set(data, forKey: favoritesKey)
     }
 
     // MARK: - Recents
 
     private func addRecent(url: URL) {
         let entry = RecentComic(url: url)
-        recentComics.removeAll { $0.url == url }
+        let key = canonicalKey(url)
+        recentComics.removeAll { canonicalKey($0.url) == key }
         recentComics.insert(entry, at: 0)
         if recentComics.count > 20 { recentComics = Array(recentComics.prefix(20)) }
         saveRecents()
     }
 
     private func loadRecents() {
-        guard let data = UserDefaults.standard.data(forKey: recentsKey) else { return }
+        guard let data = defaults.data(forKey: recentsKey) else { return }
         do {
-            recentComics = try JSONDecoder().decode([RecentComic].self, from: data)
+            var decoded = try JSONDecoder().decode([RecentComic].self, from: data)
+            // Idempotent migration: URL Codable encodes as absoluteString, so
+            // existing entries already decode to proper file:// URLs. Re-wrap
+            // each entry so its URL is the canonically keyed file URL.
+            decoded = decoded.map { recent in
+                let canonical = URL(fileURLWithPath: canonicalKey(recent.url))
+                guard canonical != recent.url else { return recent }
+                return RecentComic(url: canonical)
+            }
+            recentComics = decoded
         } catch {
             Task { await DCLogger.shared.log("[PERSIST] recents decode failed: \(error) — Continue Reading will appear empty") }
         }
@@ -730,10 +833,55 @@ final class LibraryViewModel: ObservableObject {
             Task { await DCLogger.shared.log("[PERSIST] recents encode failed: \(error) — last-opened state not persisted") }
             return
         }
-        UserDefaults.standard.set(data, forKey: recentsKey)
+        defaults.set(data, forKey: recentsKey)
     }
 
     // MARK: - Galleries
+
+    /// Comic file extensions recognised by the importer. Mirrors the inline set
+    /// in resolveComics(from:) — kept in sync manually.
+    static let comicExtensions: Set<String> = ["cbz", "cbr", "cb7", "cbt", "pdf"]
+
+    /// Internal trampoline so callers never need to reference the private async
+    /// generateThumbnailsParallel(for:) directly.
+    func generateThumbnails(for urls: [URL]) {
+        Task.detached(priority: .background) { [weak self, urls] in
+            await self?.generateThumbnailsParallel(for: urls)
+        }
+    }
+
+    /// Returns true if `url` (by standardizedFileURL) is already present in
+    /// any gallery's `comics` list. Used by `handleDrop` to route a drop to
+    /// "relocate" (move) vs "import" (add + thumbnail generation).
+    static func isInLibrary(_ url: URL, galleries: [Gallery]) -> Bool {
+        let known = Set(galleries.flatMap { $0.comics }.map { $0.standardizedFileURL })
+        return known.contains(url.standardizedFileURL)
+    }
+
+    /// Returns the id of the existing "Imported" gallery, or creates one and
+    /// returns its id. Always call from the main actor (synchronous).
+    func ensureImportedGallery() -> UUID {
+        if let g = galleries.first(where: { $0.isImported }) { return g.id }
+        let g = Gallery(name: "Imported", isImported: true)
+        galleries.append(g)
+        saveGalleries()
+        return g.id
+    }
+
+    /// Imports loose comic files into the "Imported" gallery, deduplicating
+    /// against every gallery already in the library. Synchronous on the main
+    /// actor; thumbnail generation is spawned detached so this never blocks.
+    func importComics(_ urls: [URL]) {
+        let known = Set(galleries.flatMap { $0.comics }.map { $0.standardizedFileURL })
+        let fresh = urls.filter {
+            Self.comicExtensions.contains($0.pathExtension.lowercased())
+                && !known.contains($0.standardizedFileURL)
+        }
+        guard !fresh.isEmpty else { return }
+        let importedID = ensureImportedGallery()
+        addComicFiles(fresh, to: importedID)
+        generateThumbnails(for: fresh)
+    }
 
     func createGallery(name: String, folders: [URL]) {
         var gallery = Gallery(name: name, sourceFolders: folders)
@@ -746,6 +894,7 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func renameGallery(id: UUID, newName: String) {
+        guard !(galleries.first(where: { $0.id == id })?.isImported ?? false) else { return }
         guard let idx = galleries.firstIndex(where: { $0.id == id }) else { return }
         galleries[idx].name = newName
         saveGalleries()
@@ -771,6 +920,7 @@ final class LibraryViewModel: ObservableObject {
     }
 
     func deleteGallery(id: UUID) {
+        guard !(galleries.first(where: { $0.id == id })?.isImported ?? false) else { return }
         galleries.removeAll { $0.id == id }
         saveGalleries()
         // If the deleted gallery was the active sidebar selection, snap the
@@ -808,8 +958,25 @@ final class LibraryViewModel: ObservableObject {
         saveGalleries()
     }
 
+    /// Re-scans the gallery's source folders and appends any comics that have
+    /// been added to those folders since the last scan. Comics already in the
+    /// gallery (or explicitly deleted by the user) are not re-added.
+    /// No-op if the gallery has no source folders (e.g. the file-backed Imported gallery).
+    func rescanGallery(id: UUID) {
+        guard let idx = galleries.firstIndex(where: { $0.id == id }) else { return }
+        guard !galleries[idx].sourceFolders.isEmpty else { return }
+        let existingComics = Set(galleries[idx].comics)
+        let deletedComics  = galleries[idx].deletedComics
+        let newComics = resolveComics(from: galleries[idx].sourceFolders)
+            .filter { !existingComics.contains($0) && !deletedComics.contains($0) }
+        guard !newComics.isEmpty else { return }
+        galleries[idx].comics.append(contentsOf: newComics)
+        saveGalleries()
+        generateThumbnails(for: newComics)
+    }
+
     private func loadGalleries() {
-        guard let data = UserDefaults.standard.data(forKey: galleriesKey) else { return }
+        guard let data = defaults.data(forKey: galleriesKey) else { return }
         do {
             galleries = try JSONDecoder().decode([Gallery].self, from: data)
         } catch {
@@ -828,7 +995,7 @@ final class LibraryViewModel: ObservableObject {
             Task { await DCLogger.shared.log("[PERSIST] galleries encode failed: \(error) — library mutation not persisted; restart will revert") }
             return
         }
-        UserDefaults.standard.set(data, forKey: galleriesKey)
+        defaults.set(data, forKey: galleriesKey)
     }
 
     // MARK: - Folder scanning
@@ -849,7 +1016,7 @@ final class LibraryViewModel: ObservableObject {
             for case let url as URL in enumerator {
                 guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
                 if extensions.contains(url.pathExtension.lowercased()) {
-                    found.append(url)
+                    found.append(url.standardizedFileURL)
                 }
             }
             found.sort { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
@@ -933,9 +1100,23 @@ final class LibraryViewModel: ObservableObject {
 
     // MARK: - Cache management
 
-    /// Wipes all disk caches (extracted pages + thumbnails) and all reading-state UserDefaults.
-    /// Galleries and favorites are preserved. Thumbnails regenerate automatically.
-    func clearAllCache() {
+    /// The explicit set of UserDefaults keys that belong to reading progress.
+    /// Using a static list (rather than a blanket wipe) ensures future keys
+    /// like "bookmarks" survive unless explicitly added here.
+    nonisolated static let readingProgressKeys: [String] = [
+        "readingPositions", "scrollOffsets", "readingModes",
+        "pageCounts", "scrollPagesPerRow", "recentComics"
+    ]
+
+    /// Removes all reading-progress keys from `defaults`. Injectable for testing.
+    nonisolated static func removeReadingProgress(from defaults: UserDefaults = .standard) {
+        for k in readingProgressKeys { defaults.removeObject(forKey: k) }
+    }
+
+    /// Deletes extracted page caches and thumbnail caches, clears the in-memory
+    /// thumbnail NSCache, and kicks off thumbnail regeneration. Reading progress
+    /// (positions, modes, recents) is untouched.
+    func clearImageCaches() {
         // 1. Disk: extracted CBR/CB7 pages
         let pagesDir = ComicLoader.pageCacheDir
         if let files = try? FileManager.default.contentsOfDirectory(at: pagesDir, includingPropertiesForKeys: nil) {
@@ -951,17 +1132,22 @@ final class LibraryViewModel: ObservableObject {
         // 3. In-memory thumbnail NSCache
         thumbnailCache.removeAllObjects()
         thumbnailCacheCount = 0
-        // 4. UserDefaults: reading positions, scroll offsets, modes, page counts, recents
-        for key in ["readingPositions", "scrollOffsets", "readingModes", "pageCounts", recentsKey] {
-            UserDefaults.standard.removeObject(forKey: key)
-        }
-        // 5. Clear in-memory recents list
-        recentComics = []
         // 6. Kick off thumbnail regeneration from scratch
         Task.detached(priority: .utility) { [weak self] in
             await self?.generateMissingThumbnails()
         }
-        Task { await DCLogger.shared.log("[CACHE] Full cache clear complete.") }
+        Task { await DCLogger.shared.log("[CACHE] Image caches cleared; thumbnails regenerating.") }
+    }
+
+    /// Removes all reading-progress UserDefaults keys (explicit list only — keys
+    /// like "bookmarks" are unaffected) and clears the in-memory recents list.
+    /// Image caches on disk are untouched.
+    func resetReadingProgress() {
+        // 4. UserDefaults: reading positions, scroll offsets, modes, page counts, recents
+        Self.removeReadingProgress()
+        // 5. Clear in-memory recents list
+        recentComics = []
+        Task { await DCLogger.shared.log("[CACHE] Reading progress reset.") }
     }
 
     /// Scales the source NSImage to the 200×280 thumbnail canvas and returns a CGImage.

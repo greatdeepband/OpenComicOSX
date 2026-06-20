@@ -65,6 +65,7 @@ struct MetalPageView: NSViewRepresentable {
     /// backwards-compatible call sites; the override only fires when
     /// both axes are >1pt.
     var containerHeight: CGFloat = 0
+    var isRTL: Bool = false
     let restorePage: Int?
     let restoreOffset: Double?
     let pageManager: MetalPageManager
@@ -176,13 +177,26 @@ struct MetalPageView: NSViewRepresentable {
             scrollView.magnification = 1.0
         }
 
+        guard let renderer = MetalPageRenderer() else {
+            // Metal is unavailable (e.g. GPU-less CI environment or
+            // missing/corrupt shaders). Return a minimal scroll view with
+            // a centred label instead of crashing. `context.coordinator
+            // .renderer` and `.metalView` stay nil, so `updateNSView`,
+            // `rebuildLayout`, and `updateVisibleRange` all no-op safely
+            // via their existing nil-guards.
+            let label = NSTextField(labelWithString: "Rendering unavailable on this device.")
+            label.isEditable = false
+            label.isBezeled = false
+            label.drawsBackground = false
+            label.alignment = .center
+            label.translatesAutoresizingMaskIntoConstraints = false
+            scrollView.documentView = label
+            return scrollView
+        }
+
         let metalView = MetalCanvasView(frame: .zero)
         metalView.translatesAutoresizingMaskIntoConstraints = false
         metalView.frame = CGRect(x: 0, y: 0, width: containerWidth, height: 1000) // placeholder
-
-        guard let renderer = MetalPageRenderer() else {
-            fatalError("Metal is not available on this device")
-        }
 
         context.coordinator.scrollView = scrollView
         context.coordinator.metalView = metalView
@@ -206,6 +220,32 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.pageManager = pageManager
         context.coordinator.pages = pages
 
+        // Install a memory-pressure source so the OS can ask us to shed cached
+        // pages. The source fires on `.main` (same queue that owns the
+        // Coordinator), captured weakly to avoid a retain cycle. A 2 s cooldown
+        // (`memoryPressureEvictionCooldown`) swallows the `.warning` +
+        // `.critical` back-to-back pair macOS commonly fires in one burst.
+        // We evict strictly OUTSIDE `lastVisibleRange` so a page being drawn
+        // right now is never yanked from under the renderer.
+        // The source is cancelled in `deinit`; if `pageManager` is nil (e.g.
+        // the renderer-nil fallback path from T1), the optional-chain `?.` in
+        // the handler is a safe no-op.
+        let pressureSource = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: .main
+        )
+        pressureSource.setEventHandler { [weak coordinator = context.coordinator] in
+            guard let c = coordinator else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            guard now - c.lastPressureEviction
+                    >= ReaderConstants.memoryPressureEvictionCooldown else { return }
+            c.lastPressureEviction = now
+            let keep = c.lastVisibleRange
+            Task { await c.pageManager?.evictOutside(keep) }
+        }
+        pressureSource.resume()
+        context.coordinator.memoryPressureSource = pressureSource
+
         // Wire the thumbnail callback so subsequent thumb decodes (from the
         // VM-spawned pre-scan) upload directly into this fresh renderer's
         // thumbnailRing. The callback fires on the main actor per
@@ -216,9 +256,9 @@ struct MetalPageView: NSViewRepresentable {
         // switch), and without seeding they'd remain in CGImage form only
         // and the render-path fallback would still see an empty ring.
         let coord = context.coordinator
-        pageManager.onThumbReady = { [weak coord] pageIndex, image in
-            coord?.renderer?.uploadThumb(image: image, for: pageIndex)
-        }
+        pageManager.setOnThumbReady({ [weak coord] pageIndex, image in
+            _ = coord?.renderer?.uploadThumb(image: image, for: pageIndex)
+        })
         Task { [weak coord] in
             guard let manager = coord?.pageManager else { return }
             let existing = await manager.allThumbnails()
@@ -340,6 +380,7 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.onOffsetChanged = onOffsetChanged
         context.coordinator.onMagnificationChanged = onMagnificationChanged
         context.coordinator.onLoupeOverlay = onLoupeOverlay
+        context.coordinator.isRTL = isRTL
 
         let needsRebuild = context.coordinator.needsRebuild(
             containerWidth: containerWidth,
@@ -347,7 +388,8 @@ struct MetalPageView: NSViewRepresentable {
             pages: pages,
             layout: layout,
             currentPage: currentPage,
-            scale: scale
+            scale: scale,
+            isRTL: isRTL
         )
 
         // Update the coordinator's scale BEFORE rebuildLayout runs — otherwise
@@ -560,6 +602,12 @@ final class MetalCanvasView: NSView {
     /// return nil and the page render silently no-op.
     var onLayoutCompleted: (() -> Void)?
 
+    /// Allow first-click-on-inactive-window to be handled as a tap/seek rather
+    /// than just activating the window.  Without this, a click on the page
+    /// canvas while the reader is in the background only brings the window
+    /// forward; the page-turn tap event is swallowed.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     /// CRITICAL: use a flipped coordinate system (y=0 at top, increasing downward).
     /// The rest of the reader code — `pageYOffsets` (ascending from 0 for page 0),
     /// `updateVisibleRange()` binary search, `scrollToPage()`, and the vertex
@@ -695,6 +743,17 @@ extension MetalPageView {
         /// get drawn without the user having to scroll again).
         var lastVisibleRange: ClosedRange<Int> = 0...0
 
+        /// Dispatch source that listens for OS memory-pressure events
+        /// (`.warning` / `.critical`) and drives page-cache eviction
+        /// via `pageManager?.evictOutside(lastVisibleRange)`.
+        /// Cancelled and released in `deinit`.
+        fileprivate var memoryPressureSource: DispatchSourceMemoryPressure?
+
+        /// Monotonic timestamp of the most-recent memory-pressure eviction.
+        /// Guards against back-to-back OS events firing within the cooldown
+        /// window (`ReaderConstants.memoryPressureEvictionCooldown`).
+        fileprivate var lastPressureEviction: CFAbsoluteTime = 0
+
         /// Pinch / ⌘+scroll zoom→window-resize state for vertical modes.
         /// Each gesture event accumulates into `zoomGestureAccumulator`;
         /// when |accumulator| crosses `verticalZoomGestureThreshold`, one
@@ -730,6 +789,8 @@ extension MetalPageView {
         var currentPage: Int = 0
         var lastLayout: ReadingLayout = .verticalStack(pagesPerRow: 1)
         var lastCurrentPage: Int = -1
+        var isRTL: Bool = false
+        var lastIsRTL: Bool = false
 
         var onPageChanged: (Int) -> Void = { _ in }
         var onOffsetChanged: (Double) -> Void = { _ in }
@@ -787,6 +848,18 @@ extension MetalPageView {
         var loupeTaskID: UInt64 = 0
         var loupeTask: Task<Void, Never>?
 
+        // MARK: - Pending-tap state (click-to-turn / hold-for-loupe)
+        /// Cancellable timer that fires loupe escalation after `LoupeHoldThreshold`.
+        /// Non-nil means a mouse-down has been received but the gesture hasn't
+        /// been resolved yet (neither escalated to loupe nor completed as a tap).
+        var pendingLoupeTimer: Task<Void, Never>?
+        /// The scroll-view-local position of the mouse-down that started the
+        /// pending gesture. Used for movement measurement and tap-turn direction.
+        var pendingLoupeDownLocation: CGPoint = .zero
+        /// `CACurrentMediaTime()` at the mouse-down. Reserved for future use;
+        /// escalation timing is handled by the async Task sleep.
+        var pendingLoupeDownTime: TimeInterval = 0
+
         var onPageNavSwipe: ((Int) -> Void)?
         var onComicNavSwipe: ((Int) -> Void)?
 
@@ -807,6 +880,7 @@ extension MetalPageView {
         }
 
         deinit {
+            memoryPressureSource?.cancel()
             if let monitor = loupeEventMonitor {
                 NSEvent.removeMonitor(monitor)
             }

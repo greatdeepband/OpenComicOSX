@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct LibraryView: View {
     @EnvironmentObject var library: LibraryViewModel
     @StateObject private var memoryMonitor = MemoryMonitor.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var showCreateGallery = false
     @State private var renamingGallery: Gallery? = nil
@@ -45,23 +46,24 @@ struct LibraryView: View {
         .overlay(alignment: .bottom) {
             if debugMode {
                 DebugMemoryBar(monitor: memoryMonitor)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? .identity : .move(edge: .bottom).combined(with: .opacity))
+                    .accessibilityHidden(true)
             }
         }
         .overlay(alignment: .top) {
             if let error = library.errorMessage {
                 ErrorBanner(message: error) { library.errorMessage = nil }
                     .padding(.top, 12)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(reduceMotion ? .identity : .move(edge: .top).combined(with: .opacity))
             }
         }
         .overlay {
             if library.isLoading {
                 LoadingOverlay()
-                    .transition(.opacity)
+                    .transition(reduceMotion ? .identity : .opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.15), value: library.isLoading)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: library.isLoading)
         .overlay {
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: 12)
@@ -75,11 +77,11 @@ struct LibraryView: View {
                             .background(.thinMaterial, in: Capsule())
                     }
                     .padding(8)
-                    .transition(.opacity)
+                    .transition(reduceMotion ? .identity : .opacity)
                     .allowsHitTesting(false)
             }
         }
-        .animation(.easeInOut(duration: 0.15), value: isDropTargeted)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15), value: isDropTargeted)
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleLibraryDrop(providers: providers)
         }
@@ -90,7 +92,7 @@ struct LibraryView: View {
                 MemoryMonitor.shared.stop()
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: debugMode)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: debugMode)
         .modifier(CompressionSheetsModifier(
             library: library,
             service: library.compressionService
@@ -99,20 +101,29 @@ struct LibraryView: View {
 
     private func handleLibraryDrop(providers: [NSItemProvider]) -> Bool {
         // Eagerly accept any drop that claims to be a file URL — the real
-        // extension check happens in the async callback and opens the comic.
+        // extension check happens in the async callback and imports the comic.
         // Returning the async result would always be `false` because this
         // method returns before the callback fires, which made SwiftUI show a
         // rejection cursor even though the load actually proceeded.
         guard providers.contains(where: { $0.hasItemConformingToTypeIdentifier("public.file-url") }) else {
             return false
         }
+        let count = providers.count
         for provider in providers {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
                 let ext = url.pathExtension.lowercased()
-                guard Self.comicExtensions.contains(ext) else { return }
+                guard LibraryView.comicExtensions.contains(ext) else {
+                    Task { @MainActor in
+                        library.errorMessage = "\u{201C}\(url.lastPathComponent)\u{201D} isn\u{2019}t a supported comic format. Open Comic reads CBZ, CBR, CB7, CBT, and PDF."
+                    }
+                    return
+                }
                 Task { @MainActor in
-                    await library.load(url: url)
+                    library.importComics([url])
+                    if count == 1 {
+                        await library.load(url: url)
+                    }
                 }
             }
         }
@@ -180,8 +191,14 @@ struct LibrarySidebar: View {
             renameText = gallery.name
             renamingGallery = gallery
         }
+        .disabled(gallery.isImported)
         Button("Add Folders…") {
             pickFolders { urls in library.addFolders(urls, to: gallery.id) }
+        }
+        if !gallery.sourceFolders.isEmpty {
+            Button("Rescan Folders") {
+                library.rescanGallery(id: gallery.id)
+            }
         }
         Button("Reset to Alphabetical Order") {
             library.resetGalleryOrder(id: gallery.id)
@@ -195,12 +212,14 @@ struct LibrarySidebar: View {
         Button("Delete Gallery", role: .destructive) {
             library.deleteGallery(id: gallery.id)
         }
+        .disabled(gallery.isImported)
     }
 
     private func handleDrop(providers: [NSItemProvider], galleryID: UUID) -> Bool {
-        // Eagerly accept — async callback moves the comic onto the receiving
-        // gallery. Returning the async result sync always produced `false`,
-        // showing a rejection cursor despite the move succeeding.
+        // Eagerly accept any drop that claims to be a file URL — the real
+        // routing (import vs relocate) happens in the async callback.
+        // Returning the async result sync always produced `false`, showing a
+        // rejection cursor despite the operation succeeding.
         guard providers.contains(where: { $0.hasItemConformingToTypeIdentifier("public.file-url") }) else {
             return false
         }
@@ -208,7 +227,19 @@ struct LibrarySidebar: View {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
                 Task { @MainActor in
-                    library.moveComic(url, toGallery: galleryID)
+                    // Guard: only accept recognised comic types.
+                    let ext = url.pathExtension.lowercased()
+                    guard LibraryViewModel.comicExtensions.contains(ext) else {
+                        library.errorMessage = "\u{201C}\(url.lastPathComponent)\u{201D} isn\u{2019}t a supported comic format. Open Comic reads CBZ, CBR, CB7, CBT, and PDF."
+                        return
+                    }
+                    // Route: already in the library → relocate; brand-new file → import.
+                    if LibraryViewModel.isInLibrary(url, galleries: library.galleries) {
+                        library.moveComic(url, toGallery: galleryID)
+                    } else {
+                        library.addComicFiles([url], to: galleryID)
+                        library.generateThumbnails(for: [url])
+                    }
                 }
             }
         }
@@ -238,14 +269,16 @@ private struct SidebarRow: View {
             Spacer(minLength: 4)
             if let count, count > 0 {
                 Text("\(count)")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(.quaternary, in: Capsule())
+                    .accessibilityHidden(true)
             }
         }
         .tag(section)
+        .accessibilityLabel(count != nil && count! > 0 ? "\(title), \(count!) items" : title)
     }
 }
 
@@ -620,6 +653,8 @@ struct PaneToolbar<Trailing: View>: View {
             }
             .buttonStyle(.plain)
             .help(debugMode ? "Disable memory debug" : "Enable memory debug")
+            .accessibilityLabel("Memory usage")
+            .accessibilityValue(debugMode ? "On" : "Off")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -641,6 +676,7 @@ struct PaneToolbar<Trailing: View>: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 12))
+                .accessibilityHidden(true)
             TextField("Search", text: $library.searchQuery)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
@@ -653,6 +689,7 @@ struct PaneToolbar<Trailing: View>: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
             }
         }
         .padding(.horizontal, 8)
@@ -678,6 +715,7 @@ struct PaneToolbar<Trailing: View>: View {
         .menuStyle(.borderlessButton)
         .frame(width: 30)
         .help("Sort: \(library.sortOrder(for: section).label)")
+        .accessibilityLabel("Sort")
     }
 
     private var availableSorts: [LibrarySortOrder] {
@@ -705,6 +743,7 @@ struct PaneToolbar<Trailing: View>: View {
         .menuStyle(.borderlessButton)
         .frame(width: 30)
         .help("Card size: \(sizeLabel(library.cardSize))")
+        .accessibilityLabel("Card size")
     }
 
     private var zoomIcon: String {
@@ -740,6 +779,7 @@ struct EmptyPane: View {
             Image(systemName: "book.closed")
                 .font(.system(size: 52))
                 .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
             Text(title)
                 .font(.title3)
                 .foregroundStyle(.secondary)
@@ -918,10 +958,12 @@ struct ContinueReadingHero: View {
                         .resizable()
                         .interpolation(.high)
                         .scaledToFill()
+                        .accessibilityHidden(true)
                 } else {
                     Image(systemName: "book.pages")
                         .font(.system(size: 52))
                         .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
                 }
             }
             .frame(width: 180, height: 260)
@@ -943,9 +985,12 @@ struct ContinueReadingHero: View {
                         ProgressView(value: progress)
                             .progressViewStyle(.linear)
                             .frame(width: 240)
+                            .accessibilityLabel("Reading progress")
+                            .accessibilityValue("\(Int(progress * 100)) percent")
                         Text("\(Int(progress * 100))%")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
                     }
                 }
 
@@ -968,6 +1013,9 @@ struct ContinueReadingHero: View {
                     .buttonStyle(.bordered)
                     .controlSize(.large)
                     .help(library.isFavorite(url: url) ? "Remove from Favorites" : "Add to Favorites")
+                    .accessibilityLabel("Favorite")
+                    .accessibilityValue(library.isFavorite(url: url) ? "On" : "Off")
+                    .accessibilityAddTraits(library.isFavorite(url: url) ? [.isSelected] : [])
                 }
                 .padding(.top, 4)
             }
@@ -981,6 +1029,8 @@ struct ContinueReadingHero: View {
         // taps before parent .onTapGesture, so single-clicking Resume
         // still loads, single-clicking the heart still toggles favourite.
         .contentShape(Rectangle())
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Double-tap to open")
         .onTapGesture(count: 2) {
             Task { await library.load(url: url) }
         }
@@ -999,6 +1049,7 @@ struct WelcomeHero: View {
             Image(systemName: "books.vertical.fill")
                 .font(.system(size: 68))
                 .foregroundStyle(.tint)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Welcome to Open Comic")
                     .font(.title.bold())
@@ -1087,6 +1138,7 @@ struct ErrorBanner: View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
+                .accessibilityHidden(true)
             Text(message)
                 .lineLimit(3)
             Spacer(minLength: 8)
@@ -1097,6 +1149,7 @@ struct ErrorBanner: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -1116,11 +1169,11 @@ struct DebugMemoryBar: View {
             Label(monitor.residentFormatted, systemImage: "memorychip")
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(color)
-            Divider().frame(height: 14)
+            Divider().frame(height: 14).accessibilityHidden(true)
             Label("\(monitor.cacheCount) cached", systemImage: "photo.stack")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
-            Divider().frame(height: 14)
+            Divider().frame(height: 14).accessibilityHidden(true)
             Label("\(monitor.diskCount) on disk", systemImage: "internaldrive")
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -1233,12 +1286,15 @@ struct ComicCard: View {
     var isSelected: Bool = false
 
     @EnvironmentObject var library: LibraryViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ScaledMetric(relativeTo: .caption) private var titleScale: CGFloat = 1
     @State private var renderToken: UUID = UUID()
     @State private var isHovering = false
 
     var body: some View {
         let _ = renderToken
         let thumbnail = library.cachedThumbnail(for: url)
+        let scaledSize = cardSize.titleFontSize * titleScale
 
         VStack(alignment: .leading, spacing: 6) {
             coverImage(thumbnail)
@@ -1246,7 +1302,7 @@ struct ComicCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .shadow(color: .black.opacity(isHovering ? 0.45 : 0.25),
                         radius: isHovering ? 8 : 4, x: 0, y: isHovering ? 4 : 2)
-                .scaleEffect(isHovering ? 1.03 : 1.0)
+                .scaleEffect(reduceMotion ? 1.0 : (isHovering ? 1.03 : 1.0))
                 .overlay {
                     if isSelected {
                         RoundedRectangle(cornerRadius: 8)
@@ -1271,20 +1327,34 @@ struct ComicCard: View {
                                 .padding(7)
                         }
                         .buttonStyle(.plain)
-                        .transition(.opacity)
+                        .accessibilityLabel("Favorite")
+                        .accessibilityValue(fav ? "On" : "Off")
+                        .accessibilityAddTraits(fav ? [.isSelected] : [])
+                        .transition(reduceMotion ? .identity : .opacity)
                     }
                 }
-                .animation(.easeOut(duration: 0.12), value: isHovering)
-                .animation(.easeOut(duration: 0.12), value: isSelected)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isSelected)
 
             Text(title)
-                .font(.system(size: cardSize.titleFontSize))
+                .font(.system(size: scaledSize))
                 .lineLimit(2)
                 .truncationMode(.middle)
-                .frame(height: cardSize.titleFontSize * 2.6, alignment: .topLeading)
+                .frame(height: scaledSize * 2.6, alignment: .topLeading)
                 .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
         }
         .contentShape(Rectangle())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel({
+            var parts = [title]
+            if let p = readingProgress, p > 0.02 { parts.append("\(Int(p * 100)) percent read") }
+            if library.isFavorite(url: url) { parts.append("Favorited") }
+            return parts.joined(separator: ", ")
+        }())
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Double-tap to open")
+        .accessibilityAction { Task { await library.load(url: url) } }
+        .accessibilityAction(named: "Favorite") { library.toggleFavorite(url: url) }
         .onHover { hovering in
             isHovering = hovering
         }
@@ -1318,10 +1388,11 @@ struct ComicCard: View {
                 .fill(.black.opacity(0.65))
                 .frame(width: 44, height: 18)
             Text("\(Int(progress * 100))%")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption2.weight(.semibold))
                 .foregroundStyle(.white)
         }
         .padding(6)
+        .accessibilityHidden(true)
     }
 }
 
@@ -1371,6 +1442,7 @@ struct CreateGallerySheet: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityLabel("Remove folder")
                             }
                         }
                     }
