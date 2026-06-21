@@ -201,20 +201,6 @@ Mouse / trackpad:
 - **⌘+scroll** or **pinch** — zoom (in vertical modes this becomes a ±10% window-resize step; in single/double it scales the page).
 - **Double-click** (single / double page only) — reset zoom to fit-to-window.
 
-### Notes for future sessions
-
-- **Don't assume `NSScreen.main`.** It can return `nil` or `1.0` during early layout passes. Use `NSScreen.screens.first?.backingScaleFactor ?? 2.0` or read `metalLayer.contentsScale` after it has been set.
-- **`pageYOffsets` is page-indexed.** In vertical-double mode, the two pages of a pair share a Y value. Every binary search over `pageYOffsets` in this codebase must walk duplicates.
-- **Don't re-introduce `CAMetalLayer` as the backing layer** of a full-documentView-sized NSView. See "Why a sublayer" above.
-- **Don't add a subview to `window.contentView`** under a SwiftUI `WindowGroup` and expect it to stay. Use a child `NSPanel` for long-lived AppKit chrome (the loupe does this).
-- **For cursor → document-space math, call `documentView.convert(windowPt, from: nil)` directly.** The manual `clipView.convert + bounds.origin` composition looks right on paper but `NSClipView.isFlipped` can drift out of sync with `documentView.isFlipped` during transient layout states, producing the wrong document Y. One-step conversion is authoritative.
-- **`NSCursor.hide()` / `unhide()` are reference-counted and macOS auto-unhides on window exit.** Track the hidden state yourself and re-assert `hide()` on every mouse event while a modal-style feature (loupe, etc.) is active.
-- **AppKit + SwiftUI lifecycle:** `LibraryView` is conditionally rendered in `ContentView`; `@State` is destroyed each time the reader opens/closes. Session-persistent state lives on `LibraryViewModel`.
-- **`makeNSView` writes can be clobbered by `updateNSView`** if you rely on reading coordinator fields from a `DispatchQueue.main.async` closure. Capture values at schedule time.
-- **macOS 26 (Tahoe) scroll-into-header bug.** If an `NSScrollView`'s frame does not stretch top-to-bottom of its window's content view, its scrolled content will render OVER any sibling above it in the layout tree — even with `masksToBounds = true`, even with SwiftUI `.clipped()`, even after removing `magnification`. Reserve top-bar space via native `NSScrollView.contentInsets` (frame stays full-height; clip view honors the inset as a non-scrollable band), **not** SwiftUI `.padding(.top, …)`. `MetalPageView` exposes a `topContentInset` parameter for this. Also set `scrollView.borderType = .noBorder` as belt-and-suspenders (independently disables the buggy render path). Reference: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/.
-- **CAMetalLayer + `NSScrollView.magnification` is unsafe.** The direct-to-surface Metal drawable bypasses ancestor layer clipping when a scale transform is present on the `clipView`. In `MetalPageView`, vertical modes use native magnification (fast CALayer transform) but single-page and double-spread zoom via documentView frame-resize (`scrollView.magnification` pinned to 1.0). The scale change flows through `Coordinator.rebuildLayout()` which resizes the documentView frame around the centered content. `recenterIfContentFits()` re-centers the documentView when zoomed content is smaller than the viewport, so zoom-out doesn't leave content off-center.
-- **NSEvent local monitors vs overlay views.** `MetalPageView` uses `NSEvent.addLocalMonitorForEvents` (scoped to its window) for cmd-scroll zoom, double-click fit-to-width, pinch zoom, and the loupe. An overlay sibling view would block scroll-wheel / pinch gestures from reaching `NSScrollView`; monitors observe events without consuming them. Scope monitors to the scroll view's own window (`event.window === scrollView.window`) so a monitor installed by one reader instance doesn't fire for events in another window.
-
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to set up the dev environment, the testing workflow, and — importantly — a list of **load-bearing comments / workarounds** that look like cleanup opportunities but are not.
