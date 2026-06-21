@@ -73,9 +73,14 @@ extension MetalPageView.Coordinator {
             // a double-click on the scrubber or toolbar should not reset zoom.
             let winPt = event.locationInWindow
             guard let win = scrollView.window else { return event }
+            let effectiveTopBand = chromeVisible ? ReaderConstants.topBarHeight : 0
             if isInTopBarBand(locationInWindowY: winPt.y,
                               windowHeight: win.frame.height,
-                              topBarHeight: ReaderConstants.topBarHeight) { return event }
+                              topBarHeight: effectiveTopBand) { return event }
+            // Bottom floating-scrubber exemption (always-exempt; Task 8 gates on chromeVisible).
+            if isInBottomBarBand(locationInWindowY: winPt.y,
+                                 bottomPadding: ReaderConstants.scrubberBottomPadding,
+                                 barHeight: ReaderConstants.scrubberStripHeight) { return event }
             // Reset zoom via the scale binding rather than magnification.
             self.onMagnificationChanged?(1.0)
             return nil

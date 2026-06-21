@@ -93,8 +93,20 @@ final class LibraryViewModel: ObservableObject {
     /// (diagnosed 2026-04-28; see CHANGELOG v0.11.1).
     let thumbnailUpdates = PassthroughSubject<URL, Never>()
 
+    /// Per-URL refresh signal for read-status changes. Cards subscribe via
+    /// `.onReceive(library.statusUpdates)` and flip their render token only
+    /// when the emitted URL matches their own. Separate from `thumbnailUpdates`
+    /// — different contract; a status write must NOT trigger a thumbnail reload.
+    /// `ReadingPositionStore` writes do not fire `objectWillChange`, so this
+    /// channel is the only way to propagate a single-card or batch mark to ALL
+    /// affected cards without a full-grid re-render.
+    let statusUpdates = PassthroughSubject<URL, Never>()
+
     /// Current search query — empty string means no filter.
     @Published var searchQuery: String = ""
+
+    /// Active filter state — in-memory (not persisted).
+    @Published var libraryFilter: LibraryFilter = LibraryFilter()
 
     /// Ordered list of favorited comic URLs (most recently favorited first).
     @Published var favoriteURLs: [URL] = []
@@ -119,7 +131,34 @@ final class LibraryViewModel: ObservableObject {
     /// "Home" for rendering purposes. Persisted to UserDefaults so the app
     /// restores the same view on relaunch.
     @Published var selectedSection: LibrarySection? = .home {
-        didSet { saveSelectedSection() }
+        didSet {
+            saveSelectedSection()
+            clearSelection()
+        }
+    }
+
+    // MARK: - Grid multi-selection state (Task 6)
+
+    /// The set of URLs currently selected in the grid. Cleared on section change
+    /// and when `selectMode` is toggled off.
+    @Published var selection: Set<URL> = []
+
+    /// The URL last used as a shift-range anchor. Not published — UI only needs
+    /// `selection` to decide rendering; anchor is read-only by gesture handlers.
+    var selectionAnchor: URL?
+
+    /// When true, plain taps on cards toggle rather than replace the selection
+    /// (equivalent to holding ⌘). Cleared selection when turned off.
+    @Published var selectMode: Bool = false {
+        didSet {
+            if !selectMode { clearSelection() }
+        }
+    }
+
+    /// Resets `selection` and `selectionAnchor` to empty / nil.
+    func clearSelection() {
+        selection = []
+        selectionAnchor = nil
     }
 
     /// Grid card size, persisted.
@@ -147,6 +186,43 @@ final class LibraryViewModel: ObservableObject {
 
     func setSortOrder(_ order: LibrarySortOrder, for section: LibrarySection) {
         sortPreferences[section.storageKey] = order
+    }
+
+    /// Computes the effective reading status for a URL using ReadingPositionStore directly
+    /// (not recentComics-capped) so it works for all comics including never-opened ones.
+    func readingStatus(for url: URL) -> ReadingStatus {
+        let override = ReadingPositionStore.readStatusOverride(for: url)
+        let page = ReadingPositionStore.page(for: url)
+        let total = ReadingPositionStore.pageCount(for: url)
+        return effectiveStatus(override: override, page: page, total: total)
+    }
+
+    /// Central display pipeline: search → filter → sort.
+    /// `corpus` is the input list. `section` drives the sort order lookup.
+    /// `isGlobalSearch` = true causes `.manual` sort to fall back to `.alphabetical`.
+    func displayURLs(
+        corpus: [URL],
+        section: LibrarySection,
+        isGlobalSearch: Bool
+    ) -> [URL] {
+        let afterSearch: [URL]
+        if searchQuery.isEmpty {
+            afterSearch = corpus
+        } else {
+            let q = searchQuery
+            afterSearch = corpus.filter {
+                matchesQuery(filename: $0.deletingPathExtension().lastPathComponent, query: q)
+            }
+        }
+        let afterFilter = afterSearch.filter { url in
+            let status = readingStatus(for: url)
+            let favorited = isFavorite(url: url)
+            let fmt = url.pathExtension.lowercased()
+            return comicMatchesFilter(status: status, isFavorited: favorited, format: fmt, filter: libraryFilter)
+        }
+        var order = sortOrder(for: section)
+        if isGlobalSearch && order == .manual { order = .alphabetical }
+        return LibrarySort.apply(order, to: afterFilter, library: self)
     }
 
     // MARK: - Derived collections for the new library
@@ -274,6 +350,19 @@ final class LibraryViewModel: ObservableObject {
             "Recompresses JPEG images inside each .cbz, typically shrinking 30–50 % per file. " +
             "PNG entries and non-CBZ formats are skipped."
         pendingCompressionURLs = gallery.comics
+        runPendingIfRemembered()
+    }
+
+    /// Triggered by the batch-select "Compress" action.
+    func requestCompressSelection(_ urls: Set<URL>) {
+        let cbzURLs = urls.filter { $0.pathExtension.lowercased() == "cbz" }
+        guard !cbzURLs.isEmpty else { return }
+        let count = cbzURLs.count
+        pendingCompressionTitle = "Compress \(count) selected comic\(count == 1 ? "" : "s")?"
+        pendingCompressionDetail =
+            "Recompresses JPEG images inside each .cbz, typically shrinking each file 30–50 % " +
+            "with no visible change at typical reading scales."
+        pendingCompressionURLs = Array(cbzURLs)
         runPendingIfRemembered()
     }
 
@@ -883,6 +972,34 @@ final class LibraryViewModel: ObservableObject {
         generateThumbnails(for: fresh)
     }
 
+    /// Imports comic files and/or folders without auto-opening.
+    /// If `galleryID` is non-nil, routes to that gallery; otherwise imports to the
+    /// "Imported" shelf. Mirrors the addToGallery split in LibraryGalleryPane.
+    func addComicsOrFolders(_ urls: [URL], toGallery galleryID: UUID?) {
+        var files: [URL] = []
+        var folders: [URL] = []
+        for url in urls {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                folders.append(url)
+            } else {
+                files.append(url)
+            }
+        }
+        if let id = galleryID {
+            if !folders.isEmpty { addFolders(folders, to: id) }
+            if !files.isEmpty   { addComicFiles(files, to: id) }
+        } else {
+            if !files.isEmpty   { importComics(files) }
+            // For folders when no gallery: scan for comics and import them
+            for folder in folders {
+                let comics = resolveComics(from: [folder])
+                if !comics.isEmpty { importComics(comics) }
+            }
+        }
+    }
+
     func createGallery(name: String, folders: [URL]) {
         var gallery = Gallery(name: name, sourceFolders: folders)
         gallery.comics = resolveComics(from: folders)
@@ -949,6 +1066,38 @@ final class LibraryViewModel: ObservableObject {
         galleries[idx].comics.removeAll { urls.contains($0) }
         galleries[idx].deletedComics.formUnion(urls)
         saveGalleries()
+    }
+
+    /// Removes each URL in `urls` from EVERY gallery that contains it (including the
+    /// Imported shelf) and from recents + favorites. Used by batch actions while
+    /// searching, where the selection can span multiple galleries simultaneously.
+    /// The underlying files on disk are untouched.
+    func removeFromLibraryBatch(_ urls: Set<URL>) {
+        for url in urls { removeFromLibrary(url: url) }
+    }
+
+    // MARK: - Batch helpers for multi-select actions (Task 6)
+    // Each helper loops the existing single-URL method so the per-URL invariants
+    // (de-dup, tombstone checks, canonical-key matching) are preserved exactly.
+    // `removeComics(_:from:)` already accepts a Set<URL> — reuse it directly.
+
+    /// Toggles the favorite state for each URL in `urls`.
+    /// Wraps the existing single-URL `toggleFavorite(url:)`.
+    func favorite(_ urls: Set<URL>) {
+        for url in urls { toggleFavorite(url: url) }
+    }
+
+    /// Moves each URL in `urls` into the gallery identified by `id`.
+    /// Wraps the existing single-URL `moveComic(_:toGallery:)`.
+    func move(_ urls: Set<URL>, toGallery id: UUID) {
+        for url in urls { moveComic(url, toGallery: id) }
+    }
+
+    /// Appends each URL in `urls` to the gallery identified by `id` without
+    /// removing it from its current gallery.
+    /// Wraps the existing `addComicFiles(_:to:)` (which takes an array).
+    func addToGallery(_ urls: Set<URL>, _ id: UUID) {
+        addComicFiles(Array(urls), to: id)
     }
 
     /// Reset a gallery's comic order back to folder-first, then alphabetical.

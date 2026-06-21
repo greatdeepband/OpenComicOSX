@@ -1,5 +1,31 @@
 # DC Reader — Changelog
 
+## v0.17.0 — 2026-06-21 — library backbone + immersive reader
+
+A large release that overhauls both the library and the reader.
+
+### Library
+
+- **A real macOS toolbar + system search.** The library now has a native window toolbar (Add · Sort · size · Search). Search is **token-based** — "batman 3" finds "Batman #003" — and **global** (the whole library, not just the current view) with an "All Library / This Section" scope and a results overlay.
+- **Filters.** Narrow by **Unread · In Progress · Finished · Favorited · Format**, with a chip row showing what's active; filters compose with search and sort.
+- **Multi-select + batch actions.** A **Select** mode (plus ⌘/shift-click) lets you act on many comics at once — Favorite, Mark, Move to Gallery, Add to Gallery, Remove, Compress.
+- **Glanceable status + manual marking.** Each cover shows one status channel — unread (clean) / in-progress (a thin bar) / finished (a check) — and you can right-click or batch **Mark as Read / Unread / Finished**.
+- **Add files *and* folders** from a single "+" that targets the gallery you're in; a clearer sidebar ("Library" group, All Comics as the root, the system "Imported" shelf set apart).
+
+### Reader
+
+- **Immersive auto-hiding chrome.** The toolbar and scrubber fade while you read and reveal when you move to the top/bottom edge or press a key; paged art goes **full-bleed** when the chrome is hidden (vertical too, jump-free).
+- **The scrubber moved to a floating bottom bar** with **bookmark tick-marks**.
+- **Comic switching (‹‹ / ››) moved next to "Library"** — out of the page transport, so it's no longer mistaken for page-turn.
+- **Reading Mode + reading direction (RTL/manga) are direct controls** now, not buried in the ⋯ menu — plus a **View menu** and a **`?` shortcuts overlay** so they're reachable even when the chrome is hidden.
+- **Tap the page count to jump to a page**; a gentler hold-to-magnify (loupe) trigger.
+
+### Tests
+
+- The suite grows to 212, including pure-logic cores for search/filter, reading status, grid selection, and the chrome/loupe region predicates.
+
+---
+
 ## v0.16.1 — 2026-06-20 — reader & library fixes
 
 Fixes to the 0.16.0 reader and library, from hands-on testing.

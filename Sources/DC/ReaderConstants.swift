@@ -9,24 +9,28 @@ enum ReaderConstants {
 
     // MARK: - Layout
 
-    /// Visible height of the reader's top bar overlay. Used as the scrollView's
-    /// `contentInsets.top` so the page content scrolls beneath but not over
-    /// it. The value is the intrinsic height of `readerTopBar` in ReaderView.
-    /// 72pt: 36pt capsule + ~8pt breathing above/below + 22pt reserved at the
-    /// bottom for the full-width page scrubber strip (Task 3). All three call
-    /// sites in ReaderView (singlePage, doublePage, verticalScroll) and the
-    /// toolbar frame height read this one constant — raise it here to move
-    /// them all in lockstep.
-    static let topBarHeight: CGFloat = 72
+    /// Visible height of the reader's top bar overlay (bar capsules only —
+    /// the scrubber has moved to a floating bottom overlay). Used as the
+    /// scrollView's `contentInsets.top`. 50pt: 36pt capsule + ~8pt above
+    /// + ~6pt below the capsule rim.
+    static let topBarHeight: CGFloat = 50
 
-    /// Height of the full-width page-scrubber strip at the bottom of the top
-    /// bar overlay. The toolbar bar itself is framed at
-    /// `topBarHeight - scrubberStripHeight` (50pt) so that bar + scrubber
-    /// together exactly fill `topBarHeight` — keeping the scrubber's bottom
-    /// edge at window-Y == topBarHeight, fully inside `isInTopBarBand`.
-    /// 22pt gives a comfortable click/drag hit area (up from 14pt); the 4pt
-    /// visual track stays centred within the strip.
+    /// Height of the floating bottom scrubber glass pill. The scrubber has
+    /// moved out of the top bar to a floating bottom overlay; this constant
+    /// drives the bottom content inset and scrim height calculations.
+    /// 22pt gives a comfortable click/drag hit area; the 4pt visual track
+    /// stays centred within the strip.
     static let scrubberStripHeight: CGFloat = 22
+
+    /// Bottom padding between the window sill and the floating scrubber bar's
+    /// lower edge. Keeps the bar off the window-resize hot zone (6pt) and
+    /// off the full-screen safe-area edge. ≈10pt gives comfortable clearance.
+    static let scrubberBottomPadding: CGFloat = 10
+
+    /// Total bottom content reservation: the scrubber strip height plus the
+    /// bottom padding. This is what NSScrollView.contentInsets.bottom is set to
+    /// so the last page isn't hidden behind the floating bottom bar.
+    static let scrubberBottomInset: CGFloat = scrubberStripHeight + scrubberBottomPadding
 
     /// Width of the AppKit window-resize hot zone along each window-frame
     /// edge. The reader uses `.fullSizeContentView` + `.hiddenTitleBar`,
@@ -79,11 +83,9 @@ enum ReaderConstants {
     static let verticalZoomMinSize: CGSize = CGSize(width: 480, height: 360)
 
     /// Height of an individual Liquid-Glass capsule inside `readerTopBar`.
-    /// The capsule sits centred in the upper 50pt of the 72pt bar strip
-    /// (≈ 8pt above, ≈ 6pt below the capsule rim), leaving the lower 22pt
-    /// for the full-width page scrubber strip (Task 3). 36pt accommodates
-    /// the system's standard control glyph baseline (16-18pt SF Symbols +
-    /// label) with the Liquid-Glass rim still reading as a distinct edge.
+    /// 36pt accommodates the system's standard control glyph baseline
+    /// (16-18pt SF Symbols + label) with the Liquid-Glass rim still reading
+    /// as a distinct edge.
     static let toolbarCapsuleHeight: CGFloat = 36
 
     /// Hairline divider opacity inside `Segmented`-style toolbar capsules.

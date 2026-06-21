@@ -76,6 +76,12 @@ struct MetalPageView: NSViewRepresentable {
     /// can't enter the inset band.
     var topContentInset: CGFloat = 0
 
+    /// Tracks whether the reader's chrome (top bar + bottom scrubber) is currently
+    /// visible. Threaded into the Coordinator so the loupe/tap-turn band predicates
+    /// can collapse to 0 when chrome is hidden, letting the loupe/tap-turn own
+    /// the full window.
+    var chromeVisible: Bool = true
+
     /// One-shot scroll signal raised only by an intentional `goTo` (scrubber
     /// release, bookmark tap, etc.). The vertical layout observer in
     /// `updateNSView` fires `scrollToPage` only when this nonce changes,
@@ -132,7 +138,7 @@ struct MetalPageView: NSViewRepresentable {
         if topContentInset > 0 {
             scrollView.automaticallyAdjustsContentInsets = false
             scrollView.contentInsets = NSEdgeInsets(
-                top: topContentInset, left: 0, bottom: 0, right: 0
+                top: topContentInset, left: 0, bottom: ReaderConstants.scrubberBottomInset, right: 0
             )
         }
         // Ensure the scroll view and its clip view never bleed outside the
@@ -388,8 +394,71 @@ struct MetalPageView: NSViewRepresentable {
         context.coordinator.onMagnificationChanged = onMagnificationChanged
         context.coordinator.onLoupeOverlay = onLoupeOverlay
         context.coordinator.isRTL = isRTL
+        context.coordinator.chromeVisible = chromeVisible
 
-        let needsRebuild = context.coordinator.needsRebuild(
+        // MARK: Animated inset change (edge-to-edge on chrome auto-hide)
+        // Paged modes (single/double) pass a dynamic topContentInset that
+        // flips between readerTopBarHeight and 0 as chrome shows/hides.
+        // When the incoming value differs from what we last applied, update
+        // scrollView.contentInsets so the page smoothly grows or shrinks.
+        // The rebuild that follows reads the new live contentInsets.top —
+        // rebuildSinglePage / rebuildDoubleSpread both query
+        // `scrollView?.contentInsets.top ?? 0` directly — so there is no
+        // need to thread the inset through to the layout methods.
+        //
+        // Vertical modes now also pass a dynamic topContentInset (chrome-
+        // hide → 0, chrome-visible → topBarHeight). For vertical, we MUST
+        // compensate the scroll origin to keep the same content visible
+        // after the inset change — otherwise the page jumps as the inset
+        // band is added or removed. The compensation: with contentInsets,
+        // the document position currently on screen = origin.y + oldInset.
+        // To hold that fixed after applying newInset:
+        //   newOrigin.y = origin.y - (newInset - oldInset)
+        // i.e. subtract the inset delta. Applied synchronously before the
+        // rebuild so scrollDidChange doesn't sample the mid-transition state.
+        //
+        // Zoom guard: when zoomed (scale > 1.01) ReaderView passes the full
+        // `readerTopBarHeight` inset so this branch is only reached at
+        // fit-to-window scale, where zoomed-content overflow cannot occur.
+        let isSingleOrDoubleLayout = (layout == .singlePage || layout == .doubleSpread)
+        let isVerticalLayout: Bool
+        if case .verticalStack = layout { isVerticalLayout = true } else { isVerticalLayout = false }
+        let insetChanged = (isSingleOrDoubleLayout || isVerticalLayout)
+            && abs(context.coordinator.lastAppliedTopInset - topContentInset) > 0.5
+        if insetChanged {
+            let isFirstPass = context.coordinator.lastAppliedTopInset < 0
+            let oldInset = isFirstPass
+                ? scrollView.contentInsets.top   // first pass: read current from scrollView
+                : context.coordinator.lastAppliedTopInset
+            let insetDelta = topContentInset - oldInset
+            context.coordinator.lastAppliedTopInset = topContentInset
+            let newBottom = topContentInset > 0.5 ? ReaderConstants.scrubberBottomInset : 0
+            // NSScrollView.contentInsets is not animatable via .animator(); apply
+            // directly. The visual "breathe" comes from the rebuild below resizing
+            // the documentView, which composites concurrently with SwiftUI's 0.25s
+            // chrome fade — the user sees the page grow/shrink as the bar fades.
+            scrollView.automaticallyAdjustsContentInsets = false
+            scrollView.contentInsets = NSEdgeInsets(
+                top: topContentInset, left: 0, bottom: newBottom, right: 0
+            )
+            // For vertical layouts: compensate the scroll origin so the visible
+            // content does not jump. origin.y - insetDelta keeps the same document
+            // position in view after the inset band is added or removed.
+            // Skipped on first pass — the scrollView was just created with its
+            // initial inset in makeNSView; compensating would double-shift.
+            if isVerticalLayout && !isFirstPass && abs(insetDelta) > 0.5 {
+                let clip = scrollView.contentView
+                var origin = clip.bounds.origin
+                origin.y -= insetDelta
+                clip.scroll(to: origin)
+                scrollView.reflectScrolledClipView(clip)
+            }
+        } else if context.coordinator.lastAppliedTopInset < 0 {
+            // First pass (inset unchanged from what makeNSView set): record it.
+            context.coordinator.lastAppliedTopInset = scrollView.contentInsets.top
+        }
+
+        let needsRebuild = insetChanged || context.coordinator.needsRebuild(
             containerWidth: containerWidth,
             pagesPerRow: pagesPerRow,
             pages: pages,
@@ -419,8 +488,32 @@ struct MetalPageView: NSViewRepresentable {
             // branch below). Pages grow proportionally with totalWidth, so
             // without this restore the user lands on earlier content as
             // their window grows during a live-resize drag.
+            //
+            // Skipped for inset-only changes (insetChanged && !containerWidthChanged):
+            // when only the top inset flips (chrome show/hide), the document height
+            // is unchanged and the scroll compensation above already keeps the
+            // correct content visible. A fraction-based restore here would re-scroll
+            // to a fraction computed from the post-compensation origin against an
+            // unchanged doc height, which is the right position — but it's
+            // redundant and risks a double-move on the first transition tick.
+            // Safest: skip prevFractionForVertical when rebuild is inset-only.
+            let containerWidthChanged = abs(context.coordinator.lastContainerWidth - containerWidth) > 0.5
             var prevFractionForVertical: Double? = nil
-            if !layoutChanged {
+            if !layoutChanged && !insetChanged {
+                if case .verticalStack = layout, let doc = scrollView.documentView {
+                    let prevDocH = doc.frame.height
+                    let prevClipH = scrollView.contentView.bounds.height
+                    let prevMaxY = prevDocH - prevClipH
+                    if prevMaxY > 0 {
+                        let originY = scrollView.contentView.bounds.origin.y
+                        prevFractionForVertical = Double(max(0, min(1, originY / prevMaxY)))
+                    }
+                }
+            } else if !layoutChanged && insetChanged && containerWidthChanged {
+                // Inset changed AND container width changed simultaneously (rare:
+                // live-resize at exact moment of chrome-hide). Capture fraction
+                // as normal so live-resize position stays correct; the inset
+                // scroll compensation already ran, so origin.y is at the right spot.
                 if case .verticalStack = layout, let doc = scrollView.documentView {
                     let prevDocH = doc.frame.height
                     let prevClipH = scrollView.contentView.bounds.height
@@ -707,6 +800,14 @@ final class MetalCanvasView: NSView {
             safeVisible.origin.y += topInset
             safeVisible.size.height -= topInset
         }
+        // Carve the bottom floating-scrubber band out of the visible rect.
+        // The scrubber floats at window Y ∈ [scrubberBottomPadding, scrubberBottomInset).
+        // In document coords (bottom-left origin = doc bottom), this is the band
+        // from y=0 to y=scrubberBottomInset.
+        let bottomCarve = ReaderConstants.scrubberBottomInset
+        if bottomCarve > 0 {
+            safeVisible.size.height -= bottomCarve
+        }
         let docFrame = CGRect(origin: .zero, size: bounds.size)
         let clamped = safeVisible.intersection(docFrame)
         let w = max(1, min(clamped.width * scale, maxDim))
@@ -820,6 +921,12 @@ extension MetalPageView {
         var lastScrollRequestNonce: Int = 0
         var isRTL: Bool = false
         var lastIsRTL: Bool = false
+        var chromeVisible: Bool = true
+        /// The last `topContentInset` value actually applied to
+        /// `scrollView.contentInsets.top`. Used in `updateNSView` to detect
+        /// changes and drive the animated inset transition. Initialised to -1
+        /// so the first `updateNSView` always syncs on first pass.
+        var lastAppliedTopInset: CGFloat = -1
 
         var onPageChanged: (Int) -> Void = { _ in }
         var onOffsetChanged: (Double) -> Void = { _ in }

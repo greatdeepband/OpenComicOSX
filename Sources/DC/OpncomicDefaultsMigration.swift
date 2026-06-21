@@ -21,6 +21,7 @@ enum OpncomicDefaultsMigration {
         "cbz.compression.deleteOriginals.choice", "cbz.compression.convertPNGs.choice",
         "cbz.compression.deleteOriginals.remembered",
         "scrollPagesPerRow", "bookmarks", "readingDirection", "lastReadingDirection",
+        "readStatusOverrides",
     ]
 
     static func runIfNeeded(standard: UserDefaults = .standard, oldSuiteName: String = oldSuite) {

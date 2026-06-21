@@ -30,4 +30,6 @@ let LoupeHoldThreshold: TimeInterval = 0.15
 
 /// Maximum pixel movement that still qualifies as a stationary tap.
 /// Movement beyond this threshold immediately escalates to the loupe.
-let LoupeMoveTolerance: CGFloat = 5
+/// Bumped 5→14 (Reader Immersion) — a slightly larger finger-drift still
+/// counts as a page-turn tap rather than spawning the magnifier.
+let LoupeMoveTolerance: CGFloat = 14

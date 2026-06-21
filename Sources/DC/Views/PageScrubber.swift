@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Pure mapping helpers (also used by tests)
 
@@ -61,15 +62,31 @@ struct PageScrubber: View {
                 let thumbSize: CGFloat  = (!reduceMotion && isDragging) ? 16 : 13
 
                 ZStack(alignment: .leading) {
-                    // Background track
+                    // Background track — white@0.25 so it reads on both black
+                    // and bright art (Color.primary flips to dark in light contexts
+                    // and is too faint at 0.12 over bright page art).
                     Capsule()
-                        .fill(Color.primary.opacity(0.12))
+                        .fill(Color.white.opacity(0.25))
                         .frame(height: trackHeight)
 
                     // Accent fill from leading edge to thumb position
                     Capsule()
                         .fill(Color.accentColor)
                         .frame(width: max(frac * W, 0), height: trackHeight)
+
+                    // Bookmark ticks — subtle thin marks at each bookmarked page position.
+                    // Reuse scrubberFraction for RTL-correct positioning (same math as the thumb).
+                    ForEach(vm.bookmarkedPages, id: \.self) { bm in
+                        let bmFrac = scrubberFraction(forPage: bm,
+                                                      pageCount: vm.pageCount,
+                                                      isRTL: vm.isRTL)
+                        Rectangle()
+                            // white@0.5 so bookmark marks survive over bright art
+                            // (Color.primary.opacity(0.35) fades on bright backgrounds).
+                            .fill(Color.white.opacity(0.5))
+                            .frame(width: 2, height: trackHeight + 4)
+                            .offset(x: max(bmFrac * W - 1, 0))
+                    }
 
                     // Thumb
                     Circle()
@@ -137,6 +154,12 @@ struct PageScrubber: View {
             .accessibilityAdjustableAction { direction in
                 direction == .increment ? vm.nextPage() : vm.previousPage()
             }
+            // Glass pill container — matches the capsule treatment on the toolbar
+            // so the scrubber is a self-bounding floating control rather than a
+            // naked track line over black/art.
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .modifier(ScrubberGlassPill())
         }
     }
 
@@ -148,5 +171,30 @@ struct PageScrubber: View {
         let rawX = thumbCenterX - halfBubble
         let clampedX = min(max(rawX, 0), trackWidth - halfBubble * 2)
         return clampedX
+    }
+}
+
+// MARK: - Scrubber glass pill
+
+/// Applies the same self-bounding glass-pill treatment used by the toolbar
+/// capsules so the scrubber floats as a single identifiable control rather
+/// than a naked track over black/art. On macOS 26+ uses Liquid Glass + a
+/// defining white rim; on macOS 14–25 falls back to `.ultraThinMaterial`.
+private struct ScrubberGlassPill: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: .capsule)
+                .overlay(
+                    Capsule().strokeBorder(Color.white.opacity(0.18), lineWidth: 0.75)
+                )
+                .shadow(color: .black.opacity(0.35), radius: 8, y: 2)
+        } else {
+            content
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(
+                    Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+                )
+        }
     }
 }

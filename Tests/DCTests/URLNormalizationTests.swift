@@ -135,11 +135,12 @@ final class URLNormalizationTests: XCTestCase {
 
     // MARK: - Migration key count
 
-    /// OpncomicDefaultsMigration.keys must contain exactly 18 entries after
-    /// adding scrollPagesPerRow, bookmarks, readingDirection, lastReadingDirection.
+    /// OpncomicDefaultsMigration.keys must contain exactly 19 entries after
+    /// adding scrollPagesPerRow, bookmarks, readingDirection, lastReadingDirection,
+    /// and readStatusOverrides.
     func testMigrationKeyCountIs18() {
-        XCTAssertEqual(OpncomicDefaultsMigration.keys.count, 18,
-            "Migration key list must have exactly 18 entries")
+        XCTAssertEqual(OpncomicDefaultsMigration.keys.count, 19,
+            "Migration key list must have exactly 19 entries")
     }
 
     // MARK: - RTL solo page slot (pure arithmetic)

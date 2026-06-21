@@ -103,9 +103,14 @@ extension MetalPageView.Coordinator {
             if inEdge || inCorner { return }
             // Top-bar exemption: window coords are bottom-left origin →
             // the toolbar band occupies the LARGEST y values.
+            let effectiveTopBand = chromeVisible ? ReaderConstants.topBarHeight : 0
             if isInTopBarBand(locationInWindowY: p.y,
                               windowHeight: f.height,
-                              topBarHeight: ReaderConstants.topBarHeight) { return }
+                              topBarHeight: effectiveTopBand) { return }
+            // Bottom floating-scrubber exemption (always-exempt; Task 8 gates on chromeVisible).
+            if isInBottomBarBand(locationInWindowY: p.y,
+                                 bottomPadding: ReaderConstants.scrubberBottomPadding,
+                                 barHeight: ReaderConstants.scrubberStripHeight) { return }
             loupeDragActive = true
             updateLoupe(at: event.locationInWindow, in: window)
         case .leftMouseDragged:
@@ -157,9 +162,17 @@ extension MetalPageView.Coordinator {
             // Top-bar exemption: window coords are bottom-left origin →
             // the toolbar band occupies the LARGEST y values. Cancel any
             // stale timer so a later .leftMouseUp can't fire a page-turn.
+            let effectiveTopBandPaged = chromeVisible ? ReaderConstants.topBarHeight : 0
             if isInTopBarBand(locationInWindowY: p.y,
                               windowHeight: f.height,
-                              topBarHeight: ReaderConstants.topBarHeight) {
+                              topBarHeight: effectiveTopBandPaged) {
+                pendingLoupeTimer?.cancel(); pendingLoupeTimer = nil
+                return
+            }
+            // Bottom floating-scrubber exemption (always-exempt; Task 8 gates on chromeVisible).
+            if isInBottomBarBand(locationInWindowY: p.y,
+                                 bottomPadding: ReaderConstants.scrubberBottomPadding,
+                                 barHeight: ReaderConstants.scrubberStripHeight) {
                 pendingLoupeTimer?.cancel(); pendingLoupeTimer = nil
                 return
             }

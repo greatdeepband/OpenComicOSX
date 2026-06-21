@@ -1,6 +1,64 @@
 import SwiftUI
 import AppKit
 
+// MARK: - View menu commands (Reading Mode / Direction via .focusedSceneValue bridge)
+
+struct ReaderViewCommands: Commands {
+    @FocusedValue(\.readerVM) private var readerVM: ReaderViewModel?
+
+    var body: some Commands {
+        CommandMenu("View") {
+            Section("Reading Mode") {
+                ForEach(ReadingMode.allCases, id: \.self) { mode in
+                    Button {
+                        readerVM?.readingMode = mode
+                        readerVM?.saveMode()
+                    } label: {
+                        HStack {
+                            Text(mode.menuTitle)
+                            if readerVM?.readingMode == mode {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    .keyboardShortcut(mode.menuKeyEquivalent, modifiers: .command)
+                    .disabled(readerVM == nil)
+                }
+            }
+            Divider()
+            Section("Reading Direction") {
+                Button {
+                    readerVM?.toggleReadingDirection()
+                } label: {
+                    Text(readerVM?.isRTL == true ? "Switch to Left-to-Right" : "Switch to Right-to-Left")
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(readerVM == nil)
+            }
+        }
+    }
+}
+
+private extension ReadingMode {
+    var menuTitle: String {
+        switch self {
+        case .singlePage:     return "Single Page"
+        case .doublePage:     return "Double Page"
+        case .verticalScroll: return "Vertical Scroll"
+        case .verticalDouble: return "Vertical Double"
+        }
+    }
+
+    var menuKeyEquivalent: KeyEquivalent {
+        switch self {
+        case .singlePage:     return "1"
+        case .doublePage:     return "2"
+        case .verticalScroll: return "3"
+        case .verticalDouble: return "4"
+        }
+    }
+}
+
 // MARK: - App Delegate (required for Finder "Open With" / double-click file opens)
 // `onOpenURL` alone does NOT receive Finder-initiated opens; only the delegate
 // method `application(_:open:)` does. The static buffer holds URLs that arrive
@@ -48,6 +106,7 @@ struct DCApp: App {
         // the title bar in place and using `FullSizeTitleBarConfigurator`
         // to make it transparent and stretch the content underneath.
         .commands {
+            ReaderViewCommands()
             CommandGroup(replacing: .newItem) {
                 Button("Open Comic…") {
                     library.openFilePicker()

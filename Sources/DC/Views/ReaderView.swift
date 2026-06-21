@@ -1,6 +1,19 @@
 import SwiftUI
 import AppKit
 
+// MARK: - FocusedValue bridge (ReaderViewModel → menu commands)
+
+struct ReaderVMKey: FocusedValueKey {
+    typealias Value = ReaderViewModel
+}
+
+extension FocusedValues {
+    var readerVM: ReaderViewModel? {
+        get { self[ReaderVMKey.self] }
+        set { self[ReaderVMKey.self] = newValue }
+    }
+}
+
 /// Reaches up to the hosting NSWindow and configures it to draw content under
 /// the title-bar / traffic-light region. `.windowStyle(.hiddenTitleBar)` only
 /// hides the title text; these three NSWindow knobs are what actually make
@@ -20,6 +33,10 @@ struct FullSizeTitleBarConfigurator: NSViewRepresentable {
             window.standardWindowButton(.closeButton)?.isHidden = false
             window.standardWindowButton(.miniaturizeButton)?.isHidden = false
             window.standardWindowButton(.zoomButton)?.isHidden = false
+            // Enable .mouseMoved events so the ReaderView's local monitor
+            // receives mouse-moved notifications for edge-triggered chrome reveal.
+            // Without this, local NSEvent monitors for .mouseMoved are silently dead.
+            window.acceptsMouseMovedEvents = true
             // Hairline divider at the bottom of the title-bar area looks odd
             // when our custom bar provides its own Divider; turn it off.
             window.isMovableByWindowBackground = false
@@ -39,6 +56,26 @@ struct ReaderView: View {
     /// clip the loupe to the reader frame.
     @State private var metalLoupe: LoupeOverlayState? = nil
 
+    /// Controls the keyboard-shortcuts reference overlay (toggled by `?`).
+    @State private var showShortcutsOverlay: Bool = false
+
+    /// True while the Go-to-page popover (on the "N / M" count) is open.
+    /// ReaderToolbar binds to this so TransportCapsule can raise/lower the
+    /// flag.  The .onChange below stops KeyMonitor while the field is active
+    /// (MED-2: a SwiftUI popover is a separate NSWindow — firstResponder
+    /// checks are unreliable; explicit stop/start is the robust route).
+    @State private var goToPageOpen: Bool = false
+
+    /// Auto-hide state: true = chrome (top bar + bottom scrubber) is visible.
+    /// Starts visible; idle timer hides after ~4 s unless a suppressor is active.
+    @State private var chromeVisible: Bool = true
+    /// Handle to the in-flight idle-hide task. Cancelled + replaced on every reveal().
+    @State private var idleHideTask: Task<Void, Never>? = nil
+    /// Local NSEvent monitor for .mouseMoved (installed on appear, removed on disappear).
+    @State private var mouseMovedMonitor: Any? = nil
+    /// Reduce-motion environment flag — read from the SwiftUI environment.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     init(comic: Comic) {
         _vm = StateObject(wrappedValue: ReaderViewModel(comic: comic))
     }
@@ -53,7 +90,12 @@ struct ReaderView: View {
             // See: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/
             GeometryReader { geo in
                 ZStack {
-                    Color(NSColor.windowBackgroundColor)
+                    // Immersive black behind the page — the Metal layer is carved
+                    // out in the contentInset bands (top/bottom), so this is what
+                    // shows there. Was windowBackgroundColor (WHITE in light mode),
+                    // which made the auto-hide reveal ugly white bars; black blends
+                    // into the reader's letterbox so hidden chrome = clean black.
+                    Color.black
                     // NOTE: no .padding(.top, readerTopBarHeight) here —
                     // applying SwiftUI padding frames the NSScrollView at
                     // Y=topBarHeight, which defeats the macOS 26 Tahoe
@@ -95,32 +137,104 @@ struct ReaderView: View {
                 .onAppear { vm.containerSize = geo.size }
             }
 
+            // Top scrim — darkens under the capsule strip so glass capsules are
+            // self-bounding over bright art (Books/TV pattern). Invisible over
+            // the black letterbox (black on black = no effect). Fades with chrome.
+            LinearGradient(
+                colors: [Color.black.opacity(0.55), Color.black.opacity(0.0)],
+                startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: ReaderConstants.topBarHeight + 24)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .allowsHitTesting(false)
+            .opacity(chromeVisible ? 1 : 0)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
+
+            // Bottom scrim — darkens under the floating scrubber. Fades with chrome.
+            LinearGradient(
+                colors: [Color.black.opacity(0.0), Color.black.opacity(0.55)],
+                startPoint: .top, endPoint: .bottom
+            )
+            .frame(height: ReaderConstants.scrubberStripHeight
+                        + ReaderConstants.scrubberBottomPadding + 40)
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .allowsHitTesting(false)
+            .opacity(chromeVisible ? 1 : 0)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
+
             // Top bar overlay — sits visually above the reader content.
-            // Geometry invariant: bar (topBarHeight - scrubberStripHeight = 50pt)
-            // + scrubber (scrubberStripHeight = 22pt) = topBarHeight (72pt).
-            // The separator under the buttons is drawn as an OVERLAY (not a
-            // layout Divider) so it adds no height — keeping the scrubber's
-            // bottom edge at window-Y == topBarHeight, inside isInTopBarBand.
-            VStack(spacing: 0) {
-                readerTopBar
-                    .overlay(alignment: .bottom) {
-                        Rectangle()
-                            .fill(Color.primary.opacity(ReaderConstants.toolbarSegmentDividerOpacity))
-                            .frame(height: 1)
-                    }
-                // Scrubber strip — framed at scrubberStripHeight so its bottom
-                // edge sits at window-Y == topBarHeight → inside the band.
+            // topBarHeight = 50pt (bar capsules only; scrubber moved to
+            // floating bottom overlay). The separator is an OVERLAY (not a
+            // layout Divider) so it adds no height. Hairline is white@0.12
+            // (background-independent) — the scrim above provides the real
+            // edge treatment; this is a light seam only.
+            readerTopBar
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.12))
+                        .frame(height: 1)
+                }
+                .opacity(chromeVisible ? 1 : 0)
+                .allowsHitTesting(chromeVisible)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
+
+            // Floating bottom scrubber — sits above the window sill, clears the
+            // resize hot zone and full-screen safe area.
+            VStack {
+                Spacer()
                 PageScrubber(vm: vm)
-                    .frame(height: ReaderConstants.scrubberStripHeight)
                     .padding(.horizontal, 24)
+                    .padding(.bottom, ReaderConstants.scrubberBottomPadding)
             }
+            .opacity(chromeVisible ? 1 : 0)
+            .allowsHitTesting(chromeVisible)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
         }
         .toolbar(.hidden, for: .windowToolbar)
         .ignoresSafeArea(.container, edges: .top)
         .background(FullSizeTitleBarConfigurator())
         .navigationTitle(vm.comic.title)
-        .onAppear { KeyMonitor.shared.start(handler: handleKey); Task { await DCLogger.shared.log("ReaderView.onAppear — readingMode=\(vm.readingMode), currentPage=\(vm.currentPage), savedScrollOffset=\(String(describing: vm.savedScrollOffset))") } }
-        .onDisappear { if library.openComic == nil { KeyMonitor.shared.stop() } }
+        // Expose the reader VM to app-level menu commands via FocusedValues.
+        // Without this, DCApp.commands can't reach the private @StateObject.
+        .focusedSceneValue(\.readerVM, vm)
+        // Keyboard-shortcuts overlay — shown when user presses `?`
+        .overlay {
+            if showShortcutsOverlay {
+                ReaderShortcutsOverlay(isPresented: $showShortcutsOverlay)
+            }
+        }
+        .onAppear {
+            KeyMonitor.shared.start(handler: handleKey)
+            reveal()
+            mouseMovedMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [self] event in
+                guard metalLoupe == nil else { return event }
+                guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return event }
+                let y = event.locationInWindow.y
+                if isInEdgeRevealZone(y: y, windowHeight: window.frame.height, edgeZone: 72) {
+                    reveal()
+                }
+                return event
+            }
+            Task { await DCLogger.shared.log("ReaderView.onAppear — readingMode=\(vm.readingMode), currentPage=\(vm.currentPage), savedScrollOffset=\(String(describing: vm.savedScrollOffset))") }
+        }
+        .onDisappear {
+            if library.openComic == nil { KeyMonitor.shared.stop() }
+            if let m = mouseMovedMonitor { NSEvent.removeMonitor(m); mouseMovedMonitor = nil }
+            idleHideTask?.cancel()
+        }
+        // MED-2: pause the KeyMonitor while the Go-to-page popover is open.
+        // A SwiftUI .popover renders in a child NSWindow, making firstResponder
+        // checks unreliable.  Explicit stop/start is the authoritative guard
+        // that prevents digits 1–4 from switching reading mode while the
+        // numeric text field has focus.  KeyMonitor.start() is guarded by
+        // `monitor == nil`, so re-arming after close is always clean.
+        .onChange(of: goToPageOpen) { _, open in
+            if open {
+                KeyMonitor.shared.stop()
+            } else {
+                KeyMonitor.shared.start(handler: handleKey)
+            }
+        }
     }
 
     /// Height of the reader top bar. Used to inset `modeContent`'s top edge
@@ -129,6 +243,7 @@ struct ReaderView: View {
     private var readerTopBarHeight: CGFloat { ReaderConstants.topBarHeight }
 
     private func handleKey(_ key: MonitoredKey) {
+        reveal()
         let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble
         switch key {
         case .leftArrow, .keyA:
@@ -161,11 +276,35 @@ struct ReaderView: View {
         case .key2:               vm.readingMode = .doublePage;     vm.saveMode()
         case .key3:               vm.readingMode = .verticalScroll; vm.saveMode()
         case .key4:               vm.readingMode = .verticalDouble; vm.saveMode()
+        case .keyR:               vm.toggleReadingDirection()
+        case .keyQuestion:        showShortcutsOverlay.toggle()
         }
     }
 
     private func toggleFullscreen() {
         NSApp.keyWindow?.toggleFullScreen(nil)
+    }
+
+    /// Show chrome and (re)start the 4-second idle-hide timer.
+    /// Called by key presses, edge mouse-move, and on appear.
+    /// Suppressed while a popover is open, VoiceOver is active, or
+    /// `shouldAutoHide` returns false for other reasons.
+    private func reveal() {
+        chromeVisible = true
+        idleHideTask?.cancel()
+        idleHideTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            let voiceOver = NSWorkspace.shared.isVoiceOverEnabled
+            if shouldAutoHide(
+                chromeVisible: chromeVisible,
+                popoverOpen: goToPageOpen,
+                hovering: false,
+                voiceOver: voiceOver
+            ) {
+                chromeVisible = false
+            }
+        }
     }
 
     // MARK: - Mode content
@@ -200,7 +339,12 @@ struct ReaderView: View {
             restorePage: vm.currentPage,
             restoreOffset: nil,
             pageManager: vm.pageManager,
-            topContentInset: readerTopBarHeight,
+            // When chrome is hidden AND the user is at fit-to-window scale,
+            // reclaim the reserved bands so the page fills the full window
+            // (edge-to-edge). Keep the inset when zoomed (scale > 1.01) to
+            // prevent the scroll-into-header / overflow-above-clip bleed bug.
+            topContentInset: (chromeVisible || vm.scale > 1.01) ? readerTopBarHeight : 0,
+            chromeVisible: chromeVisible,
             scrollRequestNonce: vm.scrollRequestNonce,
             onPageChanged: { _ in /* single-page does not scroll between pages */ },
             onOffsetChanged: { _ in /* single-page ignores scroll fraction */ },
@@ -236,7 +380,10 @@ struct ReaderView: View {
             restorePage: vm.currentPage,
             restoreOffset: nil,
             pageManager: vm.pageManager,
-            topContentInset: readerTopBarHeight,
+            // Same edge-to-edge logic as single-page: reclaim inset on
+            // chrome-hide at fit-to-window scale; keep inset when zoomed.
+            topContentInset: (chromeVisible || vm.scale > 1.01) ? readerTopBarHeight : 0,
+            chromeVisible: chromeVisible,
             scrollRequestNonce: vm.scrollRequestNonce,
             onPageChanged: { _ in /* double-page advances via keyboard, not scroll */ },
             onOffsetChanged: { _ in /* double-page ignores scroll fraction */ },
@@ -292,7 +439,12 @@ struct ReaderView: View {
                     return nil
                 }(),
                 pageManager: vm.pageManager,
-                topContentInset: readerTopBarHeight,
+                // Vertical modes now also reclaim the top inset on chrome-hide
+                // so the page fills edge-to-edge (matching single/double behaviour).
+                // Scroll compensation in MetalPageView.updateNSView adjusts the
+                // content offset to prevent a visible jump when the inset changes.
+                topContentInset: chromeVisible ? readerTopBarHeight : 0,
+                chromeVisible: chromeVisible,
                 scrollRequestNonce: vm.scrollRequestNonce,
                 onPageChanged: { page in vm.updateCurrentPage(page) },
                 onOffsetChanged: { fraction in
@@ -322,14 +474,15 @@ struct ReaderView: View {
     private var readerTopBar: some View {
         ReaderToolbar(vm: vm,
                       library: library,
-                      onToggleFullScreen: toggleFullscreen)
+                      onToggleFullScreen: toggleFullscreen,
+                      goToPageOpen: $goToPageOpen)
     }
 }
 
 
 // MARK: - Global key monitor (singleton)
 
-enum MonitoredKey { case leftArrow, rightArrow, upArrow, downArrow, keyA, keyD, keyW, keyS, keyQ, keyE, backspace, key1, key2, key3, key4, keyZ }
+enum MonitoredKey { case leftArrow, rightArrow, upArrow, downArrow, keyA, keyD, keyW, keyS, keyQ, keyE, backspace, key1, key2, key3, key4, keyZ, keyR, keyQuestion }
 
 final class KeyMonitor {
     static let shared = KeyMonitor()
@@ -360,7 +513,9 @@ final class KeyMonitor {
             case (19, _, true):  handler(.key2);       return nil  // 2
             case (20, _, true):  handler(.key3);       return nil  // 3
             case (21, _, true):  handler(.key4);       return nil  // 4
-            case (6,  _, true):  handler(.keyZ);       return nil  // Z
+            case (6,  _, true):  handler(.keyZ);        return nil  // Z
+            case (15, _, true):  handler(.keyR);        return nil  // R
+            case (44, _, true):  handler(.keyQuestion); return nil  // ? (slash key)
             default:             return event
             }
         }

@@ -161,4 +161,27 @@ struct ReadingPositionStore {
         store[url.path] = pages
         defaults.set(store, forKey: bookmarksKey)
     }
+
+    // MARK: - Read-status overrides (per-comic; user intent — NOT cleared by clearAllCache)
+
+    private static let readStatusOverridesKey = "readStatusOverrides"
+
+    /// Returns the manual read-status override for `url`, or nil when absent (auto-derived).
+    static func readStatusOverride(for url: URL, defaults: UserDefaults = .standard) -> ManualStatus? {
+        let store = (defaults.dictionary(forKey: readStatusOverridesKey) as? [String: String]) ?? [:]
+        guard let raw = store[url.standardizedFileURL.path] else { return nil }
+        return ManualStatus(rawValue: raw)
+    }
+
+    /// Persists a manual read-status override for `url`. Pass `nil` to clear (revert to auto-derived).
+    static func setReadStatusOverride(_ status: ManualStatus?, for url: URL, defaults: UserDefaults = .standard) {
+        var store = (defaults.dictionary(forKey: readStatusOverridesKey) as? [String: String]) ?? [:]
+        let key = url.standardizedFileURL.path
+        if let status {
+            store[key] = status.rawValue
+        } else {
+            store.removeValue(forKey: key)
+        }
+        defaults.set(store, forKey: readStatusOverridesKey)
+    }
 }
