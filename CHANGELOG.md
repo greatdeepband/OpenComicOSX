@@ -1,5 +1,12 @@
 # DC Reader — Changelog
 
+## v0.17.1 — 2026-06-21 — reader immersion polish
+
+- **An always-on progress line** at the very bottom edge — a thin cue so you can still see how far through you are when the controls have hidden (right-to-left aware).
+- **Hover-to-keep** — the controls now stay put while the pointer is over them, instead of fading out while you're reaching for a button.
+- **A one-time gesture hint** the first time you open a comic (tap to turn, hold to magnify, move to an edge to bring the controls back, `?` for shortcuts).
+- Internal: the reader view was decomposed for maintainability — no behavior change.
+
 ## v0.17.0 — 2026-06-21 — library backbone + immersive reader
 
 A large release that overhauls both the library and the reader.

@@ -59,6 +59,9 @@ struct ReaderView: View {
     /// Controls the keyboard-shortcuts reference overlay (toggled by `?`).
     @State private var showShortcutsOverlay: Bool = false
 
+    /// First-run gesture coachmark — shown once, gated on UserDefaults.
+    @State private var showCoachmark: Bool = false
+
     /// True while the Go-to-page popover (on the "N / M" count) is open.
     /// ReaderToolbar binds to this so TransportCapsule can raise/lower the
     /// flag.  The .onChange below stops KeyMonitor while the field is active
@@ -73,6 +76,9 @@ struct ReaderView: View {
     @State private var idleHideTask: Task<Void, Never>? = nil
     /// Local NSEvent monitor for .mouseMoved (installed on appear, removed on disappear).
     @State private var mouseMovedMonitor: Any? = nil
+    /// True while the pointer is hovering over the top bar or bottom scrubber.
+    /// Suppresses auto-hide while hovered; restarts the idle timer on hover-exit.
+    @State private var chromeHovered: Bool = false
     /// Reduce-motion environment flag — read from the SwiftUI environment.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -80,115 +86,128 @@ struct ReaderView: View {
         _vm = StateObject(wrappedValue: ReaderViewModel(comic: comic))
     }
 
-    var body: some View {
-        ZStack(alignment: .top) {
-            // Reader content fills the full window height. The NSScrollView
-            // inside MetalPageView therefore stretches from the top of the
-            // window's content view to the bottom — avoiding the macOS 26
-            // (Tahoe) bug where a non-full-height NSScrollView lets its
-            // content render OVER anything above it in the same layout tree.
-            // See: https://troz.net/post/2026/appkit-table-scroll-bug-in-macos-tahoe/
-            GeometryReader { geo in
-                ZStack {
-                    // Immersive black behind the page — the Metal layer is carved
-                    // out in the contentInset bands (top/bottom), so this is what
-                    // shows there. Was windowBackgroundColor (WHITE in light mode),
-                    // which made the auto-hide reveal ugly white bars; black blends
-                    // into the reader's letterbox so hidden chrome = clean black.
-                    Color.black
-                    // NOTE: no .padding(.top, readerTopBarHeight) here —
-                    // applying SwiftUI padding frames the NSScrollView at
-                    // Y=topBarHeight, which defeats the macOS 26 Tahoe
-                    // scroll-into-header workaround (the scroll view must
-                    // stretch top-to-bottom of the window).
-                    // MetalPageView reserves the top-bar band internally
-                    // via NSScrollView.contentInsets.
-                    modeContent(containerSize: geo.size)
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel("Page \(vm.currentPage+1) of \(vm.pageCount), \(vm.comic.title)")
-                        .onChange(of: vm.currentPage) { _, _ in
-                            NSAccessibility.post(
-                                element: (NSApp.keyWindow ?? NSApp.mainWindow) as Any,
-                                notification: .announcementRequested,
-                                userInfo: [
-                                    .announcement: "Page \(vm.currentPage+1) of \(vm.pageCount)",
-                                    .priority: NSAccessibilityPriorityLevel.medium.rawValue
-                                ]
-                            )
-                        }
-                    // Loupe overlay — sits in the same ZStack so the top bar
-                    // (rendered above in the outer ZStack) covers it as the
-                    // cursor approaches the top, and the window edge clips
-                    // the circle on every other side.
-                    if let loupe = metalLoupe {
-                        MagnifierView(
-                            image: loupe.image,
-                            cursorInImageView: loupe.cursorInImage,
-                            imageViewSize: loupe.imageViewSize
+    // MARK: - Body layers
+    // `body` composes these (bottom→top in the ZStack). Extracted from `body`
+    // so the view tree type-checks quickly and each layer reads on its own —
+    // pure structure, no behavior change (all state stays on `self`).
+
+    /// Full-bleed Metal page content + the loupe magnifier overlay, inside a
+    /// GeometryReader that feeds the container size to the view model. The
+    /// NSScrollView stretches the full window height (no SwiftUI top padding) so
+    /// the macOS 26 (Tahoe) scroll-into-header bug can't fire; the immersive
+    /// black shows through the carved contentInset bands when the chrome hides.
+    private var pageContentLayer: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black
+                modeContent(containerSize: geo.size)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Page \(vm.currentPage+1) of \(vm.pageCount), \(vm.comic.title)")
+                    .onChange(of: vm.currentPage) { _, _ in
+                        NSAccessibility.post(
+                            element: (NSApp.keyWindow ?? NSApp.mainWindow) as Any,
+                            notification: .announcementRequested,
+                            userInfo: [
+                                .announcement: "Page \(vm.currentPage+1) of \(vm.pageCount)",
+                                .priority: NSAccessibilityPriorityLevel.medium.rawValue
+                            ]
                         )
-                        .position(x: loupe.position.x, y: loupe.position.y)
-                        .allowsHitTesting(false)
                     }
+                if let loupe = metalLoupe {
+                    MagnifierView(
+                        image: loupe.image,
+                        cursorInImageView: loupe.cursorInImage,
+                        imageViewSize: loupe.imageViewSize
+                    )
+                    .position(x: loupe.position.x, y: loupe.position.y)
+                    .allowsHitTesting(false)
                 }
-                // .clipped() removed — was suspected to cause black state on
-                // mode switch. The window itself clips, and the loupe overlay
-                // is naturally bounded by the SwiftUI hierarchy.
-                .onChange(of: geo.size) { _, newSize in vm.containerSize = newSize }
-                .onAppear { vm.containerSize = geo.size }
             }
+            .onChange(of: geo.size) { _, newSize in vm.containerSize = newSize }
+            .onAppear { vm.containerSize = geo.size }
+        }
+    }
 
-            // Top scrim — darkens under the capsule strip so glass capsules are
-            // self-bounding over bright art (Books/TV pattern). Invisible over
-            // the black letterbox (black on black = no effect). Fades with chrome.
-            LinearGradient(
-                colors: [Color.black.opacity(0.55), Color.black.opacity(0.0)],
-                startPoint: .top, endPoint: .bottom
-            )
-            .frame(height: ReaderConstants.topBarHeight + 24)
-            .frame(maxHeight: .infinity, alignment: .top)
-            .allowsHitTesting(false)
-            .opacity(chromeVisible ? 1 : 0)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
+    /// Top scrim — darkens under the capsule strip so glass capsules are
+    /// self-bounding over bright art (Books/TV pattern); invisible over the
+    /// black letterbox. Fades with the chrome.
+    private var topScrim: some View {
+        LinearGradient(
+            colors: [Color.black.opacity(0.55), Color.black.opacity(0.0)],
+            startPoint: .top, endPoint: .bottom
+        )
+        .frame(height: ReaderConstants.topBarHeight + 24)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .allowsHitTesting(false)
+        .opacity(chromeVisible ? 1 : 0)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
+    }
 
-            // Bottom scrim — darkens under the floating scrubber. Fades with chrome.
-            LinearGradient(
-                colors: [Color.black.opacity(0.0), Color.black.opacity(0.55)],
-                startPoint: .top, endPoint: .bottom
-            )
-            .frame(height: ReaderConstants.scrubberStripHeight
-                        + ReaderConstants.scrubberBottomPadding + 40)
-            .frame(maxHeight: .infinity, alignment: .bottom)
-            .allowsHitTesting(false)
-            .opacity(chromeVisible ? 1 : 0)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
+    /// Bottom scrim — darkens under the floating scrubber. Fades with the chrome.
+    private var bottomScrim: some View {
+        LinearGradient(
+            colors: [Color.black.opacity(0.0), Color.black.opacity(0.55)],
+            startPoint: .top, endPoint: .bottom
+        )
+        .frame(height: ReaderConstants.scrubberStripHeight
+                    + ReaderConstants.scrubberBottomPadding + 40)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .allowsHitTesting(false)
+        .opacity(chromeVisible ? 1 : 0)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
+    }
 
-            // Top bar overlay — sits visually above the reader content.
-            // topBarHeight = 50pt (bar capsules only; scrubber moved to
-            // floating bottom overlay). The separator is an OVERLAY (not a
-            // layout Divider) so it adds no height. Hairline is white@0.12
-            // (background-independent) — the scrim above provides the real
-            // edge treatment; this is a light seam only.
-            readerTopBar
-                .overlay(alignment: .bottom) {
-                    Rectangle()
-                        .fill(Color.white.opacity(0.12))
-                        .frame(height: 1)
-                }
-                .opacity(chromeVisible ? 1 : 0)
-                .allowsHitTesting(chromeVisible)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
-
-            // Floating bottom scrubber — sits above the window sill, clears the
-            // resize hot zone and full-screen safe area.
-            VStack {
-                Spacer()
-                PageScrubber(vm: vm)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, ReaderConstants.scrubberBottomPadding)
+    /// Top bar (the capsule strip) + its hairline seam. Fades + disables hit
+    /// testing with the chrome; hovering keeps the chrome up, leaving restarts
+    /// the idle-hide timer.
+    private var topBarOverlay: some View {
+        readerTopBar
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(height: 1)
             }
             .opacity(chromeVisible ? 1 : 0)
             .allowsHitTesting(chromeVisible)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
+            .onHover { hovering in
+                chromeHovered = hovering
+                if !hovering { reveal() }
+            }
+    }
+
+    /// Floating bottom scrubber — sits above the window sill, clearing the
+    /// resize hot zone + full-screen safe area. Same fade/hover behavior as the
+    /// top bar.
+    private var bottomScrubberOverlay: some View {
+        VStack {
+            Spacer()
+            PageScrubber(vm: vm)
+                .padding(.horizontal, 24)
+                .padding(.bottom, ReaderConstants.scrubberBottomPadding)
+        }
+        .opacity(chromeVisible ? 1 : 0)
+        .allowsHitTesting(chromeVisible)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: chromeVisible)
+        .onHover { hovering in
+            chromeHovered = hovering
+            if !hovering { reveal() }
+        }
+    }
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            // Bottom → top: page + loupe, the two chrome scrims, the top bar,
+            // the floating scrubber, then the always-on progress hairline (kept
+            // OUTSIDE the chrome opacity group so it persists when chrome hides —
+            // the only position cue in full-bleed mode). Each layer is a computed
+            // property above.
+            pageContentLayer
+            topScrim
+            bottomScrim
+            topBarOverlay
+            bottomScrubberOverlay
+            progressHairline
         }
         .toolbar(.hidden, for: .windowToolbar)
         .ignoresSafeArea(.container, edges: .top)
@@ -203,6 +222,11 @@ struct ReaderView: View {
                 ReaderShortcutsOverlay(isPresented: $showShortcutsOverlay)
             }
         }
+        .overlay {
+            if showCoachmark && !showShortcutsOverlay {
+                ReaderCoachmark(isPresented: $showCoachmark)
+            }
+        }
         .onAppear {
             KeyMonitor.shared.start(handler: handleKey)
             reveal()
@@ -214,6 +238,9 @@ struct ReaderView: View {
                     reveal()
                 }
                 return event
+            }
+            if !UserDefaults.hasSeenReaderCoachmark {
+                showCoachmark = true
             }
             Task { await DCLogger.shared.log("ReaderView.onAppear — readingMode=\(vm.readingMode), currentPage=\(vm.currentPage), savedScrollOffset=\(String(describing: vm.savedScrollOffset))") }
         }
@@ -244,6 +271,11 @@ struct ReaderView: View {
 
     private func handleKey(_ key: MonitoredKey) {
         reveal()
+        if showCoachmark {
+            showCoachmark = false
+            UserDefaults.standard.set(true, forKey: "hasSeenReaderCoachmark")
+            return
+        }
         let isVertical = vm.readingMode == .verticalScroll || vm.readingMode == .verticalDouble
         switch key {
         case .leftArrow, .keyA:
@@ -296,10 +328,12 @@ struct ReaderView: View {
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }
             let voiceOver = NSWorkspace.shared.isVoiceOverEnabled
+            // `chromeHovered` is read here (not captured at Task creation) so
+            // the check reflects the state AT fire-time, not when reveal() ran.
             if shouldAutoHide(
                 chromeVisible: chromeVisible,
                 popoverOpen: goToPageOpen,
-                hovering: false,
+                hovering: chromeHovered,
                 voiceOver: voiceOver
             ) {
                 chromeVisible = false
@@ -476,6 +510,34 @@ struct ReaderView: View {
                       library: library,
                       onToggleFullScreen: toggleFullscreen,
                       goToPageOpen: $goToPageOpen)
+    }
+
+    /// Always-on 1.5pt progress hairline — stays visible when chrome is hidden
+    /// so the user always has a position cue in full-bleed mode.
+    @ViewBuilder
+    private var progressHairline: some View {
+        GeometryReader { geo in
+            let frac = scrubberFraction(
+                forPage: vm.currentPage,
+                pageCount: vm.pageCount,
+                isRTL: vm.isRTL
+            )
+            ZStack(alignment: .bottomLeading) {
+                // Faint track — visible over both black and bright art
+                Rectangle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .frame(height: 1.5)
+                // Filled portion
+                Rectangle()
+                    .fill(Color.white.opacity(0.85))
+                    .shadow(color: .black.opacity(0.6), radius: 1, x: 0, y: 0)
+                    .frame(width: max(frac * geo.size.width, 0), height: 1.5)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .allowsHitTesting(false)
     }
 }
 
